@@ -1,0 +1,7 @@
+# Build artifacts — build.bat regenerates both
+NVENCForge.exe
+embedded_source.zip
+
+# Logs and local test leftovers
+*.log
+output/

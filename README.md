@@ -132,7 +132,7 @@ Track selection is interactive (multichannel audio offers an optional stereo dow
 
 ## ⚙️ Configuration
 
-Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created, never overwritten, invalid values fall back individually with a warning):
+Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched):
 
 CQ quality level, bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
 

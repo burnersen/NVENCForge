@@ -94,8 +94,8 @@ CONFIGURATION
   Encoder defaults live in "NVENCForge_Config.ini" next to the
   exe (created on first run). Edit it to change CQ, presets,
   resolution cap, audio bitrate, etc. Invalid values are reported
-  at startup and fall back to their defaults individually; your
-  other settings stay untouched.
+  at startup and reset to their default in the file individually;
+  your other settings stay untouched.
 
 OUTPUT & REQUIREMENTS
   Output folder:  output (next to the processed files)

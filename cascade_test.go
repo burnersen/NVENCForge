@@ -2,7 +2,12 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func labels(at []cascadeAttempt) []string {
 	out := make([]string, len(at))
@@ -14,9 +19,9 @@ func labels(at []cascadeAttempt) []string {
 
 func TestBuildCascadeAttempts(t *testing.T) {
 	cases := []struct {
-		name                       string
+		name                        string
 		hasSubs, hasAudio, pureCopy bool
-		want                       int
+		want                        int
 	}{
 		{"subs+audio", true, true, false, 5},
 		{"no subs", false, true, false, 3},
@@ -63,5 +68,66 @@ func TestClassifyFFmpegError(t *testing.T) {
 		if got := classifyFFmpegError(c.msg); got != c.want {
 			t.Errorf("classify(%q) = %d, want %d", c.msg, got, c.want)
 		}
+	}
+}
+
+func TestResetInvalidConfigLines(t *testing.T) {
+	// INI with invalid values (targetCQ, maxResolution, nvencPreset), a valid
+	// value (maxBitrate1080p), a comment and an unknown key. Only the invalid
+	// lines must change; everything else must stay byte-for-byte.
+	ini := "# my notes\n" +
+		"targetCQ=77\n" +
+		"maxBitrate1080p=12000\n" +
+		"maxResolution=108\n" +
+		"nvencPreset=p8\n" +
+		"unknownKey=keepme\n"
+	path := filepath.Join(t.TempDir(), "NVENCForge_Config.ini")
+	if err := os.WriteFile(path, []byte(ini), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, invalids, _ := parseAppConfig(path)
+	if len(invalids) != 3 {
+		t.Fatalf("got %d invalid settings, want 3 (%v)", len(invalids), invalids)
+	}
+	if err := resetInvalidConfigLines(path, invalids); err != nil {
+		t.Fatalf("reset failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"# my notes",            // comment untouched
+		"targetCQ=26",           // reset to default
+		"maxBitrate1080p=12000", // valid value untouched
+		"maxResolution=1080",    // reset to default
+		"nvencPreset=p5",        // reset to default
+		"unknownKey=keepme",     // unknown key untouched
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("config after reset missing %q\n---\n%s", want, got)
+		}
+	}
+	// Line-precise negative check: "maxResolution=1080" must NOT count as a
+	// surviving "maxResolution=108".
+	lines := strings.Split(strings.ReplaceAll(got, "\r\n", "\n"), "\n")
+	hasLine := func(s string) bool {
+		for _, l := range lines {
+			if l == s {
+				return true
+			}
+		}
+		return false
+	}
+	if hasLine("targetCQ=77") || hasLine("maxResolution=108") || hasLine("nvencPreset=p8") {
+		t.Errorf("an invalid value survived the reset:\n%s", got)
+	}
+
+	// Second pass: the file is now clean, nothing left to report or rewrite.
+	if _, invalids2, _ := parseAppConfig(path); len(invalids2) != 0 {
+		t.Errorf("after reset still %d invalids: %v", len(invalids2), invalids2)
 	}
 }

@@ -36,20 +36,20 @@ type AppConfig struct {
 // ----------------------------------------------------------------------------
 
 type AppSettings struct {
-	targetCQ             int
-	maxBitrate1080p      int64
-	maxBitrateOriginal   int64
-	maxResolution        int
-	nvencPreset          string
-	nvencLookahead       int
-	bFrames              int
-	casStrength          float64
-	audioKbpsPerChannel  int
-	fallbackAudioBitrate int
-	autoShutdown         bool
-	extraFilenameChars   string
-	av1TargetCQ          int
-	av1MaxBitrate1080p   int64
+	targetCQ              int
+	maxBitrate1080p       int64
+	maxBitrateOriginal    int64
+	maxResolution         int
+	nvencPreset           string
+	nvencLookahead        int
+	bFrames               int
+	casStrength           float64
+	audioKbpsPerChannel   int
+	fallbackAudioBitrate  int
+	autoShutdown          bool
+	extraFilenameChars    string
+	av1TargetCQ           int
+	av1MaxBitrate1080p    int64
 	av1MaxBitrateOriginal int64
 }
 
@@ -57,27 +57,29 @@ var appSettings = defaultAppSettings()
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		targetCQ:             26,
-		maxBitrate1080p:      8000,
-		maxBitrateOriginal:   18000,
-		maxResolution:        1080,
-		nvencPreset:          "p5",
-		nvencLookahead:       32,
-		bFrames:              4,
-		casStrength:          0.4,
-		audioKbpsPerChannel:  96,
-		fallbackAudioBitrate: 128,
-		autoShutdown:         false,
-		extraFilenameChars:   "",
-		av1TargetCQ:          32,
-		av1MaxBitrate1080p:   6000,
+		targetCQ:              26,
+		maxBitrate1080p:       8000,
+		maxBitrateOriginal:    18000,
+		maxResolution:         1080,
+		nvencPreset:           "p5",
+		nvencLookahead:        32,
+		bFrames:               4,
+		casStrength:           0.4,
+		audioKbpsPerChannel:   96,
+		fallbackAudioBitrate:  128,
+		autoShutdown:          false,
+		extraFilenameChars:    "",
+		av1TargetCQ:           32,
+		av1MaxBitrate1080p:    6000,
 		av1MaxBitrateOriginal: 13000,
 	}
 }
 
-// loadOrCreateAppConfig legt die INI bei Fehlen an. Ungültige Werte fallen
-// einzeln auf ihren Default zurück (mit Warnung); die Datei selbst wird nie
-// überschrieben, damit die übrigen Nutzer-Einstellungen erhalten bleiben.
+// loadOrCreateAppConfig legt die INI bei Fehlen an. Ungültige Werte werden
+// einzeln auf ihren Default zurückgesetzt – mit Warnung UND direkt in der INI
+// korrigiert (nur die betroffenen Zeilen); gültige Werte, Kommentare und
+// unbekannte Keys bleiben unangetastet. Geschrieben wird nur, wenn überhaupt
+// ein ungültiger Wert gefunden wurde.
 func loadOrCreateAppConfig() {
 	appSettings = defaultAppSettings()
 	exePath, err := os.Executable()
@@ -93,22 +95,113 @@ func loadOrCreateAppConfig() {
 		return
 	}
 
-	parsed, warns := parseAppConfig(path)
+	parsed, invalids, warns := parseAppConfig(path)
 	for _, w := range warns {
 		pWarn.Println("Config: " + w)
+	}
+	if len(invalids) > 0 {
+		defaults := defaultConfigStrings()
+		writeErr := resetInvalidConfigLines(path, invalids)
+		for _, iv := range invalids {
+			switch {
+			case writeErr != nil:
+				pWarn.Printf("Config: %s=%q invalid - default value kept (config not writable: %v)\n",
+					iv.key, iv.val, writeErr)
+			default:
+				pWarn.Printf("Config: %s=%q invalid - reset to default (%s) in config file\n",
+					iv.key, iv.val, defaults[iv.key])
+			}
+		}
 	}
 	appSettings = parsed
 }
 
-// parseAppConfig liest mit Bounds-Checking. Jeder ungültige Wert wird einzeln
-// auf seinen Default zurückgesetzt und als Warnung gemeldet; gültige Werte
-// bleiben erhalten. Unbekannte Keys werden ignoriert (vorwärtskompatibel).
-func parseAppConfig(path string) (AppSettings, []string) {
+// invalidSetting hält einen Key, dessen Wert die Validierung nicht bestanden
+// hat, samt dem Originalwert – für Warnung und Zurückschreiben in die INI.
+type invalidSetting struct{ key, val string }
+
+// defaultConfigStrings liefert für jeden geprüften Key die kanonische
+// INI-Schreibweise seines Defaults. Maßgeblich dafür, welche Keys überhaupt
+// zurückgeschrieben werden (extraFilenameChars ist bewusst NICHT enthalten).
+func defaultConfigStrings() map[string]string {
+	d := defaultAppSettings()
+	return map[string]string{
+		"targetCQ":              strconv.Itoa(d.targetCQ),
+		"maxBitrate1080p":       strconv.FormatInt(d.maxBitrate1080p, 10),
+		"maxBitrateOriginal":    strconv.FormatInt(d.maxBitrateOriginal, 10),
+		"maxResolution":         strconv.Itoa(d.maxResolution),
+		"nvencPreset":           d.nvencPreset,
+		"nvencLookahead":        strconv.Itoa(d.nvencLookahead),
+		"bFrames":               strconv.Itoa(d.bFrames),
+		"casStrength":           strconv.FormatFloat(d.casStrength, 'g', -1, 64),
+		"audioKbpsPerChannel":   strconv.Itoa(d.audioKbpsPerChannel),
+		"fallbackAudioBitrate":  strconv.Itoa(d.fallbackAudioBitrate),
+		"autoShutdown":          strconv.FormatBool(d.autoShutdown),
+		"av1TargetCQ":           strconv.Itoa(d.av1TargetCQ),
+		"av1MaxBitrate1080p":    strconv.FormatInt(d.av1MaxBitrate1080p, 10),
+		"av1MaxBitrateOriginal": strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
+	}
+}
+
+// resetInvalidConfigLines setzt in der INI ausschließlich den Wert jeder
+// ungültigen Zeile auf ihren Default zurück. Kommentare, gültige Werte und
+// unbekannte Keys bleiben unangetastet; die linke Seite (Key inkl. Formatierung)
+// und die ursprünglichen Zeilenenden bleiben erhalten. No-op, wenn nichts
+// zurückzusetzen ist.
+func resetInvalidConfigLines(path string, invalids []invalidSetting) error {
+	if len(invalids) == 0 {
+		return nil
+	}
+	defaults := defaultConfigStrings()
+	resetKey := make(map[string]bool, len(invalids))
+	for _, iv := range invalids {
+		if _, ok := defaults[iv.key]; ok {
+			resetKey[iv.key] = true
+		}
+	}
+	if len(resetKey) == 0 {
+		return nil // nur Keys ohne Default-Rückschreibung (z. B. extraFilenameChars)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(raw)
+	crlf := strings.Contains(text, "\r\n")
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		left, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if resetKey[strings.TrimSpace(left)] {
+			lines[i] = left + "=" + defaults[strings.TrimSpace(left)]
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if crlf {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+	return os.WriteFile(path, []byte(out), 0644)
+}
+
+// parseAppConfig liest mit Bounds-Checking. Jeder ungültige Wert wird als
+// invalidSetting zurückgegeben – der Caller meldet ihn UND schreibt den Default
+// in die INI zurück. Gültige Werte bleiben erhalten, unbekannte Keys werden
+// ignoriert (vorwärtskompatibel). warns sind sonstige Hinweise (z. B. Zeilen
+// ohne '='), die nichts zurückschreiben.
+func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 	s := defaultAppSettings()
 	var warns []string
+	var invalids []invalidSetting
 	f, err := os.Open(path)
 	if err != nil {
-		return s, []string{"configuration not readable - using defaults"}
+		return s, invalids, []string{"configuration not readable - using defaults"}
 	}
 	defer f.Close()
 
@@ -119,7 +212,7 @@ func parseAppConfig(path string) (AppSettings, []string) {
 	validRes := map[int]bool{720: true, 1080: true, 1440: true, 2160: true}
 
 	bad := func(key, val string) {
-		warns = append(warns, fmt.Sprintf("%s=%q invalid - default value kept", key, val))
+		invalids = append(invalids, invalidSetting{key: key, val: val})
 	}
 
 	sc := bufio.NewScanner(f)
@@ -247,7 +340,7 @@ func parseAppConfig(path string) (AppSettings, []string) {
 	if err := sc.Err(); err != nil {
 		warns = append(warns, "configuration only partially readable: "+err.Error())
 	}
-	return s, warns
+	return s, invalids, warns
 }
 
 // writeDefaultAppConfig schreibt die komplette, kommentierte Standard-INI.
@@ -256,8 +349,8 @@ func writeDefaultAppConfig(path string) error {
 	content := fmt.Sprintf(`# NVENCForge Configuration
 # =====================================================================
 # This file controls the encoder parameters. Invalid values are reported
-# at startup and fall back to their defaults individually - all other
-# settings stay in effect and the file is never modified.
+# at startup and reset to their default right here in the file (only the
+# affected lines); all valid settings and comments stay untouched.
 # Lines starting with # are comments. Format:  key=value
 
 # Constant Quality (CQ). Lower = better quality, larger file.

@@ -43,6 +43,10 @@ CONVERSION OPTIONS
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
+  -keep          Keep the original files: after a successful
+                 conversion they are NOT moved to the recycle bin.
+                 The output lives in its own folder, so nothing is
+                 overwritten. Use this if you want both files.
   -shutdown      Shut the PC down 30 s after the batch finishes
                  ("shutdown /a" cancels it).
   Options can be combined, e.g.:  -original -copyaudio -shutdown

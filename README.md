@@ -73,6 +73,7 @@ NVENCForge.exe -streams [files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
+| `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-streams` | Stream toolkit (split / extract / merge); must be the first argument |
 

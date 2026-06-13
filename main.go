@@ -635,6 +635,11 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("AV1 mode enabled: encoding with av1_nvenc instead of H.265.")
 			continue
 		}
+		if strings.EqualFold(arg, "-keep") {
+			cfg.keepSource = true
+			pInfo.Println("Keep-source mode enabled: originals are NOT moved to the recycle bin.")
+			continue
+		}
 		if len(arg) > 1 && arg[0] == '-' {
 			if _, errStat := os.Stat(arg); os.IsNotExist(errStat) {
 				if n, err := strconv.ParseInt(arg[1:], 10, 64); err == nil && n > 0 {
@@ -650,7 +655,7 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 					pWarn.Println("'-streams' must be the FIRST argument — ignored here.")
 					pWarn.Println("Example: NVENCForge.exe -streams file.mkv")
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -orig/-original, -copyaudio/-ca, -av1, -shutdown, -streams\n", arg)
+					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -orig/-original, -copyaudio/-ca, -av1, -keep, -shutdown, -streams\n", arg)
 				}
 				continue
 			}
@@ -1103,6 +1108,8 @@ func main() {
 		pterm.Gray("  >>  ") + "Copy audio 1:1 (no AAC re-encode)\n" +
 		pterm.LightYellow("• NVENCForge.exe -av1 <files>      ") +
 		pterm.Gray("  >>  ") + "Encode AV1 instead of H.265 (RTX 40+)\n" +
+		pterm.LightYellow("• NVENCForge.exe -keep <files>    ") +
+		pterm.Gray("   >>  ") + "Keep originals (don't move to recycle bin)\n" +
 		pterm.LightYellow("• NVENCForge.exe -shutdown        ") +
 		pterm.Gray("   >>  ") + "Shut down PC when finished\n" +
 		pterm.LightYellow("• NVENCForge.exe -streams <files> ") +

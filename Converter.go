@@ -401,6 +401,20 @@ func removeOrRename(path string) {
 	pWarn.Printf("Corrupt output blocked → marker set: %s\n", filepath.Base(marker))
 }
 
+// retireOriginal disposes of a successfully converted source file. By default
+// it goes to the recycle bin (restorable); with -keep (cfg.keepSource) the
+// original is left exactly where it is. The output already lives in its own
+// folder, so keeping the source can never overwrite anything.
+func retireOriginal(cfg *AppConfig, filePath string) {
+	if cfg.keepSource {
+		pInfo.Printf("Original kept (-keep): %s\n", filepath.Base(filePath))
+		return
+	}
+	if err := sendToRecycleBin(filePath); err != nil {
+		pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
+	}
+}
+
 // ----------------------------------------------------------------------------
 // processFile: main per-file processing logic
 // ----------------------------------------------------------------------------
@@ -941,9 +955,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		if err := copyTimestamps(filePath, mkvFile); err != nil {
 			pWarn.Printf("Could not transfer file timestamps: %v\n", err)
 		}
-		if err := sendToRecycleBin(filePath); err != nil {
-			pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
-		}
+		retireOriginal(cfg, filePath)
 		result.OutputFile = mkvFile
 		result.SavedMB = 0
 		result.Success = true
@@ -979,8 +991,8 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		result.NoAudio = true
 		pWarn.Printf("Converted WITHOUT audio (fallback) — original kept: %s\n",
 			filepath.Base(filePath))
-	} else if err := sendToRecycleBin(filePath); err != nil {
-		pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
+	} else {
+		retireOriginal(cfg, filePath)
 	}
 	result.OutputFile = outputFile
 	result.SavedMB = savedMB

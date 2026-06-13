@@ -26,6 +26,7 @@ type AppConfig struct {
 	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 18000k
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
+	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 

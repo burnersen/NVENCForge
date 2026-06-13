@@ -17,7 +17,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 **[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/T5G0219GA6)**
 
-<img src=".github/screenshot.png" alt="NVENCForge converting a 4K HDR clip: 266 MB in, 59 MB out, HDR detected and passed through" width="840">
+<img src=".github/screenshot.png" alt="NVENCForge converting a 4K HDR clip with -keep: 266 MB in, 59 MB out, HDR detected and passed through, original kept" width="840">
 
 </div>
 

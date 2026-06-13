@@ -2,6 +2,18 @@
 NVENCForge.exe
 embedded_source.zip
 
+# Bundled tools — NEVER commit these (licensing); the program downloads them
+ffmpeg.exe
+ffprobe.exe
+
+# Runtime files the program writes next to the exe (e.g. when run from here)
+NVENCForge_Config.ini
+NVENCForge_Help.txt
+SRTCleaner_config.txt
+
+# Self-extracted embedded source (created when the exe runs in this folder)
+/sourcecode/
+
 # Logs and local test leftovers
 *.log
 output/

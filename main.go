@@ -43,6 +43,10 @@ import (
 	"github.com/pterm/pterm"
 )
 
+// appVersion is shown in the startup header so the running build is obvious.
+// Keep it in sync with the git tag / GitHub release on every release.
+const appVersion = "1.1.2"
+
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
 // ----------------------------------------------------------------------------
@@ -1097,7 +1101,7 @@ func main() {
 		WithFullWidth().
 		WithBackgroundStyle(pterm.NewStyle(pterm.BgBlue)).
 		WithTextStyle(pterm.NewStyle(pterm.FgLightWhite, pterm.Bold)).
-		Println("NVENCForge — H265 NVENC Converter")
+		Println("NVENCForge v" + appVersion + " — H265 NVENC Converter")
 	fmt.Println()
 
 	tipps := pterm.LightYellow("• NVENCForge.exe -10000 video.mp4 ") +

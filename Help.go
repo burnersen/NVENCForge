@@ -29,6 +29,10 @@ QUICK START
   current folder. Converted files are written to an "output"
   subfolder; after a successful conversion the original is moved
   to the recycle bin (restorable from there).
+  Files already efficiently compressed are repackaged instead of
+  re-encoded (the output keeps its codec, e.g. ".h264.mkv") - a
+  re-encode would only make them bigger. Already-processed files
+  are detected and skipped, so running a second time is safe.
 
 CONVERSION OPTIONS
   -NNNN          Set the maximum target bitrate in kbit/s.

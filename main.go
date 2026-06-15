@@ -45,7 +45,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.1.3"
+const appVersion = "1.1.4"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -71,8 +71,11 @@ var videoExtensions = map[string]bool{
 	".m4v": true, ".mts": true, ".m2ts": true,
 }
 
-var skipSuffixes = []string{".h265", ".remux", ".av1"}
-var skipInputSuffixes = []string{".h265", ".remux", ".preview", ".av1"}
+// skipSuffixes / skipInputSuffixes recognise NVENCForge's own outputs so a
+// re-run never re-encodes an already-processed file. They MUST list every suffix
+// remuxSuffix() can emit (.h265/.h264/.av1) plus the legacy ".remux" fallback.
+var skipSuffixes = []string{".h265", ".h264", ".remux", ".av1"}
+var skipInputSuffixes = []string{".h265", ".h264", ".remux", ".preview", ".av1"}
 
 // ----------------------------------------------------------------------------
 // Filename normalisation (integrated from CleanVideoNames)

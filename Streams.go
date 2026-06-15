@@ -418,7 +418,7 @@ func showUsage() {
 // ----------------------------------------------------------------------------
 
 // trimToolSuffixes removes trailing suffixes NVENCForge itself appends
-// (.sub/.subN/.subbed/.h265/.remux/.video/.preview) so output names do not
+// (.sub/.subN/.subbed/.h265/.h264/.av1/.remux/.video/.preview) so output names do not
 // grow longer with every split/merge cycle
 // ("Movie.sub.h265.subbed.h265" → "Movie").
 func trimToolSuffixes(base string) string {
@@ -435,7 +435,7 @@ func trimToolSuffixes(base string) string {
 			}
 		}
 		switch {
-		case tok == "sub" || tok == "subbed" || tok == "h265" || tok == "av1" ||
+		case tok == "sub" || tok == "subbed" || tok == "h265" || tok == "h264" || tok == "av1" ||
 			tok == "remux" || tok == "video" || tok == "nosound" || tok == "joined" ||
 			tok == "preview" || isSubN:
 			base = base[:idx]

@@ -48,7 +48,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 
 ## ✨ What NVENCForge does
 
-- 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ) — the encoder takes only the bitrate that quality needs, capped by a sensible per-mode ceiling, with no fixed-bitrate butchering.
+- 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -56,6 +56,24 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 - 🎛️ **DaVinci-Resolve-safe audio.** DTS, TrueHD, EAC3, FLAC, Opus & >5.1 layouts are converted to AAC that Resolve actually imports (≤5.1, ≤48 kHz), or kept 1:1 with `-copyaudio`.
 - 🔁 **Ships with its own source.** The EXE carries its own source code (Go `embed`) and extracts it on first run: the source it was built from is right there inside the binary.
 - 🌍 **Unicode-safe filename cleanup.** `Movie (2016) [BluRay] x264.mkv` → `Movie.2016.h265.mkv`. Every script in the world survives, release-group noise doesn't.
+
+---
+
+## 🎯 Will my files actually get smaller?
+
+Short answer: **yes — and never bigger.** Before touching anything, NVENCForge reads each file and picks one of two paths:
+
+- **Worth re-encoding?** It shrinks the video at a constant quality level, with a safety cap calculated from the source's own bitrate (it aims for clearly below the original). So a real conversion is reliably **smaller than the source** — and if a result ever came out bigger, it's thrown away automatically.
+- **Already lean?** Some files are so efficiently compressed that re-encoding would only make them *bigger* (yes, that really happens). NVENCForge spots this up front and simply repackages the file in seconds instead of wasting minutes of GPU time on a pointless encode.
+
+You can tell the two apart at a glance by the filename:
+
+| Output name | What happened |
+|---|---|
+| `Movie.h265.mkv` | Re-encoded to H.265 (smaller) |
+| `Movie.h264.mkv` | Left in its codec, just repackaged (already efficient) |
+
+Already-processed files are recognized by name and content, so running NVENCForge twice on the same folder never converts anything a second time.
 
 ---
 

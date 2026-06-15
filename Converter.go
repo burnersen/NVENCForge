@@ -624,14 +624,22 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 
 	bitrateKbps := determineBitrateKbps(stats)
-	// Pure constant-quality rate control: -cq governs the picture and the encoder
-	// takes only as much bitrate as the CQ target needs. maxrate is nothing more
-	// than a per-mode safety ceiling (1080p vs -original) for the rare complex
-	// peak — never a per-file target derived from the source. This replaces the
-	// old source-derived sliding scale, which could throttle a mid-bitrate source
-	// below its CQ quality goal. determineBitrateKbps is still used below to spot
-	// sources already small enough to just remux/skip.
-	calcKbps := effCfg.maxBitrateKbps
+	doScale := needsScaling(cfg, stats.Width, stats.Height)
+
+	// Source-derived bitrate cap (restored from 1.1.2, refined with the video
+	// expert's matrix): aim for 80% of the source video bitrate so the re-encode is
+	// guaranteed to shrink the file, never below the per-resolution floor, never
+	// above the per-mode ceiling. -cq (unchanged) still drives the picture; calcKbps
+	// only feeds -maxrate/-bufsize. The fixed per-mode ceiling used in 1.1.3 never
+	// bit for low/mid-bitrate sources, so -cq alone let those files grow — the
+	// post-encode safety net then discarded the encode and remuxed, so the tool
+	// stopped actually compressing. The cap fixes that at the source.
+	calcKbps := cappedTargetKbps(bitrateKbps, outputHeightFor(stats, doScale), effCfg.maxBitrateKbps)
+	// reEncodeWorthwhile: if we are NOT downscaling and even the floor cannot
+	// undercut the source (calcKbps ≥ source), a re-encode can only lose quality
+	// (and risk growing), so we remux instead. Codec-agnostic — this catches the
+	// highly-compressed H.264 case the user hit as well as already-lean HEVC/AV1.
+	reEncodeWorthwhile := doScale || calcKbps < bitrateKbps
 
 	// -av1 swaps the target codec: encoder opts, output suffix, "already
 	// converted" detection and validation all follow targetCodec.
@@ -656,7 +664,6 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// deliberately do NOT reconstruct a -master_display string: a synthesized value
 	// is exactly what has aborted HDR conversions in the past.
 	nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
-	doScale := needsScaling(cfg, stats.Width, stats.Height)
 
 	doConvert, doRemux := false, false
 	switch {
@@ -679,6 +686,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		return result
 	case strings.EqualFold(stats.VideoCodec, targetCodec) && !doScale &&
 		bitrateKbps <= effCfg.maxBitrateKbps:
+		doRemux = true
+	case !reEncodeWorthwhile:
+		// Source already lean: even the resolution floor cannot undercut it, so a
+		// re-encode would only burn GPU time and lose quality (the post-encode
+		// safety net would discard it anyway). Remux instead — codec-agnostic, so
+		// this also covers highly-compressed H.264, exactly the case reported.
+		pInfo.Printf("%s Source already lean (%d kbps, target floor would be %d kbps) — remuxing instead of re-encoding.\n",
+			pterm.LightMagenta("›"), bitrateKbps, calcKbps)
 		doRemux = true
 	default:
 		doConvert = true
@@ -786,7 +801,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		outputFile = filepath.Join(outputDir, basenameFull+outSuffix+".part.mkv")
 		runCascade(func(j convJob) []string { return j.buildConvertArgs() }, "")
 	} else if doRemux {
-		outputFile = filepath.Join(outputDir, basenameFull+".remux.part.mkv")
+		outputFile = filepath.Join(outputDir, basenameFull+remuxSuffix(stats.VideoCodec)+".part.mkv")
 		runCascade(func(j convJob) []string { return j.buildRemuxArgs() }, "REMUX ")
 	}
 
@@ -848,7 +863,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		_ = os.Remove(outputFile)
 
 		if ext == ".mkv" {
-			markPath := filepath.Join(dir, base+".remux.mkv")
+			markPath := filepath.Join(dir, base+remuxSuffix(stats.VideoCodec)+".mkv")
 			if _, statErr := os.Stat(markPath); statErr == nil {
 				fmt.Println(pterm.Gray(fmt.Sprintf(
 					"  >> Keeping original as %s (target name %s already exists)",
@@ -870,7 +885,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			return result
 		}
 
-		mkvFile := filepath.Join(outputDir, basenameFull+".remux.mkv")
+		mkvFile := filepath.Join(outputDir, basenameFull+remuxSuffix(stats.VideoCodec)+".mkv")
 		pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
 			Println("  >> REMUX to MKV (stream copy, lossless)")
 
@@ -1551,6 +1566,67 @@ func determineBitrateKbps(s *VideoStats) int64 {
 		estVideoKbps = 500
 	}
 	return estVideoKbps
+}
+
+// outputHeightFor returns the height the encoder will actually write: the source
+// height, or the downscale short side (maxResolution) when scaling. The bitrate
+// floor keys off the OUTPUT resolution, not the possibly-larger source.
+func outputHeightFor(s *VideoStats, doScale bool) int {
+	if doScale {
+		return appSettings.maxResolution
+	}
+	return s.Height
+}
+
+// bitrateFloorKbps is the absolute minimum target bitrate per output resolution —
+// a safety net so very low-bitrate sources don't turn to mush. Buckets agreed
+// with the video expert (output height in px → kbps).
+func bitrateFloorKbps(height int) int64 {
+	switch {
+	case height <= 720:
+		return 800
+	case height <= 1080:
+		return 1500
+	case height <= 1440:
+		return 3000
+	default:
+		return 6000
+	}
+}
+
+// cappedTargetKbps restores the source-derived ceiling dropped in 1.1.3: target
+// 80% of the source video bitrate (so the re-encode shrinks), clamped UP to the
+// resolution floor and DOWN to the per-mode ceiling. It only sets -maxrate/-bufsize;
+// -cq still governs the picture. The ceiling is applied last so an explicit -NNNN
+// override always wins, even over the floor.
+func cappedTargetKbps(sourceKbps int64, outHeight int, ceiling int64) int64 {
+	target := sourceKbps * 80 / 100
+	if floor := bitrateFloorKbps(outHeight); target < floor {
+		target = floor
+	}
+	if ceiling > 0 && target > ceiling {
+		target = ceiling
+	}
+	return target
+}
+
+// remuxSuffix maps a (passed-through) source video codec to the output-name
+// suffix used for remuxes, mirroring the convert path's .h265/.av1 scheme so a
+// remux is labelled by what it actually contains (e.g. .h264.mkv) instead of a
+// generic ".remux". Every value returned here MUST also appear in skipSuffixes
+// and skipInputSuffixes, otherwise re-running would not recognise the file as
+// already processed. Exotic codecs fall back to ".remux" (still recognised).
+func remuxSuffix(videoCodec string) string {
+	switch strings.ToLower(strings.TrimSpace(videoCodec)) {
+	case "hevc", "h265":
+		return ".h265"
+	case "h264", "avc":
+		return ".h264"
+	case "av1":
+		return ".av1"
+	default:
+		return ".remux"
+	}
 }
 
 func needsScaling(cfg *AppConfig, w, h int) bool {

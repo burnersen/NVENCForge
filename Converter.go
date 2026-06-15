@@ -612,7 +612,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// HDR-Policy (per Datei, leckt nie in SDR-Dateien): nur noch Erkennung +
 	// Hinweis. Der Bitraten-Deckel wird durch HDR NICHT mehr angehoben — er
 	// richtet sich allein nach dem Modus: 1080p (Standard) → maxBitrate1080p
-	// (8000), behaltenes 4K (-original) → maxBitrateOriginal (18000). Die
+	// (8000), behaltenes 4K (-original) → maxBitrateOriginal (22000). Die
 	// HDR-Signalisierung (PQ/BT.2020-Tags) trägt buildColorOpts unabhängig.
 	effCfg := *cfg
 	hdrKind := videoHDRKind(stats)
@@ -624,22 +624,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 
 	bitrateKbps := determineBitrateKbps(stats)
-	var calcKbps int64
-	switch {
-	case bitrateKbps <= 3500:
-		calcKbps = bitrateKbps * 95 / 100
-	case bitrateKbps >= 9000:
-		calcKbps = bitrateKbps * 65 / 100
-	default:
-		pct := 95 - ((bitrateKbps-3500)*30)/(9000-3500)
-		calcKbps = bitrateKbps * pct / 100
-	}
-	if calcKbps < 1500 {
-		calcKbps = 1500
-	}
-	if calcKbps > effCfg.maxBitrateKbps {
-		calcKbps = effCfg.maxBitrateKbps
-	}
+	// Pure constant-quality rate control: -cq governs the picture and the encoder
+	// takes only as much bitrate as the CQ target needs. maxrate is nothing more
+	// than a per-mode safety ceiling (1080p vs -original) for the rare complex
+	// peak — never a per-file target derived from the source. This replaces the
+	// old source-derived sliding scale, which could throttle a mid-bitrate source
+	// below its CQ quality goal. determineBitrateKbps is still used below to spot
+	// sources already small enough to just remux/skip.
+	calcKbps := effCfg.maxBitrateKbps
 
 	// -av1 swaps the target codec: encoder opts, output suffix, "already
 	// converted" detection and validation all follow targetCodec.

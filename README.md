@@ -4,7 +4,7 @@
 
 ### Drop a video, get it back smaller: quality-tuned GPU encoding, drag-and-drop.
 
-**H.265 / AV1 NVENC batch encoder + complete stream toolkit for Windows.**
+**H.265 / AV1 NVENC batch encoder with a DaVinci Resolve workflow and lossless split/join, for Windows.**
 HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 *Powered by FFmpeg, which does the actual encoding. NVENCForge is the automation, validation and safety layer around it.*
@@ -48,7 +48,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 
 ## ✨ What NVENCForge does
 
-- 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Bitrate targets derive from the source, with no fixed-bitrate butchering.
+- 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ) — the encoder takes only the bitrate that quality needs, capped by a sensible per-mode ceiling, with no fixed-bitrate butchering.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -63,7 +63,9 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 
 ```
 NVENCForge.exe [flags] [files/folders]
-NVENCForge.exe -streams [files]
+NVENCForge.exe -davinci [files]
+NVENCForge.exe -split [files/folders]
+NVENCForge.exe -join [video + audio/subtitle files]
 ```
 
 | Flag | Effect |
@@ -75,7 +77,9 @@ NVENCForge.exe -streams [files]
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
 | `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
-| `-streams` | Stream toolkit (split / extract / merge); must be the first argument |
+| `-davinci` | For DaVinci Resolve workflow (split / extract / merge, re-encodes where needed); must be the first argument |
+| `-split` | Lossless split: every stream copied 1:1 into separate files; must be the first argument |
+| `-join` | Lossless join: recombine a silent picture + audio/subtitle files into one MKV (1:1); must be the first argument |
 
 Flags combine freely: `NVENCForge.exe -av1 -original -copyaudio -shutdown Movie.mkv`
 
@@ -94,7 +98,7 @@ This is my personal workflow: pure drag & drop, no command line. Everyone has th
    | `1 NVENCForge Convert 1080` | *(none, default mode)* |
    | `2 NVENCForge Original Copyaudio` | `-original -copyaudio` |
    | `3 NVENCForge AV1 Original` | `-av1 -original` |
-   | `4 NVENCForge Streams` | `-streams` |
+   | `4 NVENCForge DaVinci` | `-davinci` |
 
 4. **Important:** clear the **"Start in"** field of every shortcut; it must be **empty**, otherwise "Send to" won't work correctly.
 
@@ -110,14 +114,14 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 ---
 
-## 🧰 Stream Toolkit (`-streams`)
+## 🧰 For DaVinci Resolve Workflow (`-davinci`)
 
 | You drop… | You get… |
 |---|---|
-| One or more `.mkv` | Video-only `.mp4` (stream copy) + each audio track as `.m4a`/`.wav` + cleaned `.srt`/`.sup`/`.idx` subtitles |
-| `.mp4` / `.mov` / `.m4v` | Video-only `.video.mp4` + separated audio & subtitle tracks |
+| One or more `.mkv` | Silent `.NoSound.mp4` (stream copy) + each audio track as `.m4a`/`.wav` + cleaned `.srt`/`.sup`/`.idx` subtitles |
+| `.mp4` / `.mov` / `.m4v` | Silent `.NoSound.mp4` + separated audio & subtitle tracks |
 | One video + audio/subtitle files | A finished `.sub.mkv` with correct language tags, default flags, forced/SDH dispositions |
-| **Nothing** (just `-streams`) | **Batch mode:** every MKV in the folder is split automatically, with no prompts, parallel-instance safe |
+| **Nothing** (just `-davinci`) | **Batch mode:** every MKV in the folder is split automatically, with no prompts, parallel-instance safe |
 
 Track selection is interactive (multichannel audio offers an optional stereo downmix), languages are auto-detected from filenames (`Movie.de.srt` → German). Every extracted SRT is cleaned automatically: HTML/ASS tags, invisible Unicode characters and ad phrases removed (configurable via `SRTCleaner_config.txt`).
 
@@ -127,6 +131,22 @@ Track selection is interactive (multichannel audio offers an optional stereo dow
 2. **Edit/grade** in Resolve; import just works, including 5.1 audio.
 3. **Export** your master from Resolve (map each timeline track to its own output track).
 4. **Merge** the master MP4 + original audio/subs back into a distribution MKV with one drag & drop.
+
+---
+
+## 🪓 Lossless Split / Join (`-split` / `-join`)
+
+Where `-davinci` re-encodes incompatible audio to AAC and converts/cleans subtitles for editing, `-split` and `-join` never touch the data: **every stream is copied 1:1**, no re-encode, no cleaning. A `-split` followed by a `-join` is a true lossless round-trip.
+
+| You run… | You get… |
+|---|---|
+| `-split` on one file | A prompt to pick tracks (Enter = all), then a silent `.NoSound` picture (kept in the source container, `mp4` stays `mp4`, everything else → `mkv`), each audio track in its **native** container (`.ac3` `.dts` `.eac3` `.m4a` `.flac` `.thd` `.mka` …) and each subtitle **untouched** (`.srt` `.ass` `.sup` `.idx` …) |
+| `-split` on a folder, or nothing | **Batch mode:** every supported video split automatically, all tracks, no prompts, parallel-instance safe |
+| `-join` on a silent video + audio/subtitle files | One `.joined.mkv` with everything copied 1:1, German audio set as default, languages and forced/SDH flags read from the filenames |
+
+The silent picture always gets a `.NoSound` suffix, so the original is never overwritten. The stereo-downmix option from `-davinci` is hidden in `-split`, because a downmix would be a re-encode.
+
+**Safety net on join:** the base video is meant to be the silent `.NoSound` picture (its picture is the only thing used). If you accidentally drop a file that still carries its own audio or subtitles, `-join` stops and asks before continuing, so you don't silently lose tracks. Picture and sound stay in sync because everything is a plain copy of equal length (guaranteed when the parts came from a previous `-split`).
 
 ---
 
@@ -142,7 +162,7 @@ CQ quality level, bitrate caps (H.265 and AV1 separately), resolution cap, NVENC
 
 - Windows 10/11 x64
 - NVIDIA GPU with NVENC (Maxwell or newer); **RTX 40+ for AV1**
-- The `-streams` toolkit runs on **any** hardware (no GPU needed)
+- The `-davinci`, `-split` and `-join` modes run on **any** hardware (no GPU needed)
 - FFmpeg: downloaded automatically on first run (or drop your own `ffmpeg.exe`/`ffprobe.exe` next to the EXE)
 
 > **Why NVENC and not x265?** Hardware encoding trades a little compression efficiency for a huge speed gain and leaves your CPU free. For batch-crushing a large library that tradeoff is the whole point; if you want the absolute best bytes-per-quality on a single precious file, a slow x265 CPU encode will still beat it. NVENCForge is built for throughput and safety, and tuned (CQ + AQ + lookahead + multipass) to keep the quality hit small.

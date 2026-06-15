@@ -115,7 +115,7 @@ func setupConsoleCtrlHandler(cancel func()) {
 			return 0
 		}
 		cancel()
-		if streamToolkitMode {
+		if davinciMode || splitMode || joinMode {
 			pAbort.Println("Window closed. Aborting...")
 		} else {
 			pAbort.Println("Window closed. Finishing current task cleanly (preview will be saved)...")

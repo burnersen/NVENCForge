@@ -23,7 +23,7 @@ import (
 type AppConfig struct {
 	maxBitrateKbps int64    // Obergrenze der Ziel-Bitrate in kbps
 	autoShutdown   bool     // PC nach Abschluss herunterfahren
-	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 18000k
+	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 22000k
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
@@ -59,7 +59,7 @@ func defaultAppSettings() AppSettings {
 	return AppSettings{
 		targetCQ:              26,
 		maxBitrate1080p:       8000,
-		maxBitrateOriginal:    18000,
+		maxBitrateOriginal:    22000,
 		maxResolution:         1080,
 		nvencPreset:           "p5",
 		nvencLookahead:        32,
@@ -362,7 +362,7 @@ targetCQ=%d
 maxBitrate1080p=%d
 
 # Maximum target bitrate (kbit/s) in -original mode.
-# Allowed: greater than 1000.  Default: 18000
+# Allowed: greater than 1000.  Default: 22000
 maxBitrateOriginal=%d
 
 # Target resolution (short edge) in standard mode. Larger material is

@@ -286,12 +286,12 @@ func probeStreams(ctx context.Context, file string) (*ffprobeOutput, error) {
 // Entry point and argument categorisation
 // ----------------------------------------------------------------------------
 
-func runStreamToolkit(ctx context.Context, args []string) {
+func runDavinciMode(ctx context.Context, args []string) {
 	pterm.DefaultHeader.
 		WithFullWidth().
 		WithBackgroundStyle(pterm.NewStyle(pterm.BgDarkGray)).
 		WithTextStyle(pterm.NewStyle(pterm.FgLightWhite, pterm.Bold)).
-		Println("Stream Toolkit  (Audio / Subs / Split / Merge)")
+		Println("For DaVinci Resolve Workflow  (Audio / Subs / Split / Merge)")
 	fmt.Println()
 
 	// No files: batch mode — split every MKV in the current folder. MP4/MOV
@@ -343,6 +343,7 @@ var audioExtensions = map[string]bool{
 	".m4a": true, ".aac": true, ".mp3": true, ".wav": true,
 	".ac3": true, ".eac3": true, ".ec3": true, ".dts": true,
 	".flac": true, ".opus": true, ".ogg": true,
+	".mka": true, ".thd": true,
 }
 
 // categorizeArgs sorts drag-and-drop arguments by type.
@@ -382,16 +383,16 @@ func categorizeArgs(args []string) (mkvs, mp4s, audios, srts, others []string) {
 }
 
 func showUsage() {
-	pInfo.Println("Usage (drag-and-drop or command line with -streams):")
+	pInfo.Println("Usage (drag-and-drop or command line with -davinci):")
 	fmt.Println()
 	fmt.Printf("  %s\n", pterm.LightWhite("1) Drop one or more MKV files (split)"))
-	fmt.Printf("     %s\n", pterm.Gray("→ .mp4 (video-only, stream copy)"))
+	fmt.Printf("     %s\n", pterm.Gray("→ .NoSound.mp4 (video-only, stream copy)"))
 	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.m4a / .mp3 / .wav (audio separate, DaVinci-ready)"))
 	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.stereo.m4a (optional stereo downmix — own number in the track selection)"))
 	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.srt / .sup / .idx (subtitles)"))
 	fmt.Println()
 	fmt.Printf("  %s\n", pterm.LightWhite("1b) Drop one or more MP4/MOV/M4V files (extract)"))
-	fmt.Printf("     %s\n", pterm.Gray("→ .video.mp4 (video-only, stream copy)"))
+	fmt.Printf("     %s\n", pterm.Gray("→ .NoSound.mp4 (video-only, stream copy)"))
 	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.m4a / .mp3 / .wav (audio separate)"))
 	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.srt (subtitles, incl. mov_text/tx3g)"))
 	fmt.Println()
@@ -413,7 +414,7 @@ func showUsage() {
 }
 
 // ----------------------------------------------------------------------------
-// Base name handling for the stream toolkit
+// Base name handling for the DaVinci Resolve workflow
 // ----------------------------------------------------------------------------
 
 // trimToolSuffixes removes trailing suffixes NVENCForge itself appends
@@ -435,7 +436,8 @@ func trimToolSuffixes(base string) string {
 		}
 		switch {
 		case tok == "sub" || tok == "subbed" || tok == "h265" || tok == "av1" ||
-			tok == "remux" || tok == "video" || tok == "preview" || isSubN:
+			tok == "remux" || tok == "video" || tok == "nosound" || tok == "joined" ||
+			tok == "preview" || isSubN:
 			base = base[:idx]
 		default:
 			return base
@@ -453,7 +455,9 @@ func trimToolSuffixes(base string) string {
 // Enter (= all tracks) does NOT create stereo mixes. nil audioSel/subSel mean
 // "all tracks"; stereoSel contains only explicitly chosen mixes (may be nil).
 // With fewer than two selectable entries no question is asked at all.
-func promptTrackSelection(streams *ffprobeOutput) (audioSel, subSel, stereoSel map[int]bool) {
+// allowStereo=false (lossless -split) hides the stereo-mix entries entirely,
+// because a downmix would be a re-encode and has no place in a 1:1 split.
+func promptTrackSelection(streams *ffprobeOutput, allowStereo bool) (audioSel, subSel, stereoSel map[int]bool) {
 	const (
 		kindAudio = iota
 		kindStereo
@@ -479,7 +483,7 @@ func promptTrackSelection(streams *ffprobeOutput) (audioSel, subSel, stereoSel m
 			label := fmt.Sprintf("Audio  %-3s  %s %dch",
 				lang, strings.ToUpper(s.CodecName), s.Channels)
 			entries = append(entries, entry{kindAudio, aIdx, label})
-			if s.Channels > 2 {
+			if allowStereo && s.Channels > 2 {
 				hasStereoOption = true
 				entries = append(entries, entry{kindStereo, aIdx, fmt.Sprintf(
 					"  ↳ Stereo mix of [%d]  (extra .stereo.m4a)", len(entries))})
@@ -589,18 +593,20 @@ func uniqueVobSubPath(idxPath string) (string, error) {
 }
 
 // ----------------------------------------------------------------------------
-// Batch split: -streams without files
+// Batch split: -davinci without files
 // ----------------------------------------------------------------------------
 
 // splitVideoOutPath returns the video-only MP4 target name for a split source
 // (before any collision numbering). Shared by muxToMP4 and the batch
-// done-check, so both always agree on the name.
+// done-check, so both always agree on the name. The ".NoSound" tag makes it
+// obvious this is the silent picture track and prevents it from ever colliding
+// with the original file name.
 func splitVideoOutPath(srcPath string) string {
 	base := trimToolSuffixes(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
 	if c := cleanFileBaseName(base); c != "" {
 		base = c
 	}
-	return filepath.Join(filepath.Dir(srcPath), base+".mp4")
+	return filepath.Join(filepath.Dir(srcPath), base+".NoSound.mp4")
 }
 
 // runBatchSplit splits every MKV in the current directory into its components
@@ -625,9 +631,14 @@ func runBatchSplit(ctx context.Context) {
 	}
 	var files []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".mkv") {
-			files = append(files, filepath.Join(dir, e.Name()))
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".mkv") {
+			continue
 		}
+		// Never re-split a silent picture track we produced earlier.
+		if strings.Contains(strings.ToLower(e.Name()), ".nosound.") {
+			continue
+		}
+		files = append(files, filepath.Join(dir, e.Name()))
 	}
 	if len(files) == 0 {
 		pInfo.Printf("Batch split: no MKV files found in %s\n", dir)
@@ -748,7 +759,7 @@ func processOneMKV(ctx context.Context, mkvPath string, askTracks bool) {
 	printDavinciAudioInfo(audioInfos, false)
 	var audioSel, subSel, stereoSel map[int]bool
 	if askTracks {
-		audioSel, subSel, stereoSel = promptTrackSelection(streams)
+		audioSel, subSel, stereoSel = promptTrackSelection(streams, true)
 	}
 
 	// Ctrl+C means STOP: no salvage extraction of the remaining tracks.
@@ -816,7 +827,8 @@ func writeVideoOnlyMP4(ctx context.Context, srcPath, mp4Out string, streams *ffp
 }
 
 // muxMP4VideoOnly creates a video-only MP4 from an MP4 source, suffixed
-// ".video.mp4" so the original is never overwritten.
+// ".NoSound.mp4" so the original is never overwritten and it is obvious which
+// file carries the silent picture.
 func muxMP4VideoOnly(ctx context.Context, mp4Path string, streams *ffprobeOutput) error {
 	hasVideo := false
 	for _, s := range streams.Streams {
@@ -832,7 +844,7 @@ func muxMP4VideoOnly(ctx context.Context, mp4Path string, streams *ffprobeOutput
 	if c := cleanFileBaseName(base); c != "" {
 		base = c
 	}
-	mp4Out := filepath.Join(filepath.Dir(mp4Path), base+".video.mp4")
+	mp4Out := filepath.Join(filepath.Dir(mp4Path), base+".NoSound.mp4")
 	return writeVideoOnlyMP4(ctx, mp4Path, mp4Out, streams)
 }
 
@@ -892,7 +904,7 @@ func processOneMP4(ctx context.Context, mp4Path string) {
 		})
 	}
 	printDavinciAudioInfo(audioInfos, false)
-	audioSel, subSel, stereoSel := promptTrackSelection(streams)
+	audioSel, subSel, stereoSel := promptTrackSelection(streams, true)
 
 	// Ctrl+C means STOP: no salvage extraction of the remaining tracks.
 	muxErr := muxMP4VideoOnly(ctx, abs, streams)
@@ -1634,6 +1646,871 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 	}
 
 	pErr.Printf("  Merge failed: %v\n", err)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Lossless split / join: -split / -join
+//
+// Unlike -davinci (which targets DaVinci Resolve and re-encodes incompatible
+// audio / converts subtitles), these two modes copy EVERY stream 1:1, with no
+// re-encode and no SRT cleaning:
+//
+//   -split  : take a video and write the silent picture (".NoSound") plus every
+//             audio track in its native container and every subtitle untouched.
+//   -join   : take a (silent) picture track plus audio/subtitle files and mux
+//             them back into a single MKV, copying everything 1:1.
+//
+// A -split followed by a -join is a true lossless round-trip.
+// ════════════════════════════════════════════════════════════════════════════
+
+// losslessVideoContainerExt picks the output container for the silent picture.
+// The source container is kept when it is mp4-family (mp4/m4v/mov, always
+// mp4-compatible codecs) or mkv/webm; every other (and unknown) container goes
+// to MKV, which holds any video codec losslessly. Deterministic from the path
+// alone, so the batch done-check needs no probe.
+func losslessVideoContainerExt(srcPath string) string {
+	switch strings.ToLower(filepath.Ext(srcPath)) {
+	case ".mp4", ".m4v", ".mov":
+		return ".mp4"
+	case ".ts", ".m2ts", ".mts", ".m2t":
+		// Transport streams carry huge/discontinuous PTS and often a trailing
+		// packet with no timestamp at all. MKV refuses such packets ("Can't
+		// write packet with unknown timestamp") and the silent-video step fails;
+		// MP4 tolerates them and still copies the picture 1:1. The join always
+		// produces MKV anyway, so the intermediate container does not matter.
+		return ".mp4"
+	default:
+		return ".mkv"
+	}
+}
+
+// splitNoSoundOutPath returns the silent-picture target name for a lossless
+// split source (before any collision numbering). Used by the batch done-check
+// and the writer so both always agree on the name.
+func splitNoSoundOutPath(srcPath string) string {
+	base := trimToolSuffixes(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if c := cleanFileBaseName(base); c != "" {
+		base = c
+	}
+	return filepath.Join(filepath.Dir(srcPath), base+".NoSound"+losslessVideoContainerExt(srcPath))
+}
+
+// losslessAudioExt maps an audio codec to the file extension whose container
+// can hold it without re-encoding. Anything unknown lands in Matroska audio
+// (.mka), which swallows every codec losslessly.
+func losslessAudioExt(codec string) string {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "aac":
+		return "m4a"
+	case "ac3":
+		return "ac3"
+	case "eac3":
+		return "eac3"
+	case "dts":
+		return "dts"
+	case "truehd", "mlp":
+		return "thd"
+	case "flac":
+		return "flac"
+	case "opus":
+		return "opus"
+	case "vorbis":
+		return "ogg"
+	case "mp3":
+		return "mp3"
+	case "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
+		"pcm_u8", "pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_alaw", "pcm_mulaw":
+		return "wav"
+	default:
+		return "mka"
+	}
+}
+
+// ----------------------------------------------------------------------------
+// -split entry point
+// ----------------------------------------------------------------------------
+
+func runSplitMode(ctx context.Context, args []string) {
+	pterm.DefaultHeader.
+		WithFullWidth().
+		WithBackgroundStyle(pterm.NewStyle(pterm.BgDarkGray)).
+		WithTextStyle(pterm.NewStyle(pterm.FgLightWhite, pterm.Bold)).
+		Println("Split  (lossless 1:1 — no re-encode, no cleaning)")
+	fmt.Println()
+
+	// No files: batch mode — split every supported video in the current folder.
+	if len(args) == 0 {
+		dir, err := os.Getwd()
+		if err != nil {
+			exe, exeErr := os.Executable()
+			if exeErr != nil {
+				pErr.Printf("Cannot determine working directory: %v\n", err)
+				return
+			}
+			dir = filepath.Dir(exe)
+		}
+		runBatchSplitLossless(ctx, dir)
+		return
+	}
+
+	// Folders are processed in batch (no questions); explicit files are split
+	// interactively (Enter = all tracks, or pick numbers). Non-video arguments
+	// are reported and skipped.
+	var files, folders, ignored []string
+	for _, a := range args {
+		info, err := os.Stat(a)
+		if err != nil {
+			ignored = append(ignored, a)
+			continue
+		}
+		if info.IsDir() {
+			folders = append(folders, a)
+			continue
+		}
+		if videoExtensions[strings.ToLower(filepath.Ext(a))] {
+			files = append(files, a)
+		} else {
+			ignored = append(ignored, a)
+		}
+	}
+	for _, ig := range ignored {
+		pWarn.Printf("Not a video file, skipped: %s\n", filepath.Base(ig))
+	}
+	for _, d := range folders {
+		if ctx.Err() != nil {
+			break
+		}
+		runBatchSplitLossless(ctx, d)
+	}
+	total := len(files)
+	for i, f := range files {
+		if ctx.Err() != nil {
+			fmt.Println()
+			fmt.Println(pterm.Gray(fmt.Sprintf("  Skipped (aborted): %s", filepath.Base(f))))
+			continue
+		}
+		if i > 0 {
+			fmt.Println()
+		}
+		if total > 1 {
+			fmt.Printf("%s ", pterm.Gray(fmt.Sprintf("[%d/%d]", i+1, total)))
+		}
+		processOneVideoLossless(ctx, f, true)
+	}
+	if len(files) == 0 && len(folders) == 0 {
+		fmt.Println()
+		showUsageSplitJoin()
+	}
+}
+
+// runBatchSplitLossless splits every supported video in dir into its raw
+// components. Fully automatic (all tracks, no questions). A per-file lock plus
+// a done-check (the silent-picture output) make parallel instances safe — they
+// divide the directory between them.
+func runBatchSplitLossless(ctx context.Context, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		pErr.Printf("Cannot read directory %s: %v\n", dir, err)
+		return
+	}
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() || !videoExtensions[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
+		}
+		// Never re-split a silent picture track we produced earlier.
+		if strings.Contains(strings.ToLower(e.Name()), ".nosound.") {
+			continue
+		}
+		files = append(files, filepath.Join(dir, e.Name()))
+	}
+	if len(files) == 0 {
+		pInfo.Printf("Split (batch): no supported video files found in %s\n", dir)
+		fmt.Println()
+		showUsageSplitJoin()
+		return
+	}
+
+	pInfo.Printf("Split (batch): %d video file(s) in %s\n", len(files), dir)
+	fmt.Println(pterm.Gray("  All tracks, 1:1 copy, no questions — parallel instances share the work."))
+
+	done, skipped := 0, 0
+	for i, f := range files {
+		if ctx.Err() != nil {
+			fmt.Println()
+			fmt.Println(pterm.Gray(fmt.Sprintf("  Skipped (aborted): %s", filepath.Base(f))))
+			skipped++
+			continue
+		}
+		fmt.Println()
+		fmt.Printf("%s ", pterm.Gray(fmt.Sprintf("[%d/%d]", i+1, len(files))))
+
+		if _, statErr := os.Stat(splitNoSoundOutPath(f)); statErr == nil {
+			pInfo.Printf("» %s\n", filepath.Base(f))
+			fmt.Println(pterm.Gray("  Skipped: silent picture already exists (already split)."))
+			skipped++
+			continue
+		}
+		func() {
+			unlock, lockErr := acquireProcessingLock(f+".lock", getFileSizeMB(f), f)
+			if lockErr != nil {
+				pInfo.Printf("» %s\n", filepath.Base(f))
+				fmt.Println(pterm.Gray("  Skipped: another instance is currently processing this file."))
+				skipped++
+				return
+			}
+			defer unlock()
+			if _, statErr := os.Stat(splitNoSoundOutPath(f)); statErr == nil {
+				pInfo.Printf("» %s\n", filepath.Base(f))
+				fmt.Println(pterm.Gray("  Skipped: output appeared after acquiring lock (another instance was faster)."))
+				skipped++
+				return
+			}
+			processOneVideoLossless(ctx, f, false)
+			if ctx.Err() == nil {
+				done++
+			} else {
+				skipped++
+			}
+		}()
+	}
+	fmt.Println()
+	pInfo.Printf("Split (batch) finished: %d processed, %d skipped.\n", done, skipped)
+}
+
+// processOneVideoLossless splits one video into silent picture + raw audio +
+// raw subtitles. askTracks=false (batch) extracts everything without asking.
+func processOneVideoLossless(ctx context.Context, srcPath string, askTracks bool) {
+	abs, _ := filepath.Abs(srcPath)
+	pInfo.Printf("» %s\n", filepath.Base(abs))
+
+	if _, err := os.Stat(abs); err != nil {
+		pErr.Printf("  File not found: %v\n", err)
+		return
+	}
+
+	streams, err := probeStreams(ctx, abs)
+	if err != nil {
+		pErr.Printf("  Probe failed: %v\n", err)
+		return
+	}
+
+	printLosslessTrackInfo(streams)
+	var audioSel, subSel map[int]bool
+	if askTracks {
+		audioSel, subSel, _ = promptTrackSelection(streams, false)
+	}
+
+	// Ctrl+C means STOP: the failing step removes its own unfinished output.
+	vidErr := writeNoSoundVideoLossless(ctx, abs, streams)
+	if errors.Is(vidErr, context.Canceled) {
+		fmt.Println(pterm.Gray("  Aborted — unfinished video file removed."))
+		return
+	}
+	if vidErr != nil {
+		pErr.Printf("  Silent video creation failed: %v\n", vidErr)
+	}
+	if ctx.Err() != nil {
+		fmt.Println(pterm.Gray("  Aborted."))
+		return
+	}
+
+	extractAudiosLossless(ctx, abs, streams, audioSel)
+	extractSubsLossless(ctx, abs, streams, subSel)
+}
+
+// printLosslessTrackInfo lists the audio tracks neutrally (no DaVinci wording),
+// so the user sees what will be copied 1:1.
+func printLosslessTrackInfo(streams *ffprobeOutput) {
+	idx := 0
+	for _, s := range streams.Streams {
+		if s.CodecType != "audio" {
+			continue
+		}
+		idx++
+		lang := "und"
+		if s.Tags != nil {
+			if l := s.Tags["language"]; l != "" {
+				lang = normalizeLang(l)
+			}
+		}
+		layout := s.ChannelLayout
+		if layout == "" {
+			layout = fmt.Sprintf("%dch", s.Channels)
+		}
+		fmt.Printf("  %s %s %s\n",
+			pterm.Gray(fmt.Sprintf("Audio %d", idx)),
+			pterm.LightWhite(fmt.Sprintf("(%s %s)", lang, strings.ToUpper(s.CodecName))),
+			pterm.LightBlue(fmt.Sprintf("→ copy 1:1 (%s)", layout)),
+		)
+	}
+}
+
+// writeNoSoundVideoLossless stream-copies the primary video track into a
+// ".NoSound" file (no audio/subs). MP4 targets get +faststart and the hvc1 tag
+// for HEVC; MKV targets hold any codec as-is.
+func writeNoSoundVideoLossless(ctx context.Context, srcPath string, streams *ffprobeOutput) error {
+	hasVideo := false
+	for _, s := range streams.Streams {
+		if s.CodecType == "video" {
+			hasVideo = true
+			break
+		}
+	}
+	if !hasVideo {
+		fmt.Println(pterm.Gray("  → No video track found — skipping silent picture."))
+		return nil
+	}
+
+	out := splitNoSoundOutPath(srcPath)
+	target, err := uniquePath(out)
+	if err != nil {
+		return fmt.Errorf("Streams.go: writeNoSoundVideoLossless: %w", err)
+	}
+	if target != out {
+		pInfo.Printf("  Output name already taken — writing as %s\n", filepath.Base(target))
+		out = target
+	}
+
+	isMP4 := strings.EqualFold(filepath.Ext(out), ".mp4")
+	args := []string{
+		"-y", "-i", srcPath,
+		"-map", "0:V:0",
+		"-c:v", "copy",
+		"-an", "-sn",
+		// Many streams (HEVC with B-frames, DTS-X MKVs, transport streams) start
+		// with a small negative/non-monotonic timestamp. Copied 1:1 into the
+		// silent file as-is, that file can no longer be re-muxed — the later
+		// -join then dies with "Can't write packet with unknown timestamp".
+		// make_zero shifts the timeline so the first packet is 0; the picture
+		// itself is untouched (still a true 1:1 copy).
+		"-avoid_negative_ts", "make_zero",
+	}
+	if isMP4 {
+		args = append(args, "-movflags", "+faststart")
+		for _, s := range streams.Streams {
+			if s.CodecType == "video" && s.CodecName == "hevc" {
+				args = append(args, "-tag:v", "hvc1")
+				break
+			}
+		}
+	}
+	args = append(args, out)
+
+	fmt.Println(pterm.Gray("  → Extracting video (stream copy, no re-encode)..."))
+	durationSec, _ := strconv.ParseFloat(streams.Format.Duration, 64)
+	if err := runFFmpeg(ctx, args, durationSec, 1, 1, getFileSizeMB(srcPath)); err != nil {
+		_ = os.Remove(out)
+		return fmt.Errorf("Streams.go: writeNoSoundVideoLossless: %w", err)
+	}
+	pOK.Printf("    ✓ %s\n", filepath.Base(out))
+	return nil
+}
+
+// extractAudiosLossless copies every selected audio track 1:1 into its native
+// container. sel == nil means all. No re-encode ever.
+func extractAudiosLossless(ctx context.Context, srcPath string, streams *ffprobeOutput, sel map[int]bool) {
+	base := trimToolSuffixes(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if c := cleanFileBaseName(base); c != "" {
+		base = c
+	}
+	dir := filepath.Dir(srcPath)
+
+	var audioStreams []ffprobeStream
+	for _, s := range streams.Streams {
+		if s.CodecType == "audio" {
+			audioStreams = append(audioStreams, s)
+		}
+	}
+	if len(audioStreams) == 0 {
+		fmt.Println(pterm.Gray("  → No audio tracks found."))
+		return
+	}
+	want := 0
+	for i := range audioStreams {
+		if sel == nil || sel[i] {
+			want++
+		}
+	}
+	if want == 0 {
+		fmt.Println(pterm.Gray("  → Audio skipped (not selected)."))
+		return
+	}
+	fmt.Println(pterm.Gray(fmt.Sprintf("  → Extracting %d audio track(s) (stream copy, no re-encode)...", want)))
+
+	suffixCounter := map[string]int{}
+	for i, s := range audioStreams {
+		if ctx.Err() != nil {
+			break
+		}
+		if sel != nil && !sel[i] {
+			continue
+		}
+
+		lang := "und"
+		if s.Tags != nil {
+			if l := s.Tags["language"]; l != "" {
+				lang = normalizeLang(l)
+			}
+		}
+		suffix := lang
+		seen := suffixCounter[suffix]
+		suffixCounter[suffix]++
+		if seen > 0 {
+			suffix = fmt.Sprintf("%s.%d", suffix, seen+1)
+		}
+
+		ext := losslessAudioExt(s.CodecName)
+		outPath := filepath.Join(dir, fmt.Sprintf("%s.%s.%s", base, suffix, ext))
+		if p, uerr := uniquePath(outPath); uerr == nil {
+			outPath = p
+		} else {
+			pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+			continue
+		}
+
+		ffargs := []string{
+			"-y", "-i", srcPath,
+			"-map", fmt.Sprintf("0:a:%d", i),
+			"-vn", "-sn",
+			"-c:a", "copy",
+		}
+		if ext == "wav" {
+			ffargs = append(ffargs, "-rf64", "auto")
+		}
+		ffargs = append(ffargs, outPath)
+
+		layout := s.ChannelLayout
+		if layout == "" {
+			layout = fmt.Sprintf("%dch", s.Channels)
+		}
+		fmt.Printf("    %s %s %s\n",
+			pterm.Gray(fmt.Sprintf("Audio %d:", i+1)),
+			pterm.LightWhite(filepath.Base(outPath)),
+			pterm.LightBlue(fmt.Sprintf("(%s %s, 1:1)", strings.ToUpper(s.CodecName), layout)),
+		)
+
+		if err := runFFmpegSub(ctx, ffargs); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				pErr.Printf("    × %s: %v\n", filepath.Base(outPath), err)
+			}
+			_ = os.Remove(outPath)
+			continue
+		}
+		pOK.Printf("    ✓ %s\n", filepath.Base(outPath))
+	}
+}
+
+// extractSubsLossless copies every selected subtitle track 1:1, keeping its
+// native format (ASS stays ASS, PGS stays SUP, VobSub stays IDX/SUB). The only
+// unavoidable change is mov_text, which has no standalone container and is
+// written as SRT (text 1:1). The SRT cleaner is NOT run here.
+func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOutput, sel map[int]bool) {
+	base := trimToolSuffixes(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if c := cleanFileBaseName(base); c != "" {
+		base = c
+	}
+	dir := filepath.Dir(srcPath)
+
+	var subStreams []ffprobeStream
+	for _, s := range streams.Streams {
+		if s.CodecType == "subtitle" {
+			subStreams = append(subStreams, s)
+		}
+	}
+	if len(subStreams) == 0 {
+		fmt.Println(pterm.Gray("  → No subtitle tracks found."))
+		return
+	}
+	want := len(subStreams)
+	if sel != nil {
+		want = len(sel)
+		if want == 0 {
+			fmt.Println(pterm.Gray("  → Subtitles skipped (not selected)."))
+			return
+		}
+	}
+	fmt.Println(pterm.Gray(fmt.Sprintf("  → Extracting %d subtitle track(s) (1:1, no cleaning)...", want)))
+
+	suffixCounter := map[string]int{}
+	for i, s := range subStreams {
+		if ctx.Err() != nil {
+			break
+		}
+		if sel != nil && !sel[i] {
+			continue
+		}
+
+		lang := "und"
+		if s.Tags != nil {
+			if l := s.Tags["language"]; l != "" {
+				lang = normalizeLang(l)
+			}
+		}
+		suffix := lang
+		if s.Disposition.Forced == 1 {
+			suffix += ".forced"
+		}
+		if s.Disposition.HearingImpaired == 1 {
+			suffix += ".sdh"
+		}
+		seen := suffixCounter[suffix]
+		suffixCounter[suffix]++
+		if seen > 0 {
+			suffix = fmt.Sprintf("%s.%d", suffix, seen+1)
+		}
+
+		codec := strings.ToLower(s.CodecName)
+		var outPath string
+		var ffargs []string
+		note := ""
+
+		switch codec {
+		case "ass", "ssa":
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.ass", base, suffix))
+			if p, uerr := uniquePath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
+		case "webvtt":
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.vtt", base, suffix))
+			if p, uerr := uniquePath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
+		case "mov_text":
+			// No standalone mov_text container exists — SRT is the text-lossless target.
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.srt", base, suffix))
+			if p, uerr := uniquePath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "srt", outPath}
+			note = "(mov_text → SRT, text 1:1)"
+		case "subrip", "srt":
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.srt", base, suffix))
+			if p, uerr := uniquePath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
+		case "hdmv_pgs_subtitle":
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.sup", base, suffix))
+			if p, uerr := uniquePath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
+		case "dvd_subtitle":
+			outPath = filepath.Join(dir, fmt.Sprintf("%s.%s.idx", base, suffix))
+			if p, uerr := uniqueVobSubPath(outPath); uerr == nil {
+				outPath = p
+			} else {
+				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				continue
+			}
+			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
+		default:
+			pWarn.Printf("    × Track %d: unknown sub codec '%s' (skipped)\n", i+1, codec)
+			continue
+		}
+
+		if note != "" {
+			fmt.Printf("    %s %s %s\n",
+				pterm.Gray(fmt.Sprintf("Sub %d:", i+1)),
+				pterm.LightWhite(filepath.Base(outPath)),
+				pterm.LightYellow(note))
+		}
+
+		if err := runFFmpegSub(ctx, ffargs); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				pErr.Printf("    × %s: %v\n", filepath.Base(outPath), err)
+			}
+			_ = os.Remove(outPath)
+			if strings.HasSuffix(outPath, ".idx") {
+				_ = os.Remove(strings.TrimSuffix(outPath, ".idx") + ".sub")
+			}
+			continue
+		}
+		pOK.Printf("    ✓ %s\n", filepath.Base(outPath))
+	}
+}
+
+// ----------------------------------------------------------------------------
+// -join entry point
+// ----------------------------------------------------------------------------
+
+func runJoinMode(ctx context.Context, args []string) {
+	pterm.DefaultHeader.
+		WithFullWidth().
+		WithBackgroundStyle(pterm.NewStyle(pterm.BgDarkGray)).
+		WithTextStyle(pterm.NewStyle(pterm.FgLightWhite, pterm.Bold)).
+		Println("Join  (lossless 1:1 mux → MKV)")
+	fmt.Println()
+
+	if len(args) == 0 {
+		showUsageSplitJoin()
+		return
+	}
+
+	mkvs, mp4s, audios, srts, others := categorizeArgs(args)
+	if len(others) > 0 {
+		pErr.Printf("Unknown file types: %v\n", others)
+		fmt.Println()
+		showUsageSplitJoin()
+		return
+	}
+	videos := append(append([]string{}, mkvs...), mp4s...)
+
+	switch {
+	case len(videos) == 0:
+		pErr.Println("Please drop exactly ONE video (the .NoSound picture) plus audio/subtitle files.")
+		fmt.Println()
+		showUsageSplitJoin()
+	case len(videos) > 1:
+		pErr.Println("Please drop only ONE video file as the base (plus audio/subtitle files).")
+		fmt.Println()
+		showUsageSplitJoin()
+	case len(audios) == 0 && len(srts) == 0:
+		pErr.Println("Please drop at least one audio or subtitle file in addition to the video.")
+		fmt.Println()
+		showUsageSplitJoin()
+	default:
+		runJoinLossless(ctx, videos[0], audios, srts)
+	}
+}
+
+// runJoinLossless muxes a (silent) picture track plus external audio/subtitle
+// files into a single MKV, copying every stream 1:1. Only the picture of the
+// base is ever used (any audio/subtitles it carries are ignored), and the
+// result is always a fresh ".joined.mkv", so the source is never touched.
+func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
+	abs, _ := filepath.Abs(videoPath)
+	pInfo.Printf("» %s + %d Audio + %d Sub\n",
+		filepath.Base(abs), len(audioPaths), len(srtPaths))
+
+	if _, err := os.Stat(abs); err != nil {
+		pErr.Printf("  File not found: %v\n", err)
+		return
+	}
+	for _, a := range audioPaths {
+		if _, err := os.Stat(a); err != nil {
+			pErr.Printf("  Audio file not found: %v\n", err)
+			return
+		}
+	}
+	for _, srt := range srtPaths {
+		if _, err := os.Stat(srt); err != nil {
+			pErr.Printf("  Subtitle file not found: %v\n", err)
+			return
+		}
+	}
+
+	streams, err := probeStreams(ctx, abs)
+	if err != nil {
+		pErr.Printf("  Probe failed: %v\n", err)
+		return
+	}
+
+	// The base contributes its picture only; any audio or subtitles it might
+	// carry are simply not used. We only confirm there IS a video track to
+	// build from (a fresh ".joined.mkv" is always written, the source is never
+	// touched, so there is nothing to warn about).
+	hasVideo := false
+	for _, s := range streams.Streams {
+		if s.CodecType == "video" && s.Disposition.AttachedPic == 0 {
+			hasVideo = true
+			break
+		}
+	}
+	if !hasVideo {
+		pErr.Println("  The base file has no video track — nothing to build a picture from.")
+		return
+	}
+
+	base := trimToolSuffixes(strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs)))
+	if c := cleanFileBaseName(base); c != "" {
+		base = c
+	}
+	dir := filepath.Dir(abs)
+	outPath := filepath.Join(dir, base+".joined.mkv")
+
+	// Never overwrite an existing file (incl. the base itself): pick a numbered
+	// name (.joined2.mkv, …) instead.
+	if _, outErr := os.Stat(outPath); outPath == abs || outErr == nil {
+		const maxCandidates = 100
+		found := false
+		for n := 2; n <= maxCandidates; n++ {
+			candidate := filepath.Join(dir, fmt.Sprintf("%s.joined%d.mkv", base, n))
+			if _, err := os.Stat(candidate); os.IsNotExist(err) {
+				outPath = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			pErr.Printf("  No free output file name found (checked up to .joined%d.mkv)\n", maxCandidates)
+			return
+		}
+		pInfo.Printf("  Output name already taken — writing as %s\n", filepath.Base(outPath))
+	}
+
+	useExternalAudio := len(audioPaths) > 0
+	srtInputStart := 1 + len(audioPaths)
+
+	buildArgs := func(withSubs bool) []string {
+		a := []string{"-y", "-i", abs}
+		for _, au := range audioPaths {
+			audAbs, _ := filepath.Abs(au)
+			a = append(a, "-i", audAbs)
+		}
+		if withSubs {
+			for _, srt := range srtPaths {
+				srtAbs, _ := filepath.Abs(srt)
+				a = append(a, "-i", srtAbs)
+			}
+		}
+		// Picture of the base only (no cover art).
+		a = append(a, "-map", "0:V:0")
+		if useExternalAudio {
+			for i := range audioPaths {
+				a = append(a, "-map", fmt.Sprintf("%d:a:0", i+1))
+			}
+		}
+		if withSubs {
+			for i := range srtPaths {
+				a = append(a, "-map", fmt.Sprintf("%d:s:0", srtInputStart+i))
+			}
+		}
+		// Everything copied 1:1.
+		a = append(a, "-c:v", "copy")
+		if useExternalAudio {
+			a = append(a, "-c:a", "copy")
+		} else {
+			a = append(a, "-an")
+		}
+		if withSubs && len(srtPaths) > 0 {
+			a = append(a, "-c:s", "copy")
+		}
+		// Guard against negative/non-monotonic source timestamps (see
+		// writeNoSoundVideoLossless): without this the muxer can reject the
+		// first packets. Harmless for clean inputs (nothing to shift).
+		a = append(a, "-avoid_negative_ts", "make_zero")
+
+		// Default audio: German preferred, else first track.
+		defaultAudioIdx := 0
+		if useExternalAudio {
+			for i, au := range audioPaths {
+				if langFromFilename(au) == "ger" {
+					defaultAudioIdx = i
+					break
+				}
+			}
+		}
+		for i := range audioPaths {
+			lang := langFromFilename(audioPaths[i])
+			a = append(a, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("language=%s", lang))
+			if i == defaultAudioIdx {
+				a = append(a, fmt.Sprintf("-disposition:a:%d", i), "default")
+			} else {
+				a = append(a, fmt.Sprintf("-disposition:a:%d", i), "0")
+			}
+		}
+		if withSubs {
+			for i, srt := range srtPaths {
+				lang, forced, sdh := parseSubTags(srt)
+				a = append(a, fmt.Sprintf("-metadata:s:s:%d", i), fmt.Sprintf("language=%s", lang))
+				switch {
+				case forced:
+					a = append(a, fmt.Sprintf("-disposition:s:%d", i), "forced")
+				case sdh:
+					a = append(a, fmt.Sprintf("-disposition:s:%d", i), "hearing_impaired")
+				default:
+					a = append(a, fmt.Sprintf("-disposition:s:%d", i), "0")
+				}
+			}
+		}
+		a = append(a, outPath)
+		return a
+	}
+
+	// Show the plan.
+	for _, au := range audioPaths {
+		lang := langFromFilename(au)
+		fmt.Printf("  %s %s → %s\n", pterm.Gray("• Audio"),
+			pterm.LightWhite(filepath.Base(au)), pterm.LightCyan(lang))
+	}
+	for _, srt := range srtPaths {
+		lang, forced, sdh := parseSubTags(srt)
+		tag := ""
+		if forced {
+			tag = pterm.LightRed(" [Forced]")
+		} else if sdh {
+			tag = pterm.LightYellow(" [SDH]")
+		}
+		fmt.Printf("  %s %s → %s%s\n", pterm.Gray("• Sub  "),
+			pterm.LightWhite(filepath.Base(srt)), pterm.LightCyan(lang), tag)
+	}
+
+	fmt.Println(pterm.Gray("  → Building MKV (1:1, no re-encode)..."))
+	durationSec, _ := strconv.ParseFloat(streams.Format.Duration, 64)
+
+	err = runFFmpeg(ctx, buildArgs(true), durationSec, 1, 1, 0)
+	if err == nil {
+		pOK.Printf("    ✓ %s\n", filepath.Base(outPath))
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		_ = os.Remove(outPath)
+		return
+	}
+	_ = os.Remove(outPath)
+
+	// Subtitle copy can fail on a malformed file — retry without subtitles.
+	if len(srtPaths) > 0 {
+		pWarn.Println("  Join with subtitles failed, trying without subtitles...")
+		if err2 := runFFmpeg(ctx, buildArgs(false), durationSec, 1, 1, 0); err2 != nil {
+			_ = os.Remove(outPath)
+			pErr.Printf("  Join failed even without subtitles: %v\n", err2)
+			return
+		}
+		pOK.Printf("    ✓ %s %s\n", filepath.Base(outPath),
+			pterm.LightYellow("(without subtitles — check the subtitle files)"))
+		return
+	}
+
+	pErr.Printf("  Join failed: %v\n", err)
+}
+
+// showUsageSplitJoin explains the lossless -split / -join modes.
+func showUsageSplitJoin() {
+	pInfo.Println("Lossless usage (1:1 copy, no re-encode, no cleaning):")
+	fmt.Println()
+	fmt.Printf("  %s\n", pterm.LightWhite("-split  <video files / folders>"))
+	fmt.Printf("     %s\n", pterm.Gray("→ .NoSound.<mp4|mkv> (silent picture, stream copy)"))
+	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.<ac3|dts|eac3|m4a|flac|...> (each audio track, native, 1:1)"))
+	fmt.Printf("     %s\n", pterm.Gray("→ .<lang>.<srt|ass|sup|idx> (each subtitle, untouched)"))
+	fmt.Printf("     %s\n", pterm.Gray("→ a single file asks which tracks to extract; a folder takes all"))
+	fmt.Println()
+	fmt.Printf("  %s\n", pterm.LightWhite("-join   <one .NoSound video> + <audio/subtitle files>"))
+	fmt.Printf("     %s\n", pterm.Gray("→ rebuilds a single \".joined.mkv\" with everything copied 1:1"))
+	fmt.Printf("     %s\n", pterm.Gray("→ only the picture of the base is used; the source is never changed"))
+	fmt.Println()
+	fmt.Printf("  %s\n", pterm.Gray("Tip: -split then -join is a true lossless round-trip. For DaVinci-ready"))
+	fmt.Printf("  %s\n", pterm.Gray("     output (AAC audio, cleaned subtitles) use -davinci instead."))
+	fmt.Println()
 }
 
 // ════════════════════════════════════════════════════════════════════════════

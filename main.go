@@ -1,6 +1,6 @@
 //go:build windows && amd64
 
-// NVENCForge — H265 Batch-Konverter + Stream-Toolkit
+// NVENCForge — H265 Batch-Konverter + DaVinci Resolve Workflow + Split/Join
 //
 // Version 2: HDR10-bewusstes Encoding (behält bei PQ/HLG-Material die
 // Originalauflösung, hebt das Bitraten-Limit an und übernimmt Mastering-Display
@@ -45,7 +45,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.1.2"
+const appVersion = "1.1.3"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -317,10 +317,18 @@ var (
 // failure reasons. Intentionally undocumented (absent from help and tips).
 var debugMode bool
 
-// streamToolkitMode is true when the process runs in -streams mode. Set once at
-// the start of main(); read by the abort handlers to pick the right message
-// (there is no preview file in streams mode).
-var streamToolkitMode bool
+// davinciMode is true when the process runs in -davinci mode (the DaVinci
+// Resolve workflow). Set once at the start of main(); read by the abort
+// handlers to pick the right message (there is no preview file in this mode).
+var davinciMode bool
+
+// splitMode / joinMode are true for the lossless -split / -join modes. Like
+// -davinci they produce no preview file, so the abort handler treats them the
+// same way (unfinished outputs are removed, nothing is salvaged).
+var (
+	splitMode bool
+	joinMode  bool
+)
 
 // consumeDebugFlag scans os.Args for a "-debug" token (case-insensitive),
 // removes it so it is never treated as input, and reports whether it was present.
@@ -355,7 +363,7 @@ func setupSignalContext() (context.Context, context.CancelFunc) {
 		<-sigChan
 		cancel()
 		fmt.Println()
-		if streamToolkitMode {
+		if davinciMode || splitMode || joinMode {
 			pAbort.Println("Ctrl+C detected. Aborting — unfinished files will be removed...")
 		} else {
 			pAbort.Println("Ctrl+C detected. Finishing current task cleanly (preview will be saved)...")
@@ -655,11 +663,12 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 				}
 				// Looks like an option but matches nothing known and no file on
 				// disk: warn instead of silently ignoring (typos like -shutdwon).
-				if strings.EqualFold(arg, "-streams") {
-					pWarn.Println("'-streams' must be the FIRST argument — ignored here.")
-					pWarn.Println("Example: NVENCForge.exe -streams file.mkv")
+				if strings.EqualFold(arg, "-davinci") || strings.EqualFold(arg, "-streams") ||
+					strings.EqualFold(arg, "-split") || strings.EqualFold(arg, "-join") {
+					pWarn.Printf("'%s' must be the FIRST argument — ignored here.\n", strings.ToLower(arg))
+					pWarn.Printf("Example: NVENCForge.exe %s file.mkv\n", strings.ToLower(arg))
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -orig/-original, -copyaudio/-ca, -av1, -keep, -shutdown, -streams\n", arg)
+					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -orig/-original, -copyaudio/-ca, -av1, -keep, -shutdown, -davinci, -split, -join\n", arg)
 				}
 				continue
 			}
@@ -955,7 +964,7 @@ func printActiveSettings(cfg *AppConfig) {
 	fmt.Println()
 }
 
-// printStreamSettings shows only the settings the stream toolkit actually uses
+// printStreamSettings shows only the settings the DaVinci Resolve workflow
 // (AAC re-encode bitrates) instead of the full encoder panel.
 func printStreamSettings() {
 	pterm.DefaultHeader.
@@ -1081,7 +1090,12 @@ func main() {
 	// Hidden developer switch: without -debug, suppress all error output so end
 	// users never see internal failure reasons. Must run before any pErr use.
 	debugMode = consumeDebugFlag()
-	streamToolkitMode = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "-streams")
+	// -davinci is the DaVinci Resolve workflow mode. "-streams" is kept as a
+	// silent backward-compatible alias so older "Send to" shortcuts keep working.
+	davinciMode = len(os.Args) > 1 &&
+		(strings.EqualFold(os.Args[1], "-davinci") || strings.EqualFold(os.Args[1], "-streams"))
+	splitMode = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "-split")
+	joinMode = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "-join")
 	if !debugMode {
 		pErr = pErr.WithWriter(io.Discard)
 	}
@@ -1116,8 +1130,12 @@ func main() {
 		pterm.Gray("   >>  ") + "Keep originals (don't move to recycle bin)\n" +
 		pterm.LightYellow("• NVENCForge.exe -shutdown        ") +
 		pterm.Gray("   >>  ") + "Shut down PC when finished\n" +
-		pterm.LightYellow("• NVENCForge.exe -streams <files> ") +
-		pterm.Gray("   >>  ") + "Stream toolkit (Audio/Subs/Split/Merge)\n\n" +
+		pterm.LightYellow("• NVENCForge.exe -davinci <files> ") +
+		pterm.Gray("   >>  ") + "DaVinci Resolve workflow (Audio/Subs/Split/Merge)\n" +
+		pterm.LightYellow("• NVENCForge.exe -split <files>   ") +
+		pterm.Gray("   >>  ") + "Lossless split (1:1, no re-encode)\n" +
+		pterm.LightYellow("• NVENCForge.exe -join <files>    ") +
+		pterm.Gray("   >>  ") + "Lossless join back into one MKV\n\n" +
 		pterm.Gray("  (tips can be combined: -original -copyaudio -shutdown)")
 
 	pterm.DefaultBox.
@@ -1143,11 +1161,24 @@ func main() {
 	loadOrCreateAppConfig()
 	srtCleanerPhrases()
 
-	// Stream toolkit: pure remux/AAC work, no NVENC involved — the GPU probe is
-	// skipped (faster start; the toolkit even works without an Nvidia card).
-	if streamToolkitMode {
+	// DaVinci Resolve workflow: pure remux/AAC work, no NVENC involved — the GPU
+	// probe is skipped (faster start; it even works without an Nvidia card).
+	if davinciMode {
 		printStreamSettings()
-		runStreamToolkit(ctx, os.Args[2:])
+		runDavinciMode(ctx, os.Args[2:])
+		waitForEnter()
+		return
+	}
+
+	// Lossless split/join: -split / -join copy every stream 1:1. No NVENC, no GPU
+	// probe, works without an Nvidia card.
+	if splitMode {
+		runSplitMode(ctx, os.Args[2:])
+		waitForEnter()
+		return
+	}
+	if joinMode {
+		runJoinMode(ctx, os.Args[2:])
 		waitForEnter()
 		return
 	}

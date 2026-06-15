@@ -14,12 +14,12 @@ const helpFileName = "NVENCForge_Help.txt"
 // deliberately omits any developer-only switches.
 const helpFileContent = `============================================================
   NVENCForge - Help
-  H.265 NVENC batch encoder + MKV/MP4 stream toolkit
+  H.265 NVENC batch encoder + DaVinci Resolve workflow & lossless tools
 ============================================================
 
 WHAT IT DOES
   NVENCForge converts video files to H.265 (HEVC) using your
-  Nvidia GPU (NVENC), and includes a toolkit to split, extract
+  Nvidia GPU (NVENC), and can split, extract
   and merge audio / subtitle / video streams. Subtitles are
   cleaned automatically.
 
@@ -51,21 +51,24 @@ CONVERSION OPTIONS
                  ("shutdown /a" cancels it).
   Options can be combined, e.g.:  -original -copyaudio -shutdown
   Always list options FIRST, then the files to process.
-  -streams must be the very first argument.
+  -davinci, -split and -join must be the very first argument.
 
   Without -original, videos above 1080p are downscaled and lightly
   sharpened. By default, audio in formats unsuitable for editing
   is re-encoded to AAC (DaVinci-friendly) and compatible audio is
   copied unchanged; -copyaudio keeps every track exactly as-is.
 
-STREAM TOOLKIT  (-streams)
-  NVENCForge.exe -streams <files>
-    - Drop a single MKV  -> split into MP4 + separate audio and
-      subtitle files.
-    - Drop an MP4/MOV    -> extract its audio and subtitle tracks.
+FOR DAVINCI RESOLVE WORKFLOW  (-davinci)   re-encodes where needed
+  NVENCForge.exe -davinci <files>
+    - Drop a single MKV  -> split into a silent ".NoSound.mp4"
+      plus separate audio and subtitle files (audio is re-encoded
+      to AAC where DaVinci needs it, subtitles are converted to
+      .srt and cleaned).
+    - Drop an MP4/MOV    -> extract its audio and subtitle tracks
+      and write a silent ".NoSound.mp4".
     - Drop ONE video plus one or more audio / .srt files
       -> merge them into a new ".sub.mkv".
-    - Run "NVENCForge.exe -streams" with NO files inside a folder
+    - Run "NVENCForge.exe -davinci" with NO files inside a folder
       -> batch mode: every MKV in that folder is split
       automatically (all tracks, no stereo mixes, no questions).
       You may start the same command a second time in parallel:
@@ -80,6 +83,30 @@ STREAM TOOLKIT  (-streams)
   Merging uses ONLY the files you drop: the base video contributes
   its picture only - audio or subtitles inside the base video are
   never carried over (a notice is shown if any get dropped).
+
+LOSSLESS SPLIT / JOIN  (-split / -join)   1:1 copy, no re-encode
+  NVENCForge.exe -split <files / folders>
+    - Splits a video into its raw parts WITHOUT any re-encode and
+      WITHOUT cleaning: a silent ".NoSound" picture (kept in the
+      source container, mp4 stays mp4, everything else becomes mkv),
+      every audio track in its native container (.ac3/.dts/.eac3/
+      .m4a/.flac/.thd/.mka ...) and every subtitle untouched
+      (.srt/.ass/.sup/.idx ...).
+    - A single dropped file asks which tracks to extract (Enter =
+      all). A dropped folder, or no files at all, runs batch mode:
+      every supported video in the folder, all tracks, no questions,
+      parallel-safe (same locking as -davinci).
+    - Unlike -davinci the stereo-mix option is hidden here, because
+      a downmix would be a re-encode.
+  NVENCForge.exe -join <one .NoSound video> <audio/subtitle files>
+    - Recombines the silent picture with the dropped audio and
+      subtitle files into one ".joined.mkv", copying everything 1:1.
+    - The base contributes its picture only. If you accidentally
+      drop a file that still has its own audio/subtitles, it stops
+      and asks before continuing (those internal tracks are dropped,
+      only the picture is used).
+  Use -split / -join for a true lossless round-trip. Use -davinci
+  when you need DaVinci-ready output (AAC audio, cleaned subtitles).
 
 SUBTITLE CLEANER
   Every extracted .srt is cleaned automatically: HTML/styling
@@ -101,7 +128,7 @@ OUTPUT & REQUIREMENTS
   Output folder:  output (next to the processed files)
   System:         Windows 10/11 x64, Nvidia GPU (Maxwell+)
                   with up-to-date drivers.
-                  (The -streams toolkit needs no Nvidia GPU.)
+                  (The -davinci, -split and -join modes need no Nvidia GPU.)
 
   Press Ctrl+C during a conversion to stop; the partial result is
   saved as a playable ".preview.mkv" instead of being discarded.

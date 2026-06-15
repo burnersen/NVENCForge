@@ -140,13 +140,13 @@ Where `-davinci` re-encodes incompatible audio to AAC and converts/cleans subtit
 
 | You run… | You get… |
 |---|---|
-| `-split` on one file | A prompt to pick tracks (Enter = all), then a silent `.NoSound` picture (kept in the source container, `mp4` stays `mp4`, everything else → `mkv`), each audio track in its **native** container (`.ac3` `.dts` `.eac3` `.m4a` `.flac` `.thd` `.mka` …) and each subtitle **untouched** (`.srt` `.ass` `.sup` `.idx` …) |
+| `-split` on one file | A prompt to pick tracks (Enter = all), then a silent `.NoSound` picture (`mp4`/`mov` and transport streams like `.ts`/`.m2ts` become `mp4`, everything else → `mkv`), each audio track in its **native** container (`.ac3` `.dts` `.eac3` `.m4a` `.flac` `.thd` `.mka` …) and each subtitle **untouched** (`.srt` `.ass` `.sup` `.idx` …) |
 | `-split` on a folder, or nothing | **Batch mode:** every supported video split automatically, all tracks, no prompts, parallel-instance safe |
 | `-join` on a silent video + audio/subtitle files | One `.joined.mkv` with everything copied 1:1, German audio set as default, languages and forced/SDH flags read from the filenames |
 
 The silent picture always gets a `.NoSound` suffix, so the original is never overwritten. The stereo-downmix option from `-davinci` is hidden in `-split`, because a downmix would be a re-encode.
 
-**Safety net on join:** the base video is meant to be the silent `.NoSound` picture (its picture is the only thing used). If you accidentally drop a file that still carries its own audio or subtitles, `-join` stops and asks before continuing, so you don't silently lose tracks. Picture and sound stay in sync because everything is a plain copy of equal length (guaranteed when the parts came from a previous `-split`).
+**On join, only the picture of the base is used.** `-join` takes just the video track from the base file (the silent `.NoSound` picture); any audio or subtitles the base might still carry are simply ignored, never merged in. Your source files are never modified, so nothing is lost — you choose the audio and subtitle files you actually want as the other arguments. Because every stream is copied 1:1, picture and sound stay in sync; a `-split` followed by `-join` is a clean lossless round-trip.
 
 ---
 

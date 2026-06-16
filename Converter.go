@@ -38,6 +38,7 @@ type convJob struct {
 	pureAudioCopy bool
 	audioStreams  []AudioStreamInfo
 	subCodecs     []string
+	sourceTag     string // value for the sourceTagKey metadata (origin file name)
 }
 
 // staleStatsTagArgs deletes the per-track statistics tags (BPS,
@@ -54,6 +55,18 @@ func staleStatsTagArgs() []string {
 		args = append(args, "-metadata:s", t+"=", "-metadata:s", t+"-eng=")
 	}
 	return args
+}
+
+// sourceTagArgs stamps the origin file name into the output as a global
+// container tag (sourceTagKey). The "already converted" check reads it back to
+// tell a genuine resume apart from a name collision: two different sources whose
+// cleaned names AND durations happen to match no longer overwrite or shadow each
+// other. Empty tag → no args (older outputs simply have none; handled there).
+func sourceTagArgs(sourceTag string) []string {
+	if sourceTag == "" {
+		return nil
+	}
+	return []string{"-metadata", sourceTagKey + "=" + sourceTag}
 }
 
 func (j convJob) buildConvertArgs() []string {
@@ -97,6 +110,7 @@ func (j convJob) buildConvertArgs() []string {
 		a = append(a, "-c:t", "copy")
 	}
 	a = append(a, staleStatsTagArgs()...)
+	a = append(a, sourceTagArgs(j.sourceTag)...)
 	return append(a, j.outputPath)
 }
 
@@ -138,6 +152,7 @@ func (j convJob) buildRemuxArgs() []string {
 		}
 	}
 	a = append(a, staleStatsTagArgs()...)
+	a = append(a, sourceTagArgs(j.sourceTag)...)
 	return append(a, j.outputPath)
 }
 
@@ -451,21 +466,54 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 	basenameFull := base
 
-	// srcStats is probed lazily: only when an existing output has to be told
-	// apart from a name collision (different source, same cleaned name).
-	var srcStats *VideoStats
-	probeSource := func() bool {
-		if srcStats != nil {
-			return true
+	// The source is probed once, up front: the skip/collision check, the
+	// bitrate/scaling decision and the encode itself all need these stats. The
+	// lazy probe of earlier versions saved nothing measurable (a skipped file
+	// still probes its existing output), and the skip check now needs to know
+	// the result codec, so a single probe keeps the logic correct and simpler.
+	stats, statErr := getVideoStats(ctx, filePath)
+	if statErr != nil {
+		result.ErrMsg = fmt.Sprintf("Converter.go: processFile: FFprobe error: %v", statErr)
+		result.FailedAt = time.Now()
+		return result
+	}
+	stats.FileSizeMB = getFileSizeMB(filePath)
+
+	// resultCodec is the codec the OUTPUT will actually carry: the target codec
+	// for a real re-encode, but the unchanged source codec when the source is
+	// lean enough to be only remuxed (mirrors the doConvert/doRemux switch
+	// below). The skip check compares against it, so a finished .h265 never
+	// blocks a -av1 run and vice versa — different codec mode, different output.
+	targetCodec := "hevc"
+	if cfg.av1 {
+		targetCodec = "av1"
+	}
+	resultCodec := targetCodec
+	{
+		doScale := needsScaling(cfg, stats.Width, stats.Height)
+		srcKbps := determineBitrateKbps(stats)
+		calc := cappedTargetKbps(srcKbps, outputHeightFor(stats, doScale), cfg.maxBitrateKbps)
+		if !(doScale || calc < srcKbps) {
+			resultCodec = stats.VideoCodec
 		}
-		st, err := getVideoStats(ctx, filePath)
-		if err != nil {
-			result.ErrMsg = fmt.Sprintf("Converter.go: processFile: FFprobe error: %v", err)
-			result.FailedAt = time.Now()
-			return false
+	}
+
+	// srcID identifies the exact source file (name incl. extension); it is
+	// stamped into every output as the sourceTagKey metadata and read back here.
+	// isOurFinishedOutput decides whether an existing output is THIS run's result
+	// (→ skip) or only looks alike: a different codec mode, or a different source
+	// whose cleaned name + duration collide with ours (→ write a numbered output).
+	srcID := filepath.Base(filePath)
+	isOurFinishedOutput := func(cs *VideoStats) bool {
+		if !durationsClose(cs.DurationSec, stats.DurationSec) {
+			return false // different length → different source
 		}
-		srcStats = st
-		return true
+		if !strings.EqualFold(cs.VideoCodec, resultCodec) {
+			return false // other codec mode's output → not this run's result
+		}
+		// Same codec & length: ours only if the source tag matches (or is absent
+		// on a legacy output we cannot disambiguate — keep the old skip behaviour).
+		return cs.SourceTag == "" || strings.EqualFold(cs.SourceTag, srcID)
 	}
 
 	collision := false
@@ -502,19 +550,20 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			result.ErrMsg = "Corrupt output file blocked"
 			return result
 		}
-		if !probeSource() {
+		if isOurFinishedOutput(candStats) {
+			fmt.Println(pterm.Gray("  Skipped: output file already exists."))
+			fmt.Println()
+			result.Skipped = true
 			return result
 		}
-		if !durationsClose(candStats.DurationSec, srcStats.DurationSec) {
-			// Existing output stems from a DIFFERENT source whose cleaned name
-			// collides with ours → pick a numbered output name instead of skipping.
-			collision = true
+		if !strings.EqualFold(candStats.VideoCodec, resultCodec) {
+			// Same source in the OTHER codec mode (e.g. a .h265 while we make
+			// .av1): leave it untouched and write our own differently-named output.
 			continue
 		}
-		fmt.Println(pterm.Gray("  Skipped: output file already exists."))
-		fmt.Println()
-		result.Skipped = true
-		return result
+		// Same cleaned name but a different source (different length, or same
+		// length with a non-matching source tag) → write a numbered output.
+		collision = true
 	}
 
 	if collision {
@@ -529,8 +578,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 				}
 				occupied = true
 				// A numbered output may already belong to THIS source (resume).
-				if cs, e := getVideoStats(ctx, p); e == nil &&
-					durationsClose(cs.DurationSec, srcStats.DurationSec) {
+				if cs, e := getVideoStats(ctx, p); e == nil && isOurFinishedOutput(cs) {
 					fmt.Println(pterm.Gray("  Skipped: output file already exists (" +
 						filepath.Base(p) + ")."))
 					fmt.Println()
@@ -555,20 +603,8 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			pterm.LightCyan(basenameFull))
 	}
 
-	fileSizeMB := getFileSizeMB(filePath)
+	fileSizeMB := stats.FileSizeMB
 	lockPath := filepath.Join(outputDir, basenameFull+".lock")
-
-	stats := srcStats
-	if stats == nil {
-		st, err := getVideoStats(ctx, filePath)
-		if err != nil {
-			result.ErrMsg = fmt.Sprintf("Converter.go: processFile: FFprobe error: %v", err)
-			result.FailedAt = time.Now()
-			return result
-		}
-		stats = st
-	}
-	stats.FileSizeMB = fileSizeMB
 
 	unlock, lockErr := acquireProcessingLock(lockPath, fileSizeMB, filePath)
 	if lockErr != nil {
@@ -582,6 +618,11 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	for _, suf := range skipSuffixes {
 		candidate := filepath.Join(outputDir, basenameFull+suf+".mkv")
 		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		// Only OUR finished output aborts here; another codec mode's file or a
+		// different source must not make us skip (mirrors the pre-lock check).
+		if cs, e := getVideoStats(ctx, candidate); e == nil && !isOurFinishedOutput(cs) {
 			continue
 		}
 		fmt.Println(pterm.Gray("  Skipped: output file found after acquiring lock (another instance was faster)."))
@@ -719,6 +760,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		isMKV:        ext == ".mkv",
 		audioStreams: stats.AudioStreams,
 		subCodecs:    stats.SubCodecs,
+		sourceTag:    srcID,
 	}
 
 	var outputFile string
@@ -912,6 +954,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		remuxArgs = append(remuxArgs, audioArgs...)
 		remuxArgs = append(remuxArgs, subArgs...)
 		remuxArgs = append(remuxArgs, staleStatsTagArgs()...)
+		remuxArgs = append(remuxArgs, sourceTagArgs(srcID)...)
 		remuxArgs = append(remuxArgs, mkvFile)
 
 		if err := runFFmpeg(ctx, remuxArgs, stats.DurationSec, idx, total, stats.FileSizeMB); err != nil {
@@ -937,6 +980,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			remuxNoSubs = append(remuxNoSubs, "-c:v", "copy")
 			remuxNoSubs = append(remuxNoSubs, audioArgs...)
 			remuxNoSubs = append(remuxNoSubs, staleStatsTagArgs()...)
+			remuxNoSubs = append(remuxNoSubs, sourceTagArgs(srcID)...)
 			remuxNoSubs = append(remuxNoSubs, "-sn", mkvFile)
 
 			if err2 := runFFmpeg(ctx, remuxNoSubs, stats.DurationSec, idx, total, stats.FileSizeMB); err2 != nil {
@@ -1095,6 +1139,15 @@ func getVideoStats(ctx context.Context, filePath string) (*VideoStats, error) {
 		s.BitrateBps, _ = strconv.ParseInt(p.Format.BitRate, 10, 64)
 	}
 	s.DurationSec, _ = strconv.ParseFloat(p.Format.Duration, 64)
+	// Origin tag NVENCForge stamps into its own outputs (case-insensitive: the
+	// Matroska muxer may upper-case the key). Used by the skip check to separate
+	// a real resume from a name collision.
+	for k, v := range p.Format.Tags {
+		if strings.EqualFold(k, sourceTagKey) {
+			s.SourceTag = v
+			break
+		}
+	}
 	return s, nil
 }
 

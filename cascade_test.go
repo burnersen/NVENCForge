@@ -101,7 +101,7 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	got := string(raw)
 	for _, want := range []string{
 		"# my notes",            // comment untouched
-		"targetCQ=26",           // reset to default
+		"targetCQ=24",           // reset to default
 		"maxBitrate1080p=12000", // valid value untouched
 		"maxResolution=1080",    // reset to default
 		"nvencPreset=p5",        // reset to default

@@ -45,7 +45,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.1.4"
+const appVersion = "1.1.5"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -76,6 +76,14 @@ var videoExtensions = map[string]bool{
 // remuxSuffix() can emit (.h265/.h264/.av1) plus the legacy ".remux" fallback.
 var skipSuffixes = []string{".h265", ".h264", ".remux", ".av1"}
 var skipInputSuffixes = []string{".h265", ".h264", ".remux", ".preview", ".av1"}
+
+// sourceTagKey is the global container metadata key NVENCForge writes into every
+// output it produces (see sourceTagArgs). It records the exact source file name
+// so the "already converted" skip check can tell a genuine resume apart from a
+// name collision — two different sources whose cleaned names (and durations)
+// happen to match. Matroska may store the key upper-cased, so read it back with
+// a case-insensitive compare.
+const sourceTagKey = "NVENCFORGE_SOURCE"
 
 // ----------------------------------------------------------------------------
 // Filename normalisation (integrated from CleanVideoNames)
@@ -223,8 +231,9 @@ type ffprobeDisposition struct {
 }
 
 type ffprobeFormat struct {
-	Duration string `json:"duration"`
-	BitRate  string `json:"bit_rate"`
+	Duration string            `json:"duration"`
+	BitRate  string            `json:"bit_rate"`
+	Tags     map[string]string `json:"tags"`
 }
 
 type AudioStreamInfo struct {
@@ -254,6 +263,7 @@ type VideoStats struct {
 	ColorTransfer  string
 	ColorPrimaries string
 	ColorRange     string
+	SourceTag      string // sourceTagKey value found in the container (origin file name), "" if none
 }
 
 type ProcessResult struct {

@@ -57,7 +57,7 @@ var appSettings = defaultAppSettings()
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		targetCQ:              24,
+		targetCQ:              26,
 		maxBitrate1080p:       8000,
 		maxBitrateOriginal:    22000,
 		maxResolution:         1080,
@@ -354,7 +354,7 @@ func writeDefaultAppConfig(path string) error {
 # Lines starting with # are comments. Format:  key=value
 
 # Constant Quality (CQ). Lower = better quality, larger file.
-# Allowed: 1 to 51.  Default: 24
+# Allowed: 1 to 51.  Default: 26
 targetCQ=%d
 
 # Maximum target bitrate (kbit/s) in standard mode.

@@ -45,7 +45,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.1.6"
+const appVersion = "1.1.7"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -444,18 +444,31 @@ func initTools() error {
 // Hardware check: NVENC HEVC 10-bit dummy encode + CAS filter probe
 // ----------------------------------------------------------------------------
 
-// checkHardwareCapabilities probes the configured B-frame count first. Older
-// NVENC generations (Maxwell/Pascal) encode HEVC fine but have no B-frame
-// support — for those the probe is retried without B-frames and the session
-// continues with bFrames=0 instead of refusing to start.
+// nvencAdvancedAQ is true while the GPU supports Temporal AQ + multipass (Turing
+// / RTX 20 series or newer). checkHardwareCapabilities clears it for older cards
+// (Pascal/Volta) so the real encode drops -temporal_aq/-multipass instead of
+// failing on every single file.
+var nvencAdvancedAQ = true
+
+// checkHardwareCapabilities probes with the SAME flags the real encode uses, so a
+// card that passes here cannot fail later on every file. HEVC B-frames AND Temporal
+// AQ/multipass share the Turing+ gate; older cards (Maxwell-2/Pascal/Volta) are
+// retried once fully degraded and then run without those features instead of
+// refusing to start. Maxwell-1 / no-NVENC cards fail the 10-bit probe outright.
 func checkHardwareCapabilities() error {
 	pInfo.Println("Checking GPU capabilities (NVENC HEVC 10-bit)...")
 
-	tryEncode := func(bf int) (string, error) {
+	tryEncode := func(bf int, advancedAQ bool) (string, error) {
 		args := []string{
 			"-v", "error", "-f", "lavfi",
 			"-i", "color=c=black:s=1920x1080:d=1",
 			"-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
+			"-preset", appSettings.nvencPreset, "-tune", "hq",
+			"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead),
+			"-spatial_aq", "1",
+		}
+		if advancedAQ {
+			args = append(args, "-multipass", "qres", "-temporal_aq", "1")
 		}
 		if bf > 0 {
 			args = append(args, "-bf", strconv.Itoa(bf), "-b_ref_mode", "2")
@@ -467,17 +480,20 @@ func checkHardwareCapabilities() error {
 		return strings.TrimSpace(string(out)), err
 	}
 
-	if out, err := tryEncode(appSettings.bFrames); err != nil {
-		retried := false
-		if appSettings.bFrames > 0 {
-			if _, retryErr := tryEncode(0); retryErr == nil {
+	if out, err := tryEncode(appSettings.bFrames, true); err != nil {
+		// HEVC B-frames and Temporal AQ share the same Turing+ gate, so a single
+		// fully-degraded retry (no B-frames, no Temporal AQ/multipass) decides it:
+		// succeeds → pre-Turing card (Pascal/Volta), keep encoding without those
+		// features; fails → genuine rejection (Maxwell-1, no 10-bit, no NVENC).
+		if _, retryErr := tryEncode(0, false); retryErr == nil {
+			if appSettings.bFrames > 0 {
 				appSettings.bFrames = 0
-				retried = true
 				pWarn.Println("GPU does not support HEVC B-frames — continuing without B-frames.")
 				pWarn.Println("Set 'bFrames=0' in NVENCForge_Config.ini to make this permanent.")
 			}
-		}
-		if !retried {
+			nvencAdvancedAQ = false
+			pWarn.Println("GPU does not support Temporal AQ / multipass (needs RTX 20 series or newer) — continuing without them.")
+		} else {
 			return fmt.Errorf("main.go: checkHardwareCapabilities: NVENC dummy encode failed: %v | %s",
 				err, out)
 		}

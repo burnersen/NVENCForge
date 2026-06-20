@@ -1730,9 +1730,15 @@ func buildNVENCOpts(maxBitrate, bufsize string, gop int) []string {
 		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
 		"-profile:v", "main10", "-pix_fmt", "p010le",
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
-		"-multipass", "qres", "-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
-		"-g", strconv.Itoa(gop), "-spatial_aq", "1", "-temporal_aq", "1",
+		"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
+		"-g", strconv.Itoa(gop), "-spatial_aq", "1",
 		"-aq-strength", "8", "-bf", strconv.Itoa(appSettings.bFrames),
+	}
+	// Temporal AQ + multipass need Turing (RTX 20) or newer. checkHardwareCapabilities
+	// clears nvencAdvancedAQ on older cards so the encode drops them instead of
+	// failing on every file.
+	if nvencAdvancedAQ {
+		opts = append(opts, "-multipass", "qres", "-temporal_aq", "1")
 	}
 	// b_ref_mode needs B-frames; older GPUs (no B-frame support) reject it.
 	if appSettings.bFrames > 0 {

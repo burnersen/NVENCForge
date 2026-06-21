@@ -1,4 +1,7 @@
 @echo off
+REM NVENCForge — Required Notice: Copyright (c) 2026 burnersen — NVENCForge
+REM Licensed under the PolyForm Noncommercial License 1.0.0 (non-commercial use only).
+REM Full terms: LICENSE.md · https://polyformproject.org/licenses/noncommercial/1.0.0
 REM ============================================================================
 REM  build.bat - NVENCForge build script
 REM ----------------------------------------------------------------------------

@@ -14,6 +14,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 [![AV1 Ready](https://img.shields.io/badge/AV1-RTX%2040%2B-orange)](#-av1-mode-ready-for-the-future)
 [![Written in Go](https://img.shields.io/badge/Made%20with-Go-00ADD8?logo=go)](#-building-from-source)
 [![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue)](#-license)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/burnersen)
 
 **[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/T5G0219GA6)**
 
@@ -220,31 +221,29 @@ NVENCForge is a personal hobby project, built over two months of evenings to fit
 
 ---
 
-## ❤️ Support
+## 📜 License
 
-NVENCForge is a hobby project, free for personal use. If it saved you terabytes:
+NVENCForge is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+Free to use, study, modify and share for any **noncommercial** purpose: personal use, hobby, education, research. **Commercial use, resale or bundling into paid products is not permitted** without a separate license from the author. Want a commercial license? Open an issue or reach out.
 
-- ⭐ **Star this repo**: fame is the currency here
-- ☕ **Buy me a coffee**: keeps the forge burning:
+### FFmpeg
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/T5G0219GA6)
+NVENCForge does **not** bundle FFmpeg. On first run it downloads an official static build from the [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) project (GPL-licensed) onto your machine, or you provide your own copy. FFmpeg is a separate work by the [FFmpeg project](https://ffmpeg.org) under its own license; NVENCForge invokes it as an external program. This software uses libraries from the FFmpeg project under the GPL.
 
-Found a bug? Open an issue with the console output (run with `-debug` for details).
+---
+
+## 💬 Feedback & contributions
+
+Found a bug or have a feature wish? Please open an issue on the [GitHub repository](../../issues) — feedback is genuinely welcome. Try it out and don't hesitate to post your wishes. Forks and pull requests for noncommercial improvements are welcome too. When reporting a bug, the console output helps (run with `-debug` for details).
+
+---
+
+## ☕ Support
+
+NVENCForge is free and made in my spare time. If it helps you and you'd like to say thanks, you can [buy me a coffee on Ko-fi](https://ko-fi.com/burnersen). Completely optional — and thank you!
 
 ---
 
 ## ⚠️ Disclaimer
 
-NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with great care (your originals are never deleted, only moved to the recycle bin after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).
-
----
-
-## 📜 License
-
-**NVENCForge is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).**
-
-That means: free to use, study, modify and share for any **noncommercial** purpose: personal use, hobby, education, research. **Commercial use, resale or bundling into paid products is not permitted** without a separate license from the author. Want a commercial license? Open an issue or reach out.
-
-### FFmpeg
-
-NVENCForge does **not** bundle FFmpeg. On first run it downloads an official static build from the [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) project (GPL-licensed) onto your machine, or you provide your own copy. FFmpeg is a separate work by the [FFmpeg project](https://ffmpeg.org) under its own license; NVENCForge invokes it as an external program. This software uses libraries from the FFmpeg project under the GPL.
+NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved to the recycle bin after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).

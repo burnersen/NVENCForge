@@ -21,10 +21,10 @@ func TestCappedTargetKbps(t *testing.T) {
 		want    int64
 	}{
 		// 1080p mode (ceiling 8000, floor 1500)
-		{"1080p lean → floor", 1200, 1080, 8000, 1500},      // 0.8*1200=960 < floor
-		{"1080p just-under floor", 1800, 1080, 8000, 1500},  // 0.8*1800=1440 < floor
-		{"1080p mid → 80%", 4000, 1080, 8000, 3200},         // 0.8*4000 between floor/ceiling
-		{"1080p high → ceiling", 12000, 1080, 8000, 8000},   // 0.8*12000=9600 > ceiling
+		{"1080p lean → floor", 1200, 1080, 8000, 1500},     // 0.8*1200=960 < floor
+		{"1080p just-under floor", 1800, 1080, 8000, 1500}, // 0.8*1800=1440 < floor
+		{"1080p mid → 80%", 4000, 1080, 8000, 3200},        // 0.8*4000 between floor/ceiling
+		{"1080p high → ceiling", 12000, 1080, 8000, 8000},  // 0.8*12000=9600 > ceiling
 		// 720p mode (floor 800)
 		{"720p lean → floor", 900, 720, 8000, 800}, // 0.8*900=720 < floor
 		{"720p mid → 80%", 3000, 720, 8000, 2400},  // 0.8*3000 between floor/ceiling

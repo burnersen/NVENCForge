@@ -16,7 +16,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 [![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue)](#-license)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/burnersen)
 
-**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/T5G0219GA6)**
+**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
 
 <img src=".github/screenshot.png" alt="NVENCForge converting a 4K HDR clip with -keep: 266 MB in, 59 MB out, HDR detected and passed through, original kept" width="840">
 

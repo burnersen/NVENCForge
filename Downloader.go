@@ -37,9 +37,13 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// resolveFFmpegDownloadURL returns the download URL of the newest static
-// win64 GPL master build (the same flavor the old "latest" tag pointed at).
-// Fallback: any non-shared win64 GPL zip from the newest releases.
+// resolveFFmpegDownloadURL returns the download URL of the newest STABLE
+// release-branch win64 GPL build (e.g. "ffmpeg-n8.1-latest-win64-gpl-8.1.zip").
+// Master autobuilds are deliberately skipped: they track FFmpeg's development
+// branch, which renames or removes encoder options without notice (2026-07 it
+// dropped the -spatial_aq alias, which made the NVENC probe fail and look
+// like a missing GPU). Fallback: any non-shared win64 GPL zip from the
+// newest releases.
 func resolveFFmpegDownloadURL(client *http.Client) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, ffmpegReleasesAPI, nil)
 	if err != nil {
@@ -63,7 +67,8 @@ func resolveFFmpegDownloadURL(client *http.Client) (string, error) {
 		return "", fmt.Errorf("Downloader.go: resolveFFmpegDownloadURL (decode): %w", err)
 	}
 
-	var fallback string
+	var best, fallback string
+	bestMajor, bestMinor := -1, -1
 	for _, rel := range releases {
 		for _, a := range rel.Assets {
 			n := strings.ToLower(a.Name)
@@ -71,14 +76,22 @@ func resolveFFmpegDownloadURL(client *http.Client) (string, error) {
 				strings.Contains(n, "shared") {
 				continue
 			}
-			// Master build, e.g. "ffmpeg-N-124941-g54749da98a-win64-gpl.zip".
-			if strings.HasPrefix(n, "ffmpeg-n-") && strings.HasSuffix(n, "-win64-gpl.zip") {
-				return a.BrowserDownloadURL, nil
-			}
 			if fallback == "" {
 				fallback = a.BrowserDownloadURL
 			}
+			// Stable release-branch build, e.g.
+			// "ffmpeg-n8.1-latest-win64-gpl-8.1.zip" — take the highest version.
+			var major, minor int
+			if _, err := fmt.Sscanf(n, "ffmpeg-n%d.%d-latest-win64-gpl-", &major, &minor); err != nil {
+				continue
+			}
+			if major > bestMajor || (major == bestMajor && minor > bestMinor) {
+				bestMajor, bestMinor, best = major, minor, a.BrowserDownloadURL
+			}
 		}
+	}
+	if best != "" {
+		return best, nil
 	}
 	if fallback != "" {
 		return fallback, nil
@@ -86,13 +99,24 @@ func resolveFFmpegDownloadURL(client *http.Client) (string, error) {
 	return "", errors.New("Downloader.go: resolveFFmpegDownloadURL: no win64-gpl zip found in the latest releases")
 }
 
-// downloadFFmpeg downloads ffmpeg-master-latest-win64-gpl.zip from the official
-// BtbN build repository and extracts only bin/ffmpeg.exe and bin/ffprobe.exe
-// into targetDir. The ZIP is streamed to a temporary file rather than being
-// loaded into RAM, keeping memory usage constant regardless of archive size.
+// The download spinner repaints its line in place, and plain conhost leaves
+// remnants of longer predecessors standing ("Extracted: ffmpeg.exee (7s))") —
+// same defect the Auto-CQ spinner had. Padding every phase text to the width
+// of the longest one makes each repaint cover the whole previous line.
+const dlSpinnerStartText = "Downloading FFmpeg (this may take a minute)..."
+
+func dlSpinnerText(format string, args ...any) string {
+	return fmt.Sprintf("%-*s", len(dlSpinnerStartText), fmt.Sprintf(format, args...))
+}
+
+// downloadFFmpeg downloads the newest stable release build (win64 GPL) from
+// the official BtbN build repository and extracts only bin/ffmpeg.exe and
+// bin/ffprobe.exe into targetDir. The ZIP is streamed to a temporary file
+// rather than being loaded into RAM, keeping memory usage constant regardless
+// of archive size.
 func downloadFFmpeg(targetDir string) error {
 	spinner, _ := pterm.DefaultSpinner.
-		WithText("Downloading FFmpeg (this may take a minute)...").
+		WithText(dlSpinnerStartText).
 		Start()
 
 	// ── Step 1: stream ZIP to a temp file ───────────────────────────────────
@@ -152,7 +176,7 @@ func downloadFFmpeg(targetDir string) error {
 		return fmt.Errorf("Downloader.go: downloadFFmpeg (close temp): %w", err)
 	}
 
-	spinner.UpdateText(fmt.Sprintf("Download complete (%.1f MB). Extracting...", float64(written)/1048576))
+	spinner.UpdateText(dlSpinnerText("Download complete (%.1f MB). Extracting...", float64(written)/1048576))
 
 	// ── Step 2: open ZIP and extract only the two target executables ─────────
 	zr, err := zip.OpenReader(tmpPath)
@@ -170,7 +194,7 @@ func downloadFFmpeg(targetDir string) error {
 
 	for _, f := range zr.File {
 		// The archive contains a top-level directory, e.g.:
-		//   ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe
+		//   ffmpeg-n8.1-latest-win64-gpl-8.1/bin/ffmpeg.exe
 		// We match by the trailing path component after the first directory.
 		parts := strings.SplitN(filepath.ToSlash(f.Name), "/", 2)
 		if len(parts) != 2 {
@@ -210,7 +234,7 @@ func downloadFFmpeg(targetDir string) error {
 		_ = out.Close()
 		_ = rc.Close()
 		extracted++
-		spinner.UpdateText(fmt.Sprintf("Extracted: %s", filepath.Base(destPath)))
+		spinner.UpdateText(dlSpinnerText("Extracted: %s", filepath.Base(destPath)))
 	}
 
 	_ = spinner.Stop()

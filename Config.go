@@ -31,6 +31,8 @@ type AppConfig struct {
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
+	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
+	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-targetCQ (nur H.265)
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 
@@ -55,6 +57,9 @@ type AppSettings struct {
 	av1TargetCQ           int
 	av1MaxBitrate1080p    int64
 	av1MaxBitrateOriginal int64
+	autoCQ                bool
+	autoCQTargetVMAF      float64
+	autoCQTolerance       float64
 }
 
 var appSettings = defaultAppSettings()
@@ -76,6 +81,9 @@ func defaultAppSettings() AppSettings {
 		av1TargetCQ:           32,
 		av1MaxBitrate1080p:    6000,
 		av1MaxBitrateOriginal: 13000,
+		autoCQ:                true,
+		autoCQTargetVMAF:      97,
+		autoCQTolerance:       0.5,
 	}
 }
 
@@ -144,6 +152,9 @@ func defaultConfigStrings() map[string]string {
 		"av1TargetCQ":           strconv.Itoa(d.av1TargetCQ),
 		"av1MaxBitrate1080p":    strconv.FormatInt(d.av1MaxBitrate1080p, 10),
 		"av1MaxBitrateOriginal": strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
+		"autoCQ":                strconv.FormatBool(d.autoCQ),
+		"autoCQTargetVMAF":      strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		"autoCQTolerance":       strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 	}
 }
 
@@ -318,6 +329,24 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "autoCQ":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.autoCQ = b
+			} else {
+				bad(key, val)
+			}
+		case "autoCQTargetVMAF":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 70 && fv <= 99 {
+				s.autoCQTargetVMAF = fv
+			} else {
+				bad(key, val)
+			}
+		case "autoCQTolerance":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 5 {
+				s.autoCQTolerance = fv
+			} else {
+				bad(key, val)
+			}
 		case "extraFilenameChars":
 			// Windows-forbidden path characters and whitespace can never be
 			// allowed; they are dropped individually with a warning.
@@ -422,6 +451,32 @@ av1MaxBitrate1080p=%d
 # Maximum AV1 target bitrate (kbit/s) in -original mode.
 # Allowed: greater than 1000.  Default: %d
 av1MaxBitrateOriginal=%d
+
+# --- Auto-CQ mode (-autocq, on by default; H.265 only) ---
+
+# Run Auto-CQ by default, as if -autocq were passed on every start.
+# -noautocq disables it for a single run. H.265 only (AV1 keeps using
+# av1TargetCQ). Allowed: true, false.  Default: %t
+autoCQ=%t
+
+# VMAF quality target for -autocq. Sample windows of each file (placed on
+# the source's bitrate profile, hardest scene always included) are encoded
+# at CQ 26 and CQ 30, measured with VMAF against the source, and the CQ
+# expected to hit this target is verified by one extra measurement before
+# the real encode (clamped to CQ 20-34). 97 stays visually transparent
+# even in direct comparison; lower = smaller files.
+# Allowed: 70 to 99.  Default: %s
+autoCQTargetVMAF=%s
+
+# How far below autoCQTargetVMAF the Auto-CQ pick may land when that saves
+# CQ steps (smaller files). The search aims at (target - tolerance) and
+# accepts it as a hit; on pre-compressed sources whose quality tops out
+# below the target, the same margin applies under the reachable maximum,
+# and flat plateaus are additionally probed above CQ 30 (up to 34) for
+# extra savings backed by real measurements.
+# Differences up to ~0.5 VMAF are invisible; 0 always chases the target.
+# Allowed: 0 to 5.  Default: %s
+autoCQTolerance=%s
 `,
 		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
 		d.nvencPreset, d.nvencLookahead, d.bFrames,
@@ -430,7 +485,12 @@ av1MaxBitrateOriginal=%d
 		d.autoShutdown, d.extraFilenameChars,
 		d.av1TargetCQ, d.av1TargetCQ,
 		d.av1MaxBitrate1080p, d.av1MaxBitrate1080p,
-		d.av1MaxBitrateOriginal, d.av1MaxBitrateOriginal)
+		d.av1MaxBitrateOriginal, d.av1MaxBitrateOriginal,
+		d.autoCQ, d.autoCQ,
+		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
+		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64))
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}

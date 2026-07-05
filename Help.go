@@ -51,6 +51,32 @@ CONVERSION OPTIONS
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
+  -autocq        Pick the CQ automatically per file: short sample
+                 windows (placed on the source's bitrate profile,
+                 hardest scene always included) are encoded at
+                 CQ 26 and CQ 30, measured with VMAF, and the CQ
+                 that should hit the quality target (default 97,
+                 key "autoCQTargetVMAF" in the config) is verified
+                 by one extra measurement before the real encode
+                 (result clamped to CQ 20-34). The config key
+                 "autoCQTolerance" (default 0.5) lets the pick
+                 land that far below the target when it saves CQ
+                 steps (smaller files); 0 chases the full target.
+                 On sources whose quality plateaus flat below the
+                 target, CQ 32/34 are probed as well and used when
+                 their measured score stays within that tolerance.
+                 H.265 only, not available with -av1. Needs an
+                 FFmpeg build with the libvmaf filter (the
+                 auto-downloaded one has it). Videos shorter than
+                 30 s skip the analysis and use targetCQ as-is.
+                 Auto-CQ is enabled by default (config key
+                 autoCQ); set autoCQ=false there to opt out.
+  -noautocq      Disable Auto-CQ for this run (overrides the
+                 autoCQ=true config default).
+  -cq NN         Force a fixed CQ (1-51) for this run only:
+                 skips Auto-CQ and ignores targetCQ from the
+                 config. Example:  NVENCForge.exe -cq 28 video.mp4
+                 H.265 only (-av1 keeps using av1TargetCQ).
   -keep          Keep the original files: after a successful
                  conversion they are NOT moved to the recycle bin.
                  The output lives in its own folder, so nothing is
@@ -142,20 +168,24 @@ OUTPUT & REQUIREMENTS
   saved as a playable ".preview.mkv" instead of being discarded.
 `
 
-// writeHelpFileIfMissing creates the help file next to the executable when it
-// is absent. An existing file is never overwritten. Non-fatal on error: the
-// tool runs regardless of whether the file could be written.
-func writeHelpFileIfMissing() error {
+// syncHelpFile writes the user-facing manual next to the executable and
+// refreshes it whenever its content differs from this build's text — before
+// 1.2.1 an existing file was never touched, so the manual silently went
+// stale with every update. The file is generated output, not a user
+// document; keeping it current outweighs preserving hand edits. Written
+// only on an actual difference (no disk write on a normal start).
+// Non-fatal on error: the tool runs regardless.
+func syncHelpFile() error {
 	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("Help.go: writeHelpFileIfMissing: %w", err)
+		return fmt.Errorf("Help.go: syncHelpFile: %w", err)
 	}
 	path := filepath.Join(filepath.Dir(exePath), helpFileName)
-	if _, statErr := os.Stat(path); statErr == nil {
+	if old, readErr := os.ReadFile(path); readErr == nil && string(old) == helpFileContent {
 		return nil
 	}
 	if err := os.WriteFile(path, []byte(helpFileContent), 0o644); err != nil {
-		return fmt.Errorf("Help.go: writeHelpFileIfMissing: %w", err)
+		return fmt.Errorf("Help.go: syncHelpFile: %w", err)
 	}
 	return nil
 }

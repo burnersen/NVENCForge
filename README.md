@@ -50,6 +50,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 ## ✨ What NVENCForge does
 
 - 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
+- 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#-auto-cq-measured-quality-per-file).
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -94,6 +95,9 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
+| `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, see [Auto-CQ](#-auto-cq-measured-quality-per-file); H.265 only. Set `autoCQ=false` in the config to turn it off |
+| `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
+| `-cq NN` | Force a fixed CQ (1-51) for this run: skips Auto-CQ and the configured `targetCQ`; H.265 only |
 | `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-davinci` | For DaVinci Resolve workflow (split / extract / merge, re-encodes where needed); must be the first argument |
@@ -122,6 +126,30 @@ This is my personal workflow: pure drag & drop, no command line. Everyone has th
 4. **Important:** clear the **"Start in"** field of every shortcut; it must be **empty**, otherwise "Send to" won't work correctly.
 
 From then on: select any videos → right-click → *Send to* → pick a mode. Done.
+
+---
+
+## 🎚️ Auto-CQ: measured quality, per file
+
+*New in v1.2.* Every video compresses differently: one file looks perfect at CQ 30, another needs CQ 24 for the same visual quality. A single fixed quality level is always a compromise — too generous for easy material (wasted megabytes), too optimistic for hard material. **Auto-CQ replaces that guesswork with an actual measurement**, and it is enabled by default.
+
+Before each encode, NVENCForge runs a short per-file analysis (typically well under a minute, even for a two-hour movie):
+
+1. **Scan.** The source's bitrate profile is read without decoding, and a few short sample windows are placed on the demanding scenes — the hardest scene is always included, so easy scenes can't paint a rosy picture.
+2. **Probe.** Those windows are test-encoded at two anchor quality levels with *exactly* the settings of the real encode, and each result is scored with **VMAF** (a perceptual video-quality metric developed by Netflix, 0–100, where ~95+ is visually transparent to most viewers).
+3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 97) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
+
+Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and picks the cheapest CQ that still delivers the reachable maximum, probing even higher CQ levels (up to 34) when the quality curve is flat, purely for extra savings.
+
+Tuning knobs in `NVENCForge_Config.ini`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `autoCQ` | `true` | Auto-CQ as the startup default (off = classic fixed `targetCQ`) |
+| `autoCQTargetVMAF` | `97` | The quality target of the search (70–99) |
+| `autoCQTolerance` | `0.5` | May land up to this far below the target when that saves a CQ step → smaller files; `0` = exact targeting |
+
+For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ is H.265-only (AV1 keeps its own VMAF-calibrated default) and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
 
 ---
 
@@ -173,7 +201,7 @@ The silent picture always gets a `.NoSound` suffix, so the original is never ove
 
 Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched):
 
-CQ quality level, bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
+CQ quality level, Auto-CQ (on/off, VMAF target, tolerance), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
 
 ---
 

@@ -697,9 +697,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	bufBR := fmt.Sprintf("%dk", calcKbps*2)
 	gopSize := calcGOP(stats.FPSNum, stats.FPSDen)
 	var nvencOpts []string
-	if cfg.av1 {
+	switch {
+	case cfg.av1:
 		nvencOpts = buildAV1Opts(maxBR, bufBR, gopSize)
-	} else {
+	case cfg.forcedCQ > 0:
+		// -cq: manually forced CQ for this run — beats the configured
+		// targetCQ; Auto-CQ was already disabled at parse time.
+		nvencOpts = buildNVENCOptsWithCQ(cfg.forcedCQ, maxBR, bufBR, gopSize)
+	default:
 		nvencOpts = buildNVENCOpts(maxBR, bufBR, gopSize)
 	}
 	// HDR signalling is carried by the color tags copied 1:1 from the source in
@@ -753,7 +758,21 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			pInfo.Printf("%s Interlaced source (%s) — deinterlacing with bwdif.\n",
 				pterm.LightMagenta("›"), stats.FieldOrder)
 		}
-		vfOpts = []string{"-vf", buildVideoFilter(doScale, doDeint)}
+		filterChain := buildVideoFilter(doScale, doDeint)
+		vfOpts = []string{"-vf", filterChain}
+
+		// -autocq: pick the CQ for THIS file via sampled VMAF measurements.
+		// Only real H.265 re-encodes get here with the flag set (remuxes skip
+		// encoding entirely; -av1 clears the flag at startup — checked again
+		// defensively since the AV1 CQ scale is incompatible). On analysis
+		// failure autoDetectCQ already warned and the configured targetCQ in
+		// nvencOpts simply stays in effect.
+		if cfg.autoCQ && !cfg.av1 {
+			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize); ok {
+				nvencOpts = buildNVENCOptsWithCQ(cq, maxBR, bufBR, gopSize)
+				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
+			}
+		}
 	}
 
 	baseJob := convJob{
@@ -1728,21 +1747,32 @@ func videoIsInterlaced(s *VideoStats) bool {
 	return false
 }
 
+// buildNVENCOpts assembles the H.265 encoder options with the configured
+// targetCQ. -autocq swaps only the CQ via buildNVENCOptsWithCQ; every other
+// parameter stays identical — which also guarantees the Auto-CQ sample
+// encodes run with exactly the settings of the real encode.
+// AQ options use the dash spellings (-spatial-aq/-temporal-aq): FFmpeg
+// master removed the old underscore aliases in 2026, and the dash form
+// exists in every supported build.
 func buildNVENCOpts(maxBitrate, bufsize string, gop int) []string {
+	return buildNVENCOptsWithCQ(appSettings.targetCQ, maxBitrate, bufsize, gop)
+}
+
+func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	opts := []string{
-		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(appSettings.targetCQ),
+		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
 		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
 		"-profile:v", "main10", "-pix_fmt", "p010le",
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
-		"-g", strconv.Itoa(gop), "-spatial_aq", "1",
+		"-g", strconv.Itoa(gop), "-spatial-aq", "1",
 		"-aq-strength", "8", "-bf", strconv.Itoa(appSettings.bFrames),
 	}
 	// Temporal AQ + multipass need Turing (RTX 20) or newer. checkHardwareCapabilities
 	// clears nvencAdvancedAQ on older cards so the encode drops them instead of
 	// failing on every file.
 	if nvencAdvancedAQ {
-		opts = append(opts, "-multipass", "qres", "-temporal_aq", "1")
+		opts = append(opts, "-multipass", "qres", "-temporal-aq", "1")
 	}
 	// b_ref_mode needs B-frames; older GPUs (no B-frame support) reject it.
 	if appSettings.bFrames > 0 {

@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.1.7"
+const appVersion = "1.2.4"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -450,7 +450,7 @@ func initTools() error {
 
 // nvencAdvancedAQ is true while the GPU supports Temporal AQ + multipass (Turing
 // / RTX 20 series or newer). checkHardwareCapabilities clears it for older cards
-// (Pascal/Volta) so the real encode drops -temporal_aq/-multipass instead of
+// (Pascal/Volta) so the real encode drops -temporal-aq/-multipass instead of
 // failing on every single file.
 var nvencAdvancedAQ = true
 
@@ -469,10 +469,10 @@ func checkHardwareCapabilities() error {
 			"-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
 			"-preset", appSettings.nvencPreset, "-tune", "hq",
 			"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead),
-			"-spatial_aq", "1",
+			"-spatial-aq", "1",
 		}
 		if advancedAQ {
-			args = append(args, "-multipass", "qres", "-temporal_aq", "1")
+			args = append(args, "-multipass", "qres", "-temporal-aq", "1")
 		}
 		if bf > 0 {
 			args = append(args, "-bf", strconv.Itoa(bf), "-b_ref_mode", "2")
@@ -659,7 +659,9 @@ func acquireProcessingLock(lockPath string, sizeMB float64, sourceFile string) (
 func (cfg *AppConfig) parseArgs(args []string) []string {
 	var rest []string
 	explicitBitrate := false
-	for _, arg := range args {
+	sawAutoCQFlag, sawNoAutoCQ := false, false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if strings.EqualFold(arg, "-shutdown") {
 			cfg.autoShutdown = true
 			pInfo.Println("Auto-shutdown after completion enabled.")
@@ -685,6 +687,32 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("Keep-source mode enabled: originals are NOT moved to the recycle bin.")
 			continue
 		}
+		if strings.EqualFold(arg, "-autocq") {
+			cfg.autoCQ = true
+			sawAutoCQFlag = true
+			continue
+		}
+		if strings.EqualFold(arg, "-noautocq") {
+			cfg.autoCQ = false
+			sawNoAutoCQ = true
+			continue
+		}
+		if strings.EqualFold(arg, "-cq") {
+			// Two-token flag: the CQ value follows as its own argument.
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil {
+					i++ // the number belongs to -cq, even when out of range
+					if n >= 1 && n <= 51 {
+						cfg.forcedCQ = n
+					} else {
+						pWarn.Printf("-cq %d is out of range (1-51) — ignored.\n", n)
+					}
+					continue
+				}
+			}
+			pWarn.Println("-cq needs a number from 1 to 51 (e.g. \"-cq 28\") — ignored.")
+			continue
+		}
 		if len(arg) > 1 && arg[0] == '-' {
 			if _, errStat := os.Stat(arg); os.IsNotExist(errStat) {
 				if n, err := strconv.ParseInt(arg[1:], 10, 64); err == nil && n > 0 {
@@ -701,12 +729,43 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 					pWarn.Printf("'%s' must be the FIRST argument — ignored here.\n", strings.ToLower(arg))
 					pWarn.Printf("Example: NVENCForge.exe %s file.mkv\n", strings.ToLower(arg))
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -orig/-original, -copyaudio/-ca, -av1, -keep, -shutdown, -davinci, -split, -join\n", arg)
+					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
 				}
 				continue
 			}
 		}
 		rest = append(rest, arg)
+	}
+	// -cq targets the H.265 CQ scale (1-51); av1_nvenc uses its own 1-63
+	// scale where the same number means a different quality, so a forced
+	// value is dropped for AV1 just like -autocq.
+	if cfg.forcedCQ > 0 && cfg.av1 {
+		pWarn.Println("-cq does not apply to AV1 — AV1 uses av1TargetCQ from the config instead.")
+		cfg.forcedCQ = 0
+	}
+	// A manual -cq exists exactly for the runs where the automatic pick is
+	// unwanted, so it wins over every Auto-CQ source (flag or config).
+	if cfg.forcedCQ > 0 {
+		cfg.autoCQ = false
+		pInfo.Printf("Manual CQ %d forced for this run — Auto-CQ disabled.\n", cfg.forcedCQ)
+	}
+	// Auto-CQ can come from the -autocq flag or the config (autoCQ=true);
+	// the last flag on the command line wins, so the status is only known —
+	// and reported once — after the whole loop.
+	switch {
+	case cfg.autoCQ && sawAutoCQFlag:
+		pInfo.Println("Auto-CQ mode enabled: CQ per file via sampled VMAF measurement (H.265).")
+	case cfg.autoCQ:
+		pInfo.Println("Auto-CQ mode enabled via configuration: CQ per file via sampled VMAF measurement (H.265).")
+	case sawNoAutoCQ && (sawAutoCQFlag || appSettings.autoCQ):
+		pInfo.Println("Auto-CQ disabled for this run (-noautocq) — using targetCQ from the config.")
+	}
+	// Auto-CQ is H.265-only for now: av1_nvenc uses a different CQ scale
+	// (1-63), so the 26/30 anchors would be meaningless there. AV1 encodes
+	// keep using av1TargetCQ from the config.
+	if cfg.autoCQ && cfg.av1 {
+		pWarn.Println("Auto-CQ does not support AV1 yet — AV1 uses av1TargetCQ from the config instead.")
+		cfg.autoCQ = false
 	}
 	// AV1 reaches H.265 quality at ~25-30% less bitrate, so the AV1 mode has
 	// its own (lower) caps. An explicit -NNNN always wins.
@@ -929,6 +988,25 @@ func printActiveSettings(cfg *AppConfig) {
 		bfColor = "gray"
 	}
 
+	// -autocq replaces the fixed CQ with a per-file VMAF search; showing the
+	// static number would be misleading then. A manual -cq wins over both.
+	// (Auto-CQ, -cq and -av1 all exclude each other at parse time, so none
+	// of this can fight the AV1 branch above.)
+	cqDisplay := fmt.Sprintf("%d", cqVal)
+	cqColor := "cyan"
+	switch {
+	case cfg != nil && cfg.forcedCQ > 0:
+		cqDisplay = fmt.Sprintf("%d (forced)", cfg.forcedCQ)
+		cqColor = "yellow"
+	case cfg != nil && cfg.autoCQ:
+		cqDisplay = fmt.Sprintf("auto (VMAF %.4g)", s.autoCQTargetVMAF)
+		if s.autoCQTolerance > 0 {
+			cqDisplay = fmt.Sprintf("auto (VMAF %.4g -%.4g)",
+				s.autoCQTargetVMAF, s.autoCQTolerance)
+		}
+		cqColor = "yellow"
+	}
+
 	type entry struct {
 		label  string
 		value  string
@@ -937,7 +1015,7 @@ func printActiveSettings(cfg *AppConfig) {
 	}
 	entries := []entry{
 		{"Video codec", videoCodec, "cyan", codecActive},
-		{"Target CQ", fmt.Sprintf("%d", cqVal), "cyan", codecActive},
+		{"Target CQ", cqDisplay, cqColor, codecActive},
 		{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", bitrateActive},
 		{"Resolution", resValue, "cyan", resActive},
 		{"NVENC preset", s.nvencPreset, "cyan", false},
@@ -1136,7 +1214,7 @@ func main() {
 	// Self-extract the embedded build sources into ./sourcecode (only if absent)
 	// and lay down the user help file. Both are non-fatal best-effort steps.
 	_ = extractEmbeddedSource()
-	_ = writeHelpFileIfMissing()
+	_ = syncHelpFile()
 
 	ctx, cancel := setupSignalContext()
 	defer cancel()
@@ -1159,6 +1237,12 @@ func main() {
 		pterm.Gray("  >>  ") + "Copy audio 1:1 (no AAC re-encode)\n" +
 		pterm.LightYellow("• NVENCForge.exe -av1 <files>      ") +
 		pterm.Gray("  >>  ") + "Encode AV1 instead of H.265 (RTX 40+)\n" +
+		pterm.LightYellow("• NVENCForge.exe -autocq <files>  ") +
+		pterm.Gray("   >>  ") + "Auto-pick CQ per file (VMAF target)\n" +
+		pterm.LightYellow("• NVENCForge.exe -noautocq <files>") +
+		pterm.Gray("   >>  ") + "Skip Auto-CQ for this run\n" +
+		pterm.LightYellow("• NVENCForge.exe -cq 28 <files>   ") +
+		pterm.Gray("   >>  ") + "Force fixed CQ for this run (no Auto-CQ)\n" +
 		pterm.LightYellow("• NVENCForge.exe -keep <files>    ") +
 		pterm.Gray("   >>  ") + "Keep originals (don't move to recycle bin)\n" +
 		pterm.LightYellow("• NVENCForge.exe -shutdown        ") +
@@ -1220,6 +1304,7 @@ func main() {
 	cfg := &AppConfig{
 		maxBitrateKbps: appSettings.maxBitrate1080p,
 		autoShutdown:   appSettings.autoShutdown,
+		autoCQ:         appSettings.autoCQ,
 	}
 	if cfg.autoShutdown {
 		pInfo.Println("Auto-shutdown enabled via configuration.")
@@ -1230,9 +1315,10 @@ func main() {
 		fmt.Println()
 		pFatal.Println("No compatible Nvidia GPU found (NVENC unavailable).")
 		pFatal.Println("NVENCForge requires an Nvidia graphics card.")
-		if debugMode {
-			pterm.Println(pterm.Gray("  Detail: " + err.Error()))
-		}
+		// Always show the underlying FFmpeg error: a bad ffmpeg build (e.g.
+		// renamed encoder options) fails this probe too, and without the
+		// detail that is indistinguishable from a genuinely missing GPU.
+		pterm.Println(pterm.Gray("  Detail: " + err.Error()))
 		waitForEnter()
 		os.Exit(1)
 	}
@@ -1246,6 +1332,18 @@ func main() {
 			}
 			waitForEnter()
 			os.Exit(1)
+		}
+	}
+	// -autocq needs the libvmaf filter; slim FFmpeg builds may lack it.
+	// Checked once up front so the whole batch degrades with a single clear
+	// warning instead of one failed analysis per file.
+	if cfg.autoCQ {
+		if err := checkLibVMAF(); err != nil {
+			pWarn.Println("Auto-CQ disabled: this FFmpeg build has no libvmaf filter — using targetCQ from the config.")
+			if debugMode {
+				pterm.Println(pterm.Gray("  Detail: " + err.Error()))
+			}
+			cfg.autoCQ = false
 		}
 	}
 	printActiveSettings(cfg)

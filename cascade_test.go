@@ -84,6 +84,9 @@ func TestResetInvalidConfigLines(t *testing.T) {
 		"maxBitrate1080p=12000\n" +
 		"maxResolution=108\n" +
 		"nvencPreset=p8\n" +
+		"autoCQ=vielleicht\n" +
+		"autoCQTargetVMAF=120\n" +
+		"autoCQTolerance=-1\n" +
 		"unknownKey=keepme\n"
 	path := filepath.Join(t.TempDir(), "NVENCForge_Config.ini")
 	if err := os.WriteFile(path, []byte(ini), 0644); err != nil {
@@ -91,8 +94,8 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	}
 
 	_, invalids, _ := parseAppConfig(path)
-	if len(invalids) != 3 {
-		t.Fatalf("got %d invalid settings, want 3 (%v)", len(invalids), invalids)
+	if len(invalids) != 6 {
+		t.Fatalf("got %d invalid settings, want 6 (%v)", len(invalids), invalids)
 	}
 	if err := resetInvalidConfigLines(path, invalids); err != nil {
 		t.Fatalf("reset failed: %v", err)
@@ -109,6 +112,9 @@ func TestResetInvalidConfigLines(t *testing.T) {
 		"maxBitrate1080p=12000", // valid value untouched
 		"maxResolution=1080",    // reset to default
 		"nvencPreset=p5",        // reset to default
+		"autoCQ=true",           // reset to default
+		"autoCQTargetVMAF=97",   // reset to default
+		"autoCQTolerance=0.5",   // reset to default
 		"unknownKey=keepme",     // unknown key untouched
 	} {
 		if !strings.Contains(got, want) {
@@ -126,7 +132,9 @@ func TestResetInvalidConfigLines(t *testing.T) {
 		}
 		return false
 	}
-	if hasLine("targetCQ=77") || hasLine("maxResolution=108") || hasLine("nvencPreset=p8") {
+	if hasLine("targetCQ=77") || hasLine("maxResolution=108") ||
+		hasLine("nvencPreset=p8") || hasLine("autoCQ=vielleicht") ||
+		hasLine("autoCQTargetVMAF=120") || hasLine("autoCQTolerance=-1") {
 		t.Errorf("an invalid value survived the reset:\n%s", got)
 	}
 

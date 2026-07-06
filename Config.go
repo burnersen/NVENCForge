@@ -32,7 +32,7 @@ type AppConfig struct {
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
-	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-targetCQ (nur H.265)
+	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 
@@ -439,8 +439,9 @@ extraFilenameChars=%s
 # --- AV1 mode (-av1, opt-in; requires RTX 40 series or newer) ---
 
 # Constant Quality for AV1 (scale 1-63, NOT comparable to targetCQ!).
-# The default was calibrated via VMAF to match the H.265 quality of
-# targetCQ=26. Lower = better quality, larger file.  Default: %d
+# Fallback for when Auto-CQ is off or its analysis cannot run; with Auto-CQ
+# on (the default) the measured per-file value replaces it. Matches the H.265
+# quality of targetCQ=26. Lower = better quality, larger file.  Default: %d
 av1TargetCQ=%d
 
 # Maximum AV1 target bitrate (kbit/s) in standard mode.
@@ -452,19 +453,20 @@ av1MaxBitrate1080p=%d
 # Allowed: greater than 1000.  Default: %d
 av1MaxBitrateOriginal=%d
 
-# --- Auto-CQ mode (-autocq, on by default; H.265 only) ---
+# --- Auto-CQ mode (-autocq, on by default; H.265 and AV1) ---
 
 # Run Auto-CQ by default, as if -autocq were passed on every start.
-# -noautocq disables it for a single run. H.265 only (AV1 keeps using
-# av1TargetCQ). Allowed: true, false.  Default: %t
+# -noautocq disables it for a single run. Works for H.265 and AV1 alike, each
+# on its own CQ scale (targetCQ / av1TargetCQ is the fallback per codec).
+# Allowed: true, false.  Default: %t
 autoCQ=%t
 
 # VMAF quality target for -autocq. Sample windows of each file (placed on
 # the source's bitrate profile, hardest scene always included) are encoded
-# at CQ 26 and CQ 30, measured with VMAF against the source, and the CQ
-# expected to hit this target is verified by one extra measurement before
-# the real encode (clamped to CQ 20-34). 97 stays visually transparent
-# even in direct comparison; lower = smaller files.
+# at two anchor CQ values (per codec), measured with VMAF against the source,
+# and the CQ expected to hit this target is verified by one extra measurement
+# before the real encode. 97 stays visually transparent even in direct
+# comparison; lower = smaller files.
 # Allowed: 70 to 99.  Default: %s
 autoCQTargetVMAF=%s
 

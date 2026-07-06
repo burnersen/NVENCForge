@@ -95,9 +95,9 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
-| `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, see [Auto-CQ](#-auto-cq-measured-quality-per-file); H.265 only. Set `autoCQ=false` in the config to turn it off |
+| `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#-auto-cq-measured-quality-per-file). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
-| `-cq NN` | Force a fixed CQ (1-51) for this run: skips Auto-CQ and the configured `targetCQ`; H.265 only |
+| `-cq NN` | Force a fixed CQ for this run: skips Auto-CQ and the configured CQ (scale H.265 1-51, AV1 1-63) |
 | `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-davinci` | For DaVinci Resolve workflow (split / extract / merge, re-encodes where needed); must be the first argument |
@@ -139,7 +139,7 @@ Before each encode, NVENCForge runs a short per-file analysis (typically well un
 2. **Probe.** Those windows are test-encoded at two anchor quality levels with *exactly* the settings of the real encode, and each result is scored with **VMAF** (a perceptual video-quality metric developed by Netflix, 0–100, where ~95+ is visually transparent to most viewers).
 3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 97) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
 
-Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and picks the cheapest CQ that still delivers the reachable maximum, probing even higher CQ levels (up to 34) when the quality curve is flat, purely for extra savings.
+Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and picks the cheapest CQ that still delivers the reachable maximum, probing even higher CQ levels when the quality curve is flat, purely for extra savings.
 
 Tuning knobs in `NVENCForge_Config.ini`:
 
@@ -149,13 +149,13 @@ Tuning knobs in `NVENCForge_Config.ini`:
 | `autoCQTargetVMAF` | `97` | The quality target of the search (70–99) |
 | `autoCQTolerance` | `0.5` | May land up to this far below the target when that saves a CQ step → smaller files; `0` = exact targeting |
 
-For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ is H.265-only (AV1 keeps its own VMAF-calibrated default) and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
+For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ works for both H.265 and AV1 — each on its own VMAF-calibrated CQ scale — and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
 
 ---
 
 ## 🔮 AV1 mode: ready for the future
 
-`-av1` switches the encoder to **av1_nvenc** (RTX 40 series or newer). The default quality level was tuned with VMAF so AV1 output aims to match the H.265 quality of the default settings, at noticeably smaller sizes thanks to lower bitrate caps. 10-bit and HDR pass-through included. H.265 stays the default; AV1 is strictly opt-in.
+`-av1` switches the encoder to **av1_nvenc** (RTX 40 series or newer). [Auto-CQ](#-auto-cq-measured-quality-per-file) now runs here too *(new in v1.3)* and measures the right AV1 CQ per file — av1_nvenc uses its own 1–63 scale, so its anchors were VMAF-calibrated separately; with Auto-CQ off, `av1TargetCQ` is the fixed fallback. AV1 reaches H.265 quality at noticeably smaller sizes thanks to lower bitrate caps. 10-bit and HDR pass-through included. H.265 stays the default; AV1 is strictly opt-in.
 
 > **Black video when playing AV1?** Your player, not your file. In MPC-HC/LAV Filters set *Hardware Decoder* to **D3D11 with device "Automatic"** or **DXVA2 (native)**; the copy-back path of older configs shows black video on 10-bit AV1. Windows Media Player needs the free *AV1 Video Extension* from the Microsoft Store. Note: Apple TV has no AV1 hardware decoding yet.
 

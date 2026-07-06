@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.2.4"
+const appVersion = "1.3.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -698,19 +698,22 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			continue
 		}
 		if strings.EqualFold(arg, "-cq") {
-			// Two-token flag: the CQ value follows as its own argument.
+			// Two-token flag: the CQ value follows as its own argument. The
+			// valid upper bound depends on the codec (H.265 1-51, AV1 1-63),
+			// which is only known after the whole loop (-av1 may follow -cq),
+			// so the range is checked there.
 			if i+1 < len(args) {
 				if n, err := strconv.Atoi(args[i+1]); err == nil {
 					i++ // the number belongs to -cq, even when out of range
-					if n >= 1 && n <= 51 {
+					if n >= 1 {
 						cfg.forcedCQ = n
 					} else {
-						pWarn.Printf("-cq %d is out of range (1-51) — ignored.\n", n)
+						pWarn.Printf("-cq %d is not a valid CQ (must be positive) — ignored.\n", n)
 					}
 					continue
 				}
 			}
-			pWarn.Println("-cq needs a number from 1 to 51 (e.g. \"-cq 28\") — ignored.")
+			pWarn.Println("-cq needs a CQ number (e.g. \"-cq 28\") — ignored.")
 			continue
 		}
 		if len(arg) > 1 && arg[0] == '-' {
@@ -736,12 +739,18 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		rest = append(rest, arg)
 	}
-	// -cq targets the H.265 CQ scale (1-51); av1_nvenc uses its own 1-63
-	// scale where the same number means a different quality, so a forced
-	// value is dropped for AV1 just like -autocq.
-	if cfg.forcedCQ > 0 && cfg.av1 {
-		pWarn.Println("-cq does not apply to AV1 — AV1 uses av1TargetCQ from the config instead.")
-		cfg.forcedCQ = 0
+	// -cq uses the active codec's CQ scale: H.265 1-51, AV1 1-63. The same
+	// number means a different quality per codec, so the upper bound depends
+	// on the -av1 flag, which is only fully known now (it may follow -cq).
+	if cfg.forcedCQ > 0 {
+		maxCQ, scaleLabel := 51, "H.265 scale 1-51"
+		if cfg.av1 {
+			maxCQ, scaleLabel = 63, "AV1 scale 1-63"
+		}
+		if cfg.forcedCQ > maxCQ {
+			pWarn.Printf("-cq %d is out of range (%s) — ignored.\n", cfg.forcedCQ, scaleLabel)
+			cfg.forcedCQ = 0
+		}
 	}
 	// A manual -cq exists exactly for the runs where the automatic pick is
 	// unwanted, so it wins over every Auto-CQ source (flag or config).
@@ -751,21 +760,19 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	}
 	// Auto-CQ can come from the -autocq flag or the config (autoCQ=true);
 	// the last flag on the command line wins, so the status is only known —
-	// and reported once — after the whole loop.
+	// and reported once — after the whole loop. It works for both codecs, each
+	// on its own CQ-scale profile (H.265 anchors 26/30, AV1 anchors 24/32).
+	autoCQCodec := "H.265"
+	if cfg.av1 {
+		autoCQCodec = "AV1"
+	}
 	switch {
 	case cfg.autoCQ && sawAutoCQFlag:
-		pInfo.Println("Auto-CQ mode enabled: CQ per file via sampled VMAF measurement (H.265).")
+		pInfo.Printf("Auto-CQ mode enabled: CQ per file via sampled VMAF measurement (%s).\n", autoCQCodec)
 	case cfg.autoCQ:
-		pInfo.Println("Auto-CQ mode enabled via configuration: CQ per file via sampled VMAF measurement (H.265).")
+		pInfo.Printf("Auto-CQ mode enabled via configuration: CQ per file via sampled VMAF measurement (%s).\n", autoCQCodec)
 	case sawNoAutoCQ && (sawAutoCQFlag || appSettings.autoCQ):
-		pInfo.Println("Auto-CQ disabled for this run (-noautocq) — using targetCQ from the config.")
-	}
-	// Auto-CQ is H.265-only for now: av1_nvenc uses a different CQ scale
-	// (1-63), so the 26/30 anchors would be meaningless there. AV1 encodes
-	// keep using av1TargetCQ from the config.
-	if cfg.autoCQ && cfg.av1 {
-		pWarn.Println("Auto-CQ does not support AV1 yet — AV1 uses av1TargetCQ from the config instead.")
-		cfg.autoCQ = false
+		pInfo.Println("Auto-CQ disabled for this run (-noautocq) — using the configured CQ.")
 	}
 	// AV1 reaches H.265 quality at ~25-30% less bitrate, so the AV1 mode has
 	// its own (lower) caps. An explicit -NNNN always wins.
@@ -990,8 +997,8 @@ func printActiveSettings(cfg *AppConfig) {
 
 	// -autocq replaces the fixed CQ with a per-file VMAF search; showing the
 	// static number would be misleading then. A manual -cq wins over both.
-	// (Auto-CQ, -cq and -av1 all exclude each other at parse time, so none
-	// of this can fight the AV1 branch above.)
+	// Auto-CQ and -cq now apply to AV1 too, so this display simply layers over
+	// the AV1 branch above — both paths set the same cqDisplay/cqColor.
 	cqDisplay := fmt.Sprintf("%d", cqVal)
 	cqColor := "cyan"
 	switch {

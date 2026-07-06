@@ -698,6 +698,10 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	gopSize := calcGOP(stats.FPSNum, stats.FPSDen)
 	var nvencOpts []string
 	switch {
+	case cfg.forcedCQ > 0 && cfg.av1:
+		// -cq on the AV1 scale (1-63) — beats av1TargetCQ; Auto-CQ was
+		// already disabled at parse time.
+		nvencOpts = buildAV1OptsWithCQ(cfg.forcedCQ, maxBR, bufBR, gopSize)
 	case cfg.av1:
 		nvencOpts = buildAV1Opts(maxBR, bufBR, gopSize)
 	case cfg.forcedCQ > 0:
@@ -762,14 +766,18 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		vfOpts = []string{"-vf", filterChain}
 
 		// -autocq: pick the CQ for THIS file via sampled VMAF measurements.
-		// Only real H.265 re-encodes get here with the flag set (remuxes skip
-		// encoding entirely; -av1 clears the flag at startup — checked again
-		// defensively since the AV1 CQ scale is incompatible). On analysis
-		// failure autoDetectCQ already warned and the configured targetCQ in
-		// nvencOpts simply stays in effect.
-		if cfg.autoCQ && !cfg.av1 {
-			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize); ok {
-				nvencOpts = buildNVENCOptsWithCQ(cq, maxBR, bufBR, gopSize)
+		// Only real re-encodes get here with the flag set (remuxes skip encoding
+		// entirely). H.265 and AV1 each search on their own CQ-scale profile —
+		// same mechanism, different anchors/clamps. On analysis failure
+		// autoDetectCQ already warned and the codec's configured CQ in nvencOpts
+		// simply stays in effect.
+		if cfg.autoCQ {
+			scale := hevcAutoCQScale
+			if cfg.av1 {
+				scale = av1AutoCQScale
+			}
+			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, scale); ok {
+				nvencOpts = scale.buildOpts(cq, maxBR, bufBR, gopSize)
 				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
 			}
 		}
@@ -1782,11 +1790,18 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 }
 
 // buildAV1Opts mirrors buildNVENCOpts for av1_nvenc. Differences: own CQ
-// scale (0-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
+// scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
 // B-frame options (not exposed by av1_nvenc), AQ flags use hyphens.
+// -autocq swaps only the CQ via buildAV1OptsWithCQ; every other parameter
+// stays identical — which also guarantees the Auto-CQ sample encodes run
+// with exactly the settings of the real AV1 encode.
 func buildAV1Opts(maxBitrate, bufsize string, gop int) []string {
+	return buildAV1OptsWithCQ(appSettings.av1TargetCQ, maxBitrate, bufsize, gop)
+}
+
+func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	return []string{
-		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(appSettings.av1TargetCQ),
+		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
 		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
 		"-pix_fmt", "p010le",
 		"-preset", appSettings.nvencPreset, "-tune", "hq",

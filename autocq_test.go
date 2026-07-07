@@ -395,6 +395,24 @@ func TestAutoCQClimbFloor(t *testing.T) {
 	}
 }
 
+// TestAV1AutoCQFallback pins the decoupled AV1 Auto-CQ fallback: when the
+// analysis cannot run, AV1 must fall back to av1AutoCQFallbackCQ (the low
+// anchor, ~VMAF 96), NOT to the lean manual av1TargetCQ (32, ~VMAF 94). This
+// guards the 2026-07-07 decoupling from being silently reverted.
+func TestAV1AutoCQFallback(t *testing.T) {
+	if got := av1AutoCQScale.fallbackCQ(); got != av1AutoCQFallbackCQ {
+		t.Errorf("av1 fallback CQ = %d, want %d", got, av1AutoCQFallbackCQ)
+	}
+	if av1AutoCQFallbackCQ != av1AutoCQScale.anchorLow {
+		t.Errorf("av1 fallback %d should equal the low anchor %d (near the VMAF target)",
+			av1AutoCQFallbackCQ, av1AutoCQScale.anchorLow)
+	}
+	if av1AutoCQFallbackCQ < av1AutoCQScale.clampMin || av1AutoCQFallbackCQ > av1AutoCQScale.clampMax {
+		t.Errorf("av1 fallback %d outside clamp [%d, %d]",
+			av1AutoCQFallbackCQ, av1AutoCQScale.clampMin, av1AutoCQScale.clampMax)
+	}
+}
+
 func TestAutoCQStepDown(t *testing.T) {
 	cases := []struct {
 		name             string

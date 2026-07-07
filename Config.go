@@ -439,9 +439,11 @@ extraFilenameChars=%s
 # --- AV1 mode (-av1, opt-in; requires RTX 40 series or newer) ---
 
 # Constant Quality for AV1 (scale 1-63, NOT comparable to targetCQ!).
-# Fallback for when Auto-CQ is off or its analysis cannot run; with Auto-CQ
-# on (the default) the measured per-file value replaces it. Matches the H.265
-# quality of targetCQ=26. Lower = better quality, larger file.  Default: %d
+# Fixed CQ for manual AV1 mode (Auto-CQ off / -noautocq). Measured 2026-07-06:
+# CQ 32 is about VMAF 94 - a lean setting, NOT equal to H.265 CQ 26 (which sits
+# ~2-3 VMAF points higher). With Auto-CQ on (the default) a per-file value is
+# measured, and an unmeasurable clip falls back to a built-in CQ near the target,
+# not to this value. Lower = better quality, larger file.  Default: %d
 av1TargetCQ=%d
 
 # Maximum AV1 target bitrate (kbit/s) in standard mode.
@@ -457,7 +459,8 @@ av1MaxBitrateOriginal=%d
 
 # Run Auto-CQ by default, as if -autocq were passed on every start.
 # -noautocq disables it for a single run. Works for H.265 and AV1 alike, each
-# on its own CQ scale (targetCQ / av1TargetCQ is the fallback per codec).
+# on its own CQ scale. If Auto-CQ cannot run, H.265 falls back to targetCQ; AV1
+# falls back to a built-in CQ near the target (NOT av1TargetCQ, which is lean).
 # Allowed: true, false.  Default: %t
 autoCQ=%t
 

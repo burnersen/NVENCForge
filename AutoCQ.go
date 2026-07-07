@@ -136,6 +136,16 @@ var hevcAutoCQScale = autoCQScale{
 	codecLabel:           "H.265",
 }
 
+// av1AutoCQFallbackCQ is the CQ the AV1 Auto-CQ search falls back to when its
+// analysis cannot run (clip too short, unknown frame rate, libvmaf missing). It
+// is deliberately NOT av1TargetCQ: that value (32 ≈ VMAF 94) is a lean manual-
+// mode setting, too far below the VMAF target (97) for a graceful fallback. 24
+// equals the low anchor (≈ VMAF 96), so an unmeasurable AV1 clip lands near the
+// search intent instead of visibly softer, while manual AV1 mode keeps its own
+// av1TargetCQ. H.265 needs no such constant — its manual targetCQ (26) already
+// sits near the target.
+const av1AutoCQFallbackCQ = 24
+
 // av1AutoCQScale mirrors it on the wider av1_nvenc scale. The numbers come from
 // the 2026-07-06 VMAF series: VMAF 97 sits near AV1 CQ ~20-24 (not 32), so the
 // anchors are 24/32 with an ~2-point VMAF span like the H.265 pair; the clamp
@@ -147,7 +157,7 @@ var av1AutoCQScale = autoCQScale{
 	saturationSlope:      0.05,
 	climbToleranceFactor: 2.0,
 	buildOpts:            buildAV1OptsWithCQ,
-	fallbackCQ:           func() int { return appSettings.av1TargetCQ },
+	fallbackCQ:           func() int { return av1AutoCQFallbackCQ },
 	codecLabel:           "AV1",
 }
 

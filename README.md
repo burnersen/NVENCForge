@@ -28,8 +28,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 ---
 
-<details>
-<summary><b>📑 Contents</b></summary>
+### 📑 Contents
 
 - [⚡ 30 seconds, no manual](#-30-seconds-no-manual)
 - [✨ What NVENCForge does](#-what-nvencforge-does)
@@ -43,8 +42,6 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🔧 Under the hood — the safety nets and clever bits](#-under-the-hood--the-safety-nets-and-clever-bits)
 - [🔨 Building from source](#-building-from-source)
 - [📜 License](#-license) · [💬 Feedback](#-feedback--contributions) · [☕ Support](#-support)
-
-</details>
 
 ---
 

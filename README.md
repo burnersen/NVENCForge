@@ -243,6 +243,116 @@ That's it. `build.bat` packs the embedded source archive and compiles `NVENCForg
 
 ---
 
+## 🔧 Under the hood — the safety nets and clever bits
+
+Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that — it's everything *around* it: keeping your files safe, keeping a batch from ever getting stuck, and giving each file exactly the treatment it needs. Below is the complete list, grouped by what it's for. It's deliberately thorough (this is the nerdy part of the page); every point is real, working behaviour. **Click any section to expand it.**
+
+<details>
+<summary><b>🛡️ Your files are safe — no matter what</b></summary>
+
+- **Validate, *then* recycle.** An original is only moved to the recycle bin *after* the new file has been re-probed and confirmed valid (right codec, no lost audio tracks, plausible duration, sane file size). If validation fails, the original stays exactly where it is.
+- **The real Windows recycle bin.** Deletion goes through the actual Windows shell API with the "allow undo" flag, so originals are restorable — not a custom "move to a folder" hack. It even detects a drive that has no recycle bin (instead of silently failing) and tells you the original was kept.
+- **Never overwrite anything.** If an output name is already taken, NVENCForge writes an automatic numbered name (`Movie.2`, `Movie.3`, …). Nothing you already have is ever clobbered.
+- **A re-encode is never bigger than the source.** If a conversion somehow comes out larger (it happens on already-lean files), the result is thrown away and the file is losslessly repackaged instead. You never trade quality *and* gain size.
+- **Crash-safe output.** Abort mid-encode, close the window, or lose power — you're left with a playable `.preview.mkv`, never a corrupt zero-byte file. FFmpeg is asked to *finish cleanly* (a graceful "q"), not killed mid-frame.
+- **Video-only fallback keeps the original.** If the only way to salvage a file is to drop its audio, the source — the only copy of that audio — is deliberately **not** recycled.
+- **A corrupt output can never masquerade as a good one.** If a broken result can't be deleted, it's renamed `.broken`, and if even that fails a `.invalid` marker is dropped next to it, so a later run treats it as garbage instead of "already done". Half-written files from an earlier crash ("crash ghosts") are detected and cleared too.
+- **Won't convert the same file twice.** Every file NVENCForge *produces* gets a small origin tag in its header (`NVENCFORGE_SOURCE` — just the source's name; it never touches the picture, and your untouched originals get no tag at all). Before working, NVENCForge looks in the `output` folder and skips anything already finished for that source and codec: a re-run simply does nothing, an `.h265` and an `.av1` of the same film happily coexist, and two *different* sources that clean to the same name are told apart instead of one shadowing the other. The skip depends only on whether a finished output already exists — not on flags like `-cq` or a bitrate override — so to deliberately redo a file with new settings, remove its finished file from the `output` folder first.
+- **Keeps the original's date.** The output inherits the source file's creation and modification timestamps, so your library sorts by date exactly as before.
+
+</details>
+
+<details>
+<summary><b>🎯 Right size, right quality — the sizing intelligence</b></summary>
+
+- **Probe first, then decide.** Every file is read up front. Already-efficient videos are repackaged in seconds instead of wasting GPU minutes on a re-encode that couldn't help — and you can tell which happened at a glance from the output name (`.h265` = re-encoded, `.h264` = just repackaged).
+- **Constant quality, not fixed bitrate.** The encoder targets a *quality* level (CQ), so a file shrinks to whatever that quality actually needs — no crude fixed-bitrate butchering that starves hard scenes and wastes bits on easy ones.
+- **A bitrate cap derived from the source.** On top of CQ, a safety ceiling is computed from the file's *own* bitrate (aiming well below it), clamped up to a per-resolution floor (so low-bitrate sources don't turn to mush) and down to a per-mode ceiling. That's what guarantees a real conversion lands smaller than the source. An explicit `-NNNN` always wins over both.
+- **Honest bitrate estimation.** To judge "video vs. audio" it subtracts a per-codec audio estimate (TrueHD, DTS, FLAC, PCM, AC3, EAC3 all weighted differently) from the total, and prefers the precise per-stream figure when the container reports a trustworthy one.
+- **Clean metadata.** Stale per-track statistics tags that other muxers leave behind (which make MediaInfo show absurd bitrates) are stripped from every output.
+
+</details>
+
+<details>
+<summary><b>🌈 Picture, HDR & colour done right</b></summary>
+
+- **HDR detected by the right signal.** HDR10 (PQ) and HLG are recognised by the *transfer function*, not just BT.2020 primaries — so plain wide-gamut SDR isn't misread as HDR.
+- **Colour is copied, never invented.** Transfer, primaries, colour space and range are passed through 1:1 from the source, and obviously-bogus tags are skipped rather than propagated. Static HDR10 mastering-display / MaxCLL metadata rides along automatically on stream-copy and on `-original` re-encodes. NVENCForge flatly refuses to *synthesize* an HDR value — a fabricated one is exactly what has broken HDR conversions in the past.
+- **True 10-bit pipeline.** Everything runs in 10-bit (`p010le`, HEVC Main-10), so banding in skies and gradients doesn't get worse.
+- **Automatic deinterlacing.** TV-style interlaced sources are detected from their field order and deinterlaced with `bwdif` *before* any scaling (keeping the original frame rate), so old recordings come out clean.
+- **Careful downscaling.** The 1080p downscale preserves aspect ratio, forces even dimensions (odd ones break encoders), and follows up with a light contrast-adaptive sharpen (CAS) to counter the softness scaling introduces. Even in no-scale mode dimensions are evened out.
+- **Encoder tuned for quality-per-bit.** VBR + CQ, `tune hq`, spatial **and** temporal adaptive quantisation, multi-pass, look-ahead, B-frames with a pyramid reference, constant frame rate, and a keyframe interval sized to ~4 seconds of video — the whole reason the quality hit stays small at hardware-encode speed.
+
+</details>
+
+<details>
+<summary><b>🎚️ Auto-CQ — measuring quality instead of guessing</b></summary>
+
+The [Auto-CQ section above](#-auto-cq-measured-quality-per-file) covers *what* it does; here's *how* it stays honest, for the curious:
+
+- **Sample encodes use the real settings.** The little test clips are encoded with the *exact* encoder options of the final run, and the reference side runs through the *same* downscale/sharpen filter chain — so the VMAF score isolates the encoder's loss alone, not the scaling.
+- **Finds the hard scenes without decoding.** Sample windows are placed using the source's bitrate profile, read straight from the container by demuxing packet *sizes* (no decoding — seconds even on a multi-GB movie). The single heaviest scene is always included; intros, credits and near-black frames (which score a flattering fake-perfect VMAF) are deliberately avoided.
+- **Two nasty VMAF pitfalls handled.** Decoded segments are re-based to a zero start time, and both comparison inputs are forced onto frame-number-based timestamps — otherwise Matroska's millisecond rounding pairs the wrong frames and tanks the score. (These are the kind of bugs that silently make a quality measurement meaningless.)
+- **Trust, but verify.** The interpolated pick is always confirmed with one extra real measurement; on a miss it steps down along the measured slope. A **saturation brake** detects pre-compressed sources whose quality plateaus below the target and picks the *cheapest* level on that plateau instead of pointlessly burning bitrate; a **plateau climb** even probes higher CQ levels when the curve is provably flat, purely for extra savings.
+- **It can never break a conversion.** Any hiccup (clip under 30 s, unknown frame rate, an FFmpeg build without `libvmaf`, a wedged step) just falls back to the configured CQ with a warning. The whole analysis runs at idle priority with hard per-step timeouts, and `libvmaf`'s presence is checked once up front — one clear notice, not one failure per file.
+- **Calibrated per codec.** H.265 and AV1 each search on their own VMAF-calibrated CQ scale, because the same number means very different quality on the two encoders.
+
+</details>
+
+<details>
+<summary><b>🚦 It won't fall over — robustness during a batch</b></summary>
+
+- **A GPU check that matches reality.** At startup NVENCForge does a dummy encode with the *exact* flags the real encode uses — not a lighter test — so a card that would fail later is caught now. Older pre-Turing cards (Pascal/Volta) are retried once in a degraded mode and then run *without* the advanced features instead of failing on every single file; AV1 gets its own separate probe.
+- **CPU decoding on purpose.** Decoding stays on the CPU because hardware-decoding extreme-bitrate HEVC (400 Mbit/s+) can crash the GPU driver (a TDR reset). Stability beats decode speed — verified on real files.
+- **Multi-stage fallback cascade.** If one stream in a file is broken, NVENCForge walks down a ladder (keep subtitles → drop subtitles → re-encode audio to AAC → video-only), and the FFmpeg error text steers it straight to the rung that can actually fix the problem instead of retrying dead ends. One bad stream doesn't sink the batch.
+- **Stall watchdog.** A frozen FFmpeg is detected and stopped after 5 minutes of silence so the batch moves on — no hanging forever on one stuck file. (Auto-CQ steps and probes each carry their own hard timeouts too.)
+- **Parallel-safe by design.** Start the same command in two terminals and they split the work automatically. Each file is locked with a small JSON lock that records the process, machine and start time; a lock whose owner process has died is reclaimed (checked by real process ID *and* image name, so a recycled PID can't fool it), while a lock owned by *another machine* on a shared drive is never stolen.
+- **Self-healing config.** An invalid value in `NVENCForge_Config.ini` is reset to its default *in the file itself* — only that one line, leaving your comments, valid values and unknown keys untouched — so the same warning doesn't nag you every run.
+- **Hardened downloader.** The first-run FFmpeg download has real timeouts on every stage (connect, handshake, response, idle) plus an overall cap, so a dead connection can't freeze the app; it streams to a temp file and extracts only `ffmpeg.exe`/`ffprobe.exe`.
+- **A pinned, stable FFmpeg.** The download deliberately picks the newest *stable release-branch* build, not the bleeding-edge master — dev builds have silently renamed or dropped encoder options before, which made the GPU probe fail as if the card itself were broken. If that probe ever fails, the underlying FFmpeg error is always shown so a bad build isn't mistaken for a missing GPU.
+- **Never dies silently.** An unexpected crash is caught and shown in a message that keeps the window open (instead of vanishing), and any per-file failures are collected into an `error_report.txt` next to the files.
+
+</details>
+
+<details>
+<summary><b>🎛️ Streams, audio & subtitles (the editing side)</b></summary>
+
+- **DaVinci-Resolve-safe audio.** Formats Resolve chokes on (DTS, TrueHD, EAC3, FLAC, Opus, and anything above 5.1 or above 48 kHz) are converted to AAC it actually imports — including the specific 7.1 case Resolve reads as silence — while already-compatible tracks are copied untouched. `-copyaudio` keeps everything 1:1.
+- **Lossless split / join.** `-split` copies every stream 1:1 into its native container (`.ac3`, `.dts`, `.flac`, `.sup`, `.srt`, …) with a silent picture; `-join` muxes them back into one MKV. A split→join round-trip is bit-for-bit lossless, and the timestamps are normalised so the rejoined file stays perfectly in sync.
+- **Smart subtitle handling.** Text subtitles are converted to clean SRT; bitmap subtitles (PGS, VobSub) that *can't* become text are copied through untouched. Attachments like embedded fonts and cover art ride along on their own.
+- **Automatic SRT cleaning.** Every extracted SRT has its HTML/ASS styling tags, invisible Unicode junk (soft hyphens, zero-width characters, byte-order marks) and advertising lines stripped — the ad-phrase list is yours to edit in `SRTCleaner_config.txt`, and the file is rewritten atomically.
+- **Sensible track defaults.** Languages are auto-detected from filenames (`Movie.de.srt` → German, with all the ISO code variants mapped), forced/SDH flags are read from the names, a stereo down-mix is offered as an opt-in extra, and merging uses only the picture of the base file (it asks first if that base still carries its own audio).
+- **No GPU needed here.** The `-davinci`, `-split` and `-join` modes are pure remux/stream work and run on any PC, Nvidia card or not — the GPU probe is skipped entirely.
+
+</details>
+
+<details>
+<summary><b>🪟 Windows-native craftsmanship (the deep nerdy bits)</b></summary>
+
+- **Live progress you can trust.** A per-file *and* an overall batch bar, with ETA, encode speed, fps, bitrate, frame count — and a continuously-smoothed *projected* output size that already tells you "≈ −60 %" long before the file is done. The cursor is hidden and line-wrap disabled during the render so nothing smears.
+- **Stays out of your way.** Every heavy FFmpeg job — the encodes and the Auto-CQ analysis — runs at **idle priority**, so a big batch doesn't make the rest of your PC sluggish, and none of the FFmpeg/FFprobe calls pop up a console window.
+- **Real long-path support.** Paths over the classic 260-character limit — and UNC network paths — are handled with the `\\?\` prefix, correctly round-tripped both ways.
+- **Colours on old terminals.** ANSI/virtual-terminal mode is switched on explicitly, so the coloured UI works even in the plain classic console.
+- **Graceful window-close.** Closing the window, logging off or shutting down is caught: FFmpeg is given a few seconds to finalise the current file into a playable preview instead of leaving a corrupt fragment.
+- **Ships its own source, safely.** The binary carries the exact source it was built from and extracts it on first run — but only if the folder isn't already there (your edits are never overwritten), and with a zip-slip guard so a crafted archive can't write outside its folder.
+- **Correct to the byte.** The low-level Windows calls (recycle bin, timestamps) are laid out to match the OS ABI exactly, checked *at compile time* — if a structure offset were ever wrong, the build fails instead of shipping a subtle bug.
+
+</details>
+
+<details>
+<summary><b>🧩 Convenience & polish</b></summary>
+
+- **One portable EXE.** Nothing to install, no admin rights; it keeps its config, help and tools right next to itself. FFmpeg is fetched automatically on first run.
+- **Worldwide filename cleanup.** Release-group noise is stripped (`Movie (2016) [BluRay] x264.mkv` → `Movie.2016.h265.mkv`) while every script and alphabet on earth (CJK, Cyrillic, Greek, Arabic, …) survives intact; useful codec/resolution/HDR tags are kept, Windows-forbidden characters are dropped, and you can whitelist extra characters in the config.
+- **Tells you what it'll do — and what it did.** A colour settings panel at startup shows every effective parameter (and highlights whatever a flag just changed); a summary at the end reports converted / skipped / failed counts and the total megabytes saved.
+- **Self-updating help.** A plain-text manual is written next to the EXE and refreshed automatically whenever it goes out of date with the build — no stale help after an update.
+- **Send-to drag & drop.** Wire it into the Windows "Send to" menu (see [Pro tip](#-pro-tip-put-nvencforge-into-your-right-click-send-to-menu)) and never touch a command line again.
+- **Auto-shutdown** for long overnight batches (`-shutdown`, with a 30-second cancel window).
+
+</details>
+
+---
+
 ## 🧑‍🎨 The story
 
 NVENCForge is a personal hobby project, built over two months of evenings to fit my own media workflow. Every feature, every workflow rule and all the real-world testing on 4K HDR files came from me. It started as a tool just for myself, but if it fits your workflow too, all the better.

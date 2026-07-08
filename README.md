@@ -7,6 +7,8 @@
 **H.265 / AV1 NVENC batch encoder with a DaVinci Resolve workflow and lossless split/join, for Windows.**
 HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
+*⚙️ Encoding needs an NVIDIA GPU with NVENC — AMD and Intel graphics are not supported (the DaVinci Resolve, split and join tools run on any PC).*
+
 *Powered by FFmpeg, which does the actual encoding. NVENCForge is the automation, validation and safety layer around it.*
 
 [![Windows x64](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6?logo=windows)](#-requirements)
@@ -18,9 +20,31 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 **[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
 
+*Free for personal & noncommercial use — [source-available](#-license), never for resale.*
+
 <img src=".github/screenshot.png" alt="NVENCForge converting a 4K HDR clip with -keep: 266 MB in, 59 MB out, HDR detected and passed through, original kept" width="840">
 
 </div>
+
+---
+
+<details>
+<summary><b>📑 Contents</b></summary>
+
+- [⚡ 30 seconds, no manual](#-30-seconds-no-manual)
+- [✨ What NVENCForge does](#-what-nvencforge-does)
+- [🚀 Usage](#-usage)
+- [🎚️ Auto-CQ — measured quality, per file](#auto-cq)
+- [🔮 AV1 mode](#-av1-mode-ready-for-the-future)
+- [🧰 DaVinci Resolve workflow](#-for-davinci-resolve-workflow--davinci)
+- [🪓 Lossless Split / Join](#-lossless-split--join--split---join)
+- [⚙️ Configuration](#configuration)
+- [💻 Requirements](#-requirements)
+- [🔧 Under the hood — the safety nets and clever bits](#-under-the-hood--the-safety-nets-and-clever-bits)
+- [🔨 Building from source](#-building-from-source)
+- [📜 License](#-license) · [💬 Feedback](#-feedback--contributions) · [☕ Support](#-support)
+
+</details>
 
 ---
 
@@ -50,7 +74,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 ## ✨ What NVENCForge does
 
 - 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
-- 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#-auto-cq-measured-quality-per-file).
+- 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#auto-cq).
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -95,7 +119,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
-| `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#-auto-cq-measured-quality-per-file). Set `autoCQ=false` in the config to turn it off |
+| `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#auto-cq). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
 | `-cq NN` | Force a fixed CQ for this run: skips Auto-CQ and the configured CQ (scale H.265 1-51, AV1 1-63) |
 | `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
@@ -129,6 +153,8 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 ---
 
+<a id="auto-cq"></a>
+
 ## 🎚️ Auto-CQ: measured quality, per file
 
 *New in v1.2.* Every video compresses differently: one file looks perfect at CQ 30, another needs CQ 24 for the same visual quality. A single fixed quality level is always a compromise — too generous for easy material (wasted megabytes), too optimistic for hard material. **Auto-CQ replaces that guesswork with an actual measurement**, and it is enabled by default.
@@ -155,7 +181,7 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 
 ## 🔮 AV1 mode: ready for the future
 
-`-av1` switches the encoder to **av1_nvenc** (RTX 40 series or newer). [Auto-CQ](#-auto-cq-measured-quality-per-file) now runs here too *(new in v1.3)* and measures the right AV1 CQ per file — av1_nvenc uses its own 1–63 scale, so its anchors were VMAF-calibrated separately; with Auto-CQ off, `av1TargetCQ` is the fixed fallback. AV1 reaches H.265 quality at noticeably smaller sizes thanks to lower bitrate caps. 10-bit and HDR pass-through included. H.265 stays the default; AV1 is strictly opt-in.
+`-av1` switches the encoder to **av1_nvenc** (RTX 40 series or newer). [Auto-CQ](#auto-cq) now runs here too *(new in v1.3)* and measures the right AV1 CQ per file — av1_nvenc uses its own 1–63 scale, so its anchors were VMAF-calibrated separately; with Auto-CQ off, `av1TargetCQ` is the fixed fallback. AV1 reaches H.265 quality at noticeably smaller sizes thanks to lower bitrate caps. 10-bit and HDR pass-through included. H.265 stays the default; AV1 is strictly opt-in.
 
 > **Black video when playing AV1?** Your player, not your file. In MPC-HC/LAV Filters set *Hardware Decoder* to **D3D11 with device "Automatic"** or **DXVA2 (native)**; the copy-back path of older configs shows black video on 10-bit AV1. Windows Media Player needs the free *AV1 Video Extension* from the Microsoft Store. Note: Apple TV has no AV1 hardware decoding yet.
 
@@ -196,6 +222,8 @@ The silent picture always gets a `.NoSound` suffix, so the original is never ove
 **On join, only the picture of the base is used.** `-join` takes just the video track from the base file (the silent `.NoSound` picture); any audio or subtitles the base might still carry are simply ignored, never merged in. Your source files are never modified, so nothing is lost — you choose the audio and subtitle files you actually want as the other arguments. Because every stream is copied 1:1, picture and sound stay in sync; a `-split` followed by `-join` is a clean lossless round-trip.
 
 ---
+
+<a id="configuration"></a>
 
 ## ⚙️ Configuration
 
@@ -288,7 +316,7 @@ Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that �
 <details>
 <summary><b>🎚️ Auto-CQ — measuring quality instead of guessing</b></summary>
 
-The [Auto-CQ section above](#-auto-cq-measured-quality-per-file) covers *what* it does; here's *how* it stays honest, for the curious:
+The [Auto-CQ section above](#auto-cq) covers *what* it does; here's *how* it stays honest, for the curious:
 
 - **Sample encodes use the real settings.** The little test clips are encoded with the *exact* encoder options of the final run, and the reference side runs through the *same* downscale/sharpen filter chain — so the VMAF score isolates the encoder's loss alone, not the scaling.
 - **Finds the hard scenes without decoding.** Sample windows are placed using the source's bitrate profile, read straight from the container by demuxing packet *sizes* (no decoding — seconds even on a multi-GB movie). The single heaviest scene is always included; intros, credits and near-black frames (which score a flattering fake-perfect VMAF) are deliberately avoided.
@@ -372,16 +400,24 @@ NVENCForge does **not** bundle FFmpeg. On first run it downloads an official sta
 
 ## 💬 Feedback & contributions
 
-Found a bug or have a feature wish? Please open an issue on the [GitHub repository](../../issues) — feedback is genuinely welcome. Try it out and don't hesitate to post your wishes. Forks and pull requests for noncommercial improvements are welcome too. When reporting a bug, the console output helps (run with `-debug` for details).
+**This is where you come in.** So far it's mostly been just me and my own test files — I'd genuinely love to hear from you. Does it work on your videos? Did something break, feel clunky, or surprise you? Is there a feature you're missing?
+
+**Please don't be shy** — [open an issue](../../issues), even a one-liner. A quick "it just worked, thanks", a "this part confused me", a bug report, a wish for the next version: it's all welcome, and no question is too small. Honestly, even knowing the tool is being used out there is motivating. If you're not sure how to start, just say hi.
+
+Forks and pull requests for noncommercial improvements are very welcome too. When reporting a bug, the console output helps a lot — run with `-debug` for the full detail.
 
 ---
 
 ## ☕ Support
 
-NVENCForge is free and made in my spare time. If it helps you and you'd like to say thanks, you can [buy me a coffee on Ko-fi](https://ko-fi.com/burnersen). Completely optional — and thank you!
+NVENCForge is free and made in my spare time, on my own hardware and electricity bill. If it saved you time or a pile of disk space and you'd like to say thanks, you can [drop a little something in the tip jar on Ko-fi](https://ko-fi.com/burnersen) — it keeps the forge hot. 🔥 Completely optional, and either way: thank you for using it!
 
 ---
 
 ## ⚠️ Disclaimer
 
 NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved to the recycle bin after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).
+
+---
+
+<sub>NVIDIA, NVENC, DaVinci Resolve, FFmpeg and VMAF are trademarks of their respective owners. NVENCForge is an independent hobby project and is not affiliated with, endorsed by, or sponsored by any of them.</sub>

@@ -243,14 +243,19 @@ func interpolateAutoCQ(sc autoCQScale, vmafLow, vmafHigh, target float64) (int, 
 // step count comes from the anchor slope (how much VMAF one CQ step buys),
 // capped at the scale's maxStepDown and clamped at its clampMin — so the
 // returned CQ can equal the input when the clamp floor is already reached.
-func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) (int, float64) {
+// The third return value reports that the estimated step count exceeded
+// maxStepDown: the prediction then extrapolates far beyond any measured
+// point (observed several VMAF points off on the fine AV1 scale), so the
+// caller must confirm the stepped CQ with a real measurement.
+func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) (int, float64, bool) {
 	steps := 1
 	if slope < -0.01 {
 		if s := int(math.Ceil((target - verified) / -slope)); s > steps {
 			steps = s
 		}
 	}
-	if steps > sc.maxStepDown {
+	capped := steps > sc.maxStepDown
+	if capped {
 		steps = sc.maxStepDown
 	}
 	stepped := cq - steps
@@ -261,7 +266,7 @@ func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) (in
 	if predicted > 100 {
 		predicted = 100
 	}
-	return stepped, predicted
+	return stepped, predicted, capped
 }
 
 // autoCQSaturated reports whether the verification measurement below the
@@ -745,11 +750,48 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				plateauLevel = math.Max(verified, vmafLow)
 			}
 		case verified < target:
-			stepped, pred := autoCQStepDown(sc, cq, target, verified, slope)
-			if stepped == cq {
+			stepped, pred, capped := autoCQStepDown(sc, cq, target, verified, slope)
+			switch {
+			case stepped == cq:
 				predicted = verified
 				verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", verified)
-			} else {
+			case capped:
+				// The verification miss already proved the anchor slope too
+				// optimistic, and the correction jump was capped at maxStepDown —
+				// pred would be an extrapolation far outside the measured points.
+				// Replace it with a real measurement; if even that misses the
+				// target, the two fresh points give a realistic LOCAL slope for
+				// one final, ordinary step-down (accepted unmeasured, exactly
+				// like an uncapped step-down).
+				remeasured, rerr := measure(stepped)
+				switch {
+				case rerr != nil && ctx.Err() != nil:
+					return fail("step-down re-measurement", rerr)
+				case rerr != nil:
+					// The anchors and the first verification were fine — keep
+					// the stepped pick with its estimate, like a failed verify.
+					verifyNote = fmt.Sprintf(
+						" (CQ %d measured %.1f, stepped down to CQ %d — re-measurement failed, estimate kept)",
+						cq, verified, stepped)
+					pErr.Printf("Auto-CQ re-measurement detail: %v\n", rerr)
+					cq, predicted = stepped, pred
+				case remeasured >= target:
+					verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d, verified)",
+						cq, verified, stepped)
+					cq, predicted = stepped, remeasured
+				default:
+					localSlope := (verified - remeasured) / float64(cq-stepped)
+					final, finalPred, _ := autoCQStepDown(sc, stepped, target, remeasured, localSlope)
+					if final == stepped {
+						predicted = remeasured
+						verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", remeasured)
+					} else {
+						verifyNote = fmt.Sprintf(" (CQ %d = %.1f, CQ %d = %.1f, stepped down to CQ %d)",
+							cq, verified, stepped, remeasured, final)
+						cq, predicted = final, finalPred
+					}
+				}
+			default:
 				verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d)", cq, verified, stepped)
 				cq, predicted = stepped, pred
 			}

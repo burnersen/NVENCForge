@@ -422,26 +422,35 @@ func TestAutoCQStepDown(t *testing.T) {
 		slope            float64
 		wantCQ           int
 		wantPred         float64
+		wantCapped       bool
 	}{
 		// H.265 (maxStepDown 3, clampMin 20). slope -0.5: one step buys ~0.5 VMAF.
-		{"h265 two steps", hevcAutoCQScale, 28, 95, 94.2, -0.5, 26, 95.2},
-		{"h265 tiny miss, one step", hevcAutoCQScale, 28, 95, 94.9, -0.5, 27, 95.4},
-		{"h265 big miss capped at 3", hevcAutoCQScale, 28, 95, 91, -0.5, 25, 92.5},
-		{"h265 flat slope defaults to one step", hevcAutoCQScale, 28, 95, 94, 0, 27, 94},
-		{"h265 already at clamp floor", hevcAutoCQScale, 20, 95, 90, -0.5, 20, 90},
-		{"h265 clamped into floor", hevcAutoCQScale, 21, 95, 90, -0.5, 20, 90.5},
-		{"h265 prediction capped at 100", hevcAutoCQScale, 24, 99.9, 99.5, -3, 23, 100},
+		{"h265 two steps", hevcAutoCQScale, 28, 95, 94.2, -0.5, 26, 95.2, false},
+		{"h265 tiny miss, one step", hevcAutoCQScale, 28, 95, 94.9, -0.5, 27, 95.4, false},
+		{"h265 big miss capped at 3", hevcAutoCQScale, 28, 95, 91, -0.5, 25, 92.5, true},
+		{"h265 flat slope defaults to one step", hevcAutoCQScale, 28, 95, 94, 0, 27, 94, false},
+		{"h265 already at clamp floor", hevcAutoCQScale, 20, 95, 90, -0.5, 20, 90, true},
+		{"h265 clamped into floor", hevcAutoCQScale, 21, 95, 90, -0.5, 20, 90.5, true},
+		{"h265 prediction capped at 100", hevcAutoCQScale, 24, 99.9, 99.5, -3, 23, 100, false},
 		// AV1 (maxStepDown 6, clampMin 16) — the wider scale allows deeper steps.
-		{"av1 big miss capped at 6", av1AutoCQScale, 28, 95, 90, -0.5, 22, 93},
-		{"av1 clamped into floor", av1AutoCQScale, 18, 95, 90, -0.5, 16, 91},
+		{"av1 big miss capped at 6", av1AutoCQScale, 28, 95, 90, -0.5, 22, 93, true},
+		{"av1 clamped into floor", av1AutoCQScale, 18, 95, 90, -0.5, 16, 91, true},
+		// Real 2026-07-10 CreamPiled AV1 case, second stage: after the capped
+		// jump 44→38 the re-measurement (94.9) still misses 95.5, and the LOCAL
+		// slope from the two fresh points (-0.792/step) buys one ordinary,
+		// uncapped final step to CQ 37.
+		{"av1 local slope after re-measure", av1AutoCQScale, 38, 95.5, 94.9, -0.792, 37, 95.692, false},
 	}
 	for _, c := range cases {
-		gotCQ, gotPred := autoCQStepDown(c.sc, c.cq, c.target, c.verified, c.slope)
+		gotCQ, gotPred, gotCapped := autoCQStepDown(c.sc, c.cq, c.target, c.verified, c.slope)
 		if gotCQ != c.wantCQ {
 			t.Errorf("%s: got CQ %d, want %d", c.name, gotCQ, c.wantCQ)
 		}
 		if diff := gotPred - c.wantPred; diff > 1e-9 || diff < -1e-9 {
 			t.Errorf("%s: got predicted %.3f, want %.3f", c.name, gotPred, c.wantPred)
+		}
+		if gotCapped != c.wantCapped {
+			t.Errorf("%s: got capped=%v, want %v", c.name, gotCapped, c.wantCapped)
 		}
 	}
 }

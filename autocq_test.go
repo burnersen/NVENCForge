@@ -22,8 +22,8 @@ func TestAutoCQSampleWindows(t *testing.T) {
 		{"too short", 29.9, 0, 0},
 		{"minimum length", 30, 2, autoCQShortWindowSec},
 		{"short video", 180, 2, autoCQShortWindowSec},
-		{"boundary to long", 240, 4, autoCQWindowSec},
-		{"movie length", 7200, 4, autoCQWindowSec},
+		{"boundary to long", 240, 3, autoCQWindowSec},
+		{"movie length", 7200, 3, autoCQWindowSec},
 	}
 	for _, c := range cases {
 		got := autoCQSampleWindows(c.duration)

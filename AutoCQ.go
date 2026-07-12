@@ -65,9 +65,14 @@ const (
 	// Hard timeout for the packet-size demux (no decode — normally seconds).
 	autoCQProfileTimeout = 2 * time.Minute
 
-	// Sampling layout: long sources get four 8-second windows, short sources
+	// Sampling layout: long sources get three 8-second windows, short sources
 	// (under 4 minutes) two 6-second windows, and anything under 30 seconds
 	// is not sampled at all (falls back to the configured targetCQ).
+	// Three windows instead of four since a 2026-07-12 A/B series: across
+	// H.265 and AV1 on long real sources the picks were identical while the
+	// analysis ran 22-32% faster. SHORTER windows are not safe — 6 s and 4 s
+	// windows shifted the pick by 2-4 CQ steps in the same series, so the
+	// window LENGTH must stay at 8 s.
 	autoCQMinSourceSec   = 30.0
 	autoCQShortSourceSec = 240.0
 	autoCQWindowSec      = 8.0
@@ -198,7 +203,7 @@ func autoCQSampleWindows(durationSec float64) [][2]float64 {
 		return nil
 	}
 	windowLen := autoCQWindowSec
-	positions := []float64{0.15, 0.35, 0.55, 0.75}
+	positions := []float64{0.20, 0.45, 0.70}
 	if durationSec < autoCQShortSourceSec {
 		windowLen = autoCQShortWindowSec
 		positions = []float64{0.20, 0.60}

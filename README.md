@@ -216,7 +216,7 @@ Where `-davinci` re-encodes incompatible audio to AAC and converts/cleans subtit
 
 The silent picture always gets a `.NoSound` suffix, so the original is never overwritten. The stereo-downmix option from `-davinci` is hidden in `-split`, because a downmix would be a re-encode.
 
-**On join, only the picture of the base is used.** `-join` takes just the video track from the base file (the silent `.NoSound` picture); any audio or subtitles the base might still carry are simply ignored, never merged in. Your source files are never modified, so nothing is lost — you choose the audio and subtitle files you actually want as the other arguments. Because every stream is copied 1:1, picture and sound stay in sync; a `-split` followed by `-join` is a clean lossless round-trip.
+**On join, dropped audio files replace the base audio.** `-join` takes the video track from the base file plus the audio files you drop; if you drop no audio at all (subtitles only), the base video keeps its own sound instead of going silent. Subtitles inside the base are never carried over — you choose the subtitle files you actually want as arguments. Your source files are never modified, so nothing is lost. Because every stream is copied 1:1, picture and sound stay in sync; a `-split` followed by `-join` is a clean lossless round-trip.
 
 ---
 

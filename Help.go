@@ -114,9 +114,10 @@ FOR DAVINCI RESOLVE WORKFLOW  (-davinci)   re-encodes where needed
   Multichannel audio offers an extra "stereo mix" entry with its
   own number (saved as ".stereo.m4a"). It is only created when
   you select that number - Enter (= all) does NOT include it.
-  Merging uses ONLY the files you drop: the base video contributes
-  its picture only - audio or subtitles inside the base video are
-  never carried over (a notice is shown if any get dropped).
+  Merging: dropped audio files REPLACE the audio of the base
+  video. If you drop only subtitles, the audio already inside the
+  base video is kept. Subtitles inside the base video are never
+  carried over (a notice is shown if any get dropped).
 
 LOSSLESS SPLIT / JOIN  (-split / -join)   1:1 copy, no re-encode
   NVENCForge.exe -split <files / folders>
@@ -133,12 +134,11 @@ LOSSLESS SPLIT / JOIN  (-split / -join)   1:1 copy, no re-encode
     - Unlike -davinci the stereo-mix option is hidden here, because
       a downmix would be a re-encode.
   NVENCForge.exe -join <one .NoSound video> <audio/subtitle files>
-    - Recombines the silent picture with the dropped audio and
-      subtitle files into one ".joined.mkv", copying everything 1:1.
-    - The base contributes its picture only. If you accidentally
-      drop a file that still has its own audio/subtitles, it stops
-      and asks before continuing (those internal tracks are dropped,
-      only the picture is used).
+    - Recombines the picture with the dropped audio and subtitle
+      files into one ".joined.mkv", copying everything 1:1.
+    - Dropped audio files REPLACE the audio of the base video; if
+      you drop only subtitles, the base video keeps its own sound.
+      Subtitles inside the base video are never carried over.
   Use -split / -join for a true lossless round-trip. Use -davinci
   when you need DaVinci-ready output (AAC audio, cleaned subtitles).
 

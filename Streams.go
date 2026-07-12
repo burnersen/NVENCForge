@@ -1370,9 +1370,10 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 		return
 	}
 
-	// The base video contributes ONLY its video track. Audio/subtitle tracks
-	// living inside it are never carried over — the merge result contains
-	// exactly the dropped files, nothing else. Say so when tracks get dropped.
+	// Dropped audio files REPLACE the audio of the base video; without dropped
+	// audio the base keeps its own sound (a subtitle-only merge used to produce
+	// a silent file, which never matched the intent). Subtitle tracks living
+	// inside the base are still never carried over.
 	internalAudio, internalSubs := 0, 0
 	for _, s := range streams.Streams {
 		switch s.CodecType {
@@ -1384,9 +1385,9 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 	}
 	if internalAudio > 0 {
 		if len(audioPaths) == 0 {
-			pWarn.Printf("  Base video has %d audio track(s), but no audio file was dropped — the result will have NO sound.\n", internalAudio)
+			pInfo.Printf("  No audio file dropped — keeping the base video's %d audio track(s).\n", internalAudio)
 		} else {
-			pInfo.Printf("  Base video audio (%d track(s)) is not carried over — only the dropped audio files are used.\n", internalAudio)
+			pInfo.Printf("  Base video audio (%d track(s)) is replaced by the dropped audio files.\n", internalAudio)
 		}
 	}
 	if internalSubs > 0 {
@@ -1485,13 +1486,44 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 		}
 	}
 
+	// Without dropped audio the base video's own tracks are kept. The same
+	// DaVinci rule set applies to them: copy what Resolve can read, re-encode
+	// the rest to AAC (the base probe already carries the codec data).
+	keepBaseAudio := !useExternalAudio && internalAudio > 0
+	var baseAudioArgs []string
+	if keepBaseAudio {
+		outIdx := 0
+		for _, s := range streams.Streams {
+			if s.CodecType != "audio" {
+				continue
+			}
+			sel := fmt.Sprintf(":a:%d", outIdx)
+			outIdx++
+			sr, _ := strconv.Atoi(s.SampleRate)
+			if needsAudioReencode(s.CodecName, s.ChannelLayout, s.Channels, sr) {
+				_, br := aacEncodeParams(s.Channels)
+				baseAudioArgs = append(baseAudioArgs,
+					"-c"+sel, "aac",
+					"-b"+sel, fmt.Sprintf("%dk", br),
+					"-filter"+sel, davinciSafeChannelLayoutsFilter,
+				)
+				reencNotes = append(reencNotes, fmt.Sprintf("%s/%dch→AAC %dk",
+					strings.ToUpper(s.CodecName), s.Channels, br))
+			} else {
+				baseAudioArgs = append(baseAudioArgs, "-c"+sel, "copy")
+			}
+		}
+	}
+
 	if useExternalAudio {
 		// Map only the first audio stream of each file so output stream indices
 		// always match the per-file codec/metadata/disposition arguments.
-		// Base-video audio is intentionally NOT mapped.
+		// Base-video audio is intentionally NOT mapped (dropped audio replaces it).
 		for i := range audioPaths {
 			args = append(args, "-map", fmt.Sprintf("%d:a:0", i+1))
 		}
+	} else if keepBaseAudio {
+		args = append(args, "-map", "0:a")
 	}
 
 	// Sub mapping: first subtitle stream per file, so output stream indices
@@ -1502,9 +1534,12 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 
 	// Codecs.
 	args = append(args, "-c:v", "copy")
-	if useExternalAudio {
+	switch {
+	case useExternalAudio:
 		args = append(args, extAudioArgs...)
-	} else {
+	case keepBaseAudio:
+		args = append(args, baseAudioArgs...)
+	default:
 		args = append(args, "-an")
 	}
 	args = append(args, "-c:s", "copy")
@@ -1615,11 +1650,16 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 			for i := range audioPaths {
 				fallbackArgs = append(fallbackArgs, "-map", fmt.Sprintf("%d:a:0", i+1))
 			}
+		} else if keepBaseAudio {
+			fallbackArgs = append(fallbackArgs, "-map", "0:a")
 		}
 		fallbackArgs = append(fallbackArgs, "-c:v", "copy")
-		if useExternalAudio {
+		switch {
+		case useExternalAudio:
 			fallbackArgs = append(fallbackArgs, extAudioArgs...)
-		} else {
+		case keepBaseAudio:
+			fallbackArgs = append(fallbackArgs, baseAudioArgs...)
+		default:
 			fallbackArgs = append(fallbackArgs, "-an")
 		}
 		for i, a := range audioPaths {
@@ -2296,10 +2336,12 @@ func runJoinMode(ctx context.Context, args []string) {
 	}
 }
 
-// runJoinLossless muxes a (silent) picture track plus external audio/subtitle
-// files into a single MKV, copying every stream 1:1. Only the picture of the
-// base is ever used (any audio/subtitles it carries are ignored), and the
-// result is always a fresh ".joined.mkv", so the source is never touched.
+// runJoinLossless muxes a picture track plus external audio/subtitle files
+// into a single MKV, copying every stream 1:1. Dropped audio files REPLACE the
+// audio of the base; without dropped audio the base keeps its own sound (a
+// subtitle-only join used to silence the video). Subtitles inside the base are
+// never carried over, and the result is always a fresh ".joined.mkv", so the
+// source is never touched.
 func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
 	abs, _ := filepath.Abs(videoPath)
 	pInfo.Printf("» %s + %d Audio + %d Sub\n",
@@ -2328,15 +2370,17 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 		return
 	}
 
-	// The base contributes its picture only; any audio or subtitles it might
-	// carry are simply not used. We only confirm there IS a video track to
-	// build from (a fresh ".joined.mkv" is always written, the source is never
-	// touched, so there is nothing to warn about).
-	hasVideo := false
+	// Confirm there IS a video track to build from, and note whether the base
+	// carries audio of its own: dropped audio files replace it, but without
+	// dropped audio the base sound is kept 1:1 (a subtitle-only join must not
+	// silence the video). Subtitles inside the base are never carried over.
+	hasVideo, baseHasAudio := false, false
 	for _, s := range streams.Streams {
-		if s.CodecType == "video" && s.Disposition.AttachedPic == 0 {
+		switch {
+		case s.CodecType == "video" && s.Disposition.AttachedPic == 0:
 			hasVideo = true
-			break
+		case s.CodecType == "audio":
+			baseHasAudio = true
 		}
 	}
 	if !hasVideo {
@@ -2372,7 +2416,12 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 	}
 
 	useExternalAudio := len(audioPaths) > 0
+	keepBaseAudio := !useExternalAudio && baseHasAudio
 	srtInputStart := 1 + len(audioPaths)
+
+	if keepBaseAudio {
+		pInfo.Println("  No audio file dropped — keeping the base video's own audio (1:1).")
+	}
 
 	buildArgs := func(withSubs bool) []string {
 		a := []string{"-y", "-i", abs}
@@ -2392,6 +2441,8 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 			for i := range audioPaths {
 				a = append(a, "-map", fmt.Sprintf("%d:a:0", i+1))
 			}
+		} else if keepBaseAudio {
+			a = append(a, "-map", "0:a")
 		}
 		if withSubs {
 			for i := range srtPaths {
@@ -2400,7 +2451,7 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 		}
 		// Everything copied 1:1.
 		a = append(a, "-c:v", "copy")
-		if useExternalAudio {
+		if useExternalAudio || keepBaseAudio {
 			a = append(a, "-c:a", "copy")
 		} else {
 			a = append(a, "-an")
@@ -2510,7 +2561,7 @@ func showUsageSplitJoin() {
 	fmt.Println()
 	fmt.Printf("  %s\n", pterm.LightWhite("-join   <one .NoSound video> + <audio/subtitle files>"))
 	fmt.Printf("     %s\n", pterm.Gray("→ rebuilds a single \".joined.mkv\" with everything copied 1:1"))
-	fmt.Printf("     %s\n", pterm.Gray("→ only the picture of the base is used; the source is never changed"))
+	fmt.Printf("     %s\n", pterm.Gray("→ dropped audio replaces the base audio; subs only = base sound kept"))
 	fmt.Println()
 	fmt.Printf("  %s\n", pterm.Gray("Tip: -split then -join is a true lossless round-trip. For DaVinci-ready"))
 	fmt.Printf("  %s\n", pterm.Gray("     output (AAC audio, cleaned subtitles) use -davinci instead."))

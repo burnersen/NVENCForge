@@ -776,7 +776,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			if cfg.av1 {
 				scale = av1AutoCQScale
 			}
-			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, scale); ok {
+			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, doScale, scale); ok {
 				nvencOpts = scale.buildOpts(cq, maxBR, bufBR, gopSize)
 				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
 			}

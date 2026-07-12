@@ -154,6 +154,111 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	}
 }
 
+func TestAutoCQRefCacheEstimateBytes(t *testing.T) {
+	// appSettings carries the compiled-in defaults in tests: maxResolution 1080
+	// → the downscale box is 1920×1080. The interesting outcome is not the raw
+	// byte count but which side of the cache size cap a source lands on.
+	cases := []struct {
+		name        string
+		w, h        int
+		doScale     bool
+		fps, sample float64
+		wantCached  bool
+	}{
+		// The user's standard case: 4K scaled to 1080p — the estimate must use
+		// the POST-filter size (1080p, ~2.2 GiB), not the 4K source size.
+		{"4k scaled to 1080p", 3840, 2160, true, 24, 32, true},
+		{"1080p source", 1920, 1080, false, 25, 32, true},
+		{"dvd source", 720, 576, false, 25, 12, true},
+		// keep-original 4K stays 4K after the filter (~8.9 GiB) — direct path.
+		{"4k keep-original", 3840, 2160, false, 24, 32, false},
+		// Even scaled to 1080p, 60 fps needs ~5.6 GiB — over the cap, direct path.
+		{"4k60 scaled to 1080p", 3840, 2160, true, 60, 32, false},
+		// Unknown geometry must never enable the cache.
+		{"zero width", 0, 1080, false, 25, 32, false},
+		{"zero fps", 1920, 1080, false, 0, 32, false},
+	}
+	for _, c := range cases {
+		got := autoCQRefCacheEstimateBytes(c.w, c.h, c.doScale, c.fps, c.sample)
+		if cached := got <= autoCQCacheMaxBytes; cached != c.wantCached {
+			t.Errorf("%s: estimate %d bytes → cached=%v, want %v",
+				c.name, got, cached, c.wantCached)
+		}
+	}
+}
+
+func TestBuildAutoCQRefCacheArgs(t *testing.T) {
+	windows := [][2]float64{{36, 8}, {84, 8}, {132, 8}, {180, 8}}
+	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
+
+	args := buildAutoCQRefCacheArgs("C:\\videos\\in.mp4", windows, chain, "ref_windows.mkv")
+	s := strings.Join(args, " ")
+	if got := strings.Count(s, "-ss "); got != len(windows) {
+		t.Errorf("ref cache args: %d -ss occurrences, want %d", got, len(windows))
+	}
+	for _, want := range []string{
+		// The cache must contain the fully filtered windows (concat + real
+		// filter chain) in a lossless 10-bit format, encoded multi-threaded.
+		"concat=n=4:v=1:a=0," + chain + ",format=yuv420p10le[out]",
+		"setpts=PTS-STARTPTS",
+		"-map [out]", "-an", "-sn",
+		"-c:v ffv1", "-level 3", "-slices 16", "-slicecrc 0",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("ref cache args missing %q\n%s", want, s)
+		}
+	}
+	if args[len(args)-1] != "ref_windows.mkv" {
+		t.Errorf("ref cache args must end with the cache name, got %q", args[len(args)-1])
+	}
+}
+
+func TestBuildAutoCQCachedArgs(t *testing.T) {
+	enc := buildAutoCQCachedEncodeArgs("ref_windows.mkv", 30000, 1001,
+		30, "8000k", "16000k", 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
+	encStr := strings.Join(enc, " ")
+	for _, want := range []string{
+		"-i ref_windows.mkv",
+		// Frame-number timestamps hide the cache container's millisecond
+		// rounding from -fps_mode cfr; p010le restores the encoder input
+		// format the filter chain used to deliver (losslessly).
+		"settb=AVTB,setpts=N*1001/30000/TB",
+		"format=p010le",
+		"-c:v hevc_nvenc", "-cq 30", "-maxrate 8000k", "-bufsize 16000k", "-g 120",
+	} {
+		if !strings.Contains(encStr, want) {
+			t.Errorf("cached encode args missing %q\n%s", want, encStr)
+		}
+	}
+	if strings.Contains(encStr, "-ss ") {
+		t.Errorf("cached encode must read the whole cache, not seek: %s", encStr)
+	}
+	if enc[len(enc)-1] != "sample_cq30.mkv" {
+		t.Errorf("cached encode args must end with the sample name, got %q", enc[len(enc)-1])
+	}
+
+	vmaf := buildAutoCQCachedVMAFArgs("ref_windows.mkv", "sample_cq30.mkv",
+		"vmaf_cq30.json", 30000, 1001)
+	vmafStr := strings.Join(vmaf, " ")
+	for _, want := range []string{
+		"-i ref_windows.mkv", "-i sample_cq30.mkv",
+		// Both inputs get 10-bit format and frame-number timestamps; the
+		// cache is already filtered, so no filter chain may appear here.
+		"[0:V:0]format=yuv420p10le,settb=AVTB,setpts=N*1001/30000/TB[ref]",
+		"[1:V:0]format=yuv420p10le,settb=AVTB,setpts=N*1001/30000/TB[dist]",
+		"[dist][ref]libvmaf",
+		"log_path=vmaf_cq30.json",
+		"n_subsample=3",
+	} {
+		if !strings.Contains(vmafStr, want) {
+			t.Errorf("cached vmaf args missing %q\n%s", want, vmafStr)
+		}
+	}
+	if vmaf[len(vmaf)-1] != "-" || vmaf[len(vmaf)-2] != "null" {
+		t.Errorf("cached vmaf args must end with '-f null -', got %v", vmaf[len(vmaf)-2:])
+	}
+}
+
 func TestBucketsFromPacketCSV(t *testing.T) {
 	// 25 s at 8 s windows = 3 full buckets; the 24.5 s packet falls into the
 	// partial tail and must be dropped. N/A, garbage, negative timestamps and

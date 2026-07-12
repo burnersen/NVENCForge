@@ -77,6 +77,16 @@ const (
 	// stall the whole batch (the main encode has its own stall watchdog).
 	autoCQStepTimeout = 10 * time.Minute
 
+	// The lossless reference cache (buildAutoCQRefCacheArgs) is skipped when its
+	// estimated size exceeds this cap: post-filter frames far above 1080p24
+	// (keep-original 4K, high-fps material) would need a temp file of many
+	// gigabytes — a worse trade than the repeated source decode the cache saves.
+	autoCQCacheMaxBytes = int64(4) << 30
+
+	// autoCQRefCacheName is the reference cache file inside the analysis temp
+	// folder (deleted with it).
+	autoCQRefCacheName = "ref_windows.mkv"
+
 	// The spinner repaints its line in place, and plain conhost does not
 	// clear the old line first — a shorter new text leaves fragments of a
 	// longer predecessor standing ("... (43s)s) (6s)"). Padding every phase
@@ -490,6 +500,105 @@ func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, filterChain 
 	return append(args, sampleName)
 }
 
+// autoCQNormPTS returns the filter snippet that rebases timestamps to exact
+// frame numbers (pitfall 2: Matroska rounds PTS to milliseconds). Shared by
+// every consumer so all analysis inputs use identical timing.
+func autoCQNormPTS(fpsNum, fpsDen int) string {
+	return fmt.Sprintf("settb=AVTB,setpts=N*%d/%d/TB", fpsDen, fpsNum)
+}
+
+// autoCQVMAFThreads returns the libvmaf worker thread count (all cores).
+func autoCQVMAFThreads() int {
+	if n := runtime.NumCPU(); n > 1 {
+		return n
+	}
+	return 1
+}
+
+// autoCQRefCacheEstimateBytes estimates the on-disk size of the lossless
+// reference cache for sampleSec seconds of sample material. The post-filter
+// frame area is the source area, capped at the configured downscale box when
+// the encode scales. yuv420p10le carries 3 bytes per pixel (1.5 samples ×
+// 2 bytes); FFV1 compresses real footage at roughly 2:1, so half the raw size
+// is a usable upper estimate. Unknown geometry returns MaxInt64 — no cache then.
+func autoCQRefCacheEstimateBytes(srcW, srcH int, doScale bool, fps, sampleSec float64) int64 {
+	if srcW <= 0 || srcH <= 0 || fps <= 0 || sampleSec <= 0 {
+		return math.MaxInt64
+	}
+	area := srcW * srcH
+	if doScale {
+		short := appSettings.maxResolution
+		if box := short * (short * 16 / 9); box < area {
+			area = box
+		}
+	}
+	return int64(float64(area) * 3 * fps * sampleSec / 2)
+}
+
+// buildAutoCQRefCacheArgs assembles the FFmpeg call that decodes the sample
+// windows ONCE, runs them through the real filter chain and stores the result
+// losslessly (FFV1) as the shared reference cache. Every sample encode and
+// VMAF measurement then reads this small pre-filtered file instead of decoding
+// and scaling the (possibly 4K) source again — that repeated decode dominated
+// the analysis time. Lossless means bit-identical pixels: the scores and the
+// resulting CQ pick cannot change. FFV1 is compiled into every FFmpeg build
+// (no external library); level 3 with slices makes encode and decode
+// multi-threaded, and the skipped slice CRCs are never read by the analysis.
+func buildAutoCQRefCacheArgs(sourcePath string, windows [][2]float64,
+	filterChain, refName string) []string {
+
+	args := []string{"-y"}
+	for _, w := range windows {
+		args = append(args,
+			"-ss", strconv.FormatFloat(w[0], 'f', 3, 64),
+			"-t", strconv.FormatFloat(w[1], 'f', 3, 64),
+			"-i", sourcePath)
+	}
+	var fg strings.Builder
+	for i := range windows {
+		fmt.Fprintf(&fg, "[%d:V:0]setpts=PTS-STARTPTS[w%d];", i, i)
+	}
+	for i := range windows {
+		fmt.Fprintf(&fg, "[w%d]", i)
+	}
+	fmt.Fprintf(&fg, "concat=n=%d:v=1:a=0,%s,format=yuv420p10le[out]", len(windows), filterChain)
+	args = append(args, "-filter_complex", fg.String(), "-map", "[out]", "-an", "-sn",
+		"-c:v", "ffv1", "-level", "3", "-slices", "16", "-slicecrc", "0")
+	return append(args, refName)
+}
+
+// buildAutoCQCachedEncodeArgs is buildAutoCQEncodeArgs reading the reference
+// cache: window cutting and the filter chain already happened when the cache
+// was written, so only the encoder input format is restored (p010le — a
+// lossless layout change on the same 10-bit 4:2:0 pixels) and the timestamps
+// are rebased to exact frame numbers, so -fps_mode cfr never sees the cache
+// container's millisecond rounding (pitfall 2).
+func buildAutoCQCachedEncodeArgs(refName string, fpsNum, fpsDen, cq int,
+	maxBitrate, bufsize string, gop int, sampleName string,
+	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string) []string {
+
+	filter := autoCQNormPTS(fpsNum, fpsDen) + ",format=p010le"
+	args := []string{"-y", "-i", refName, "-vf", filter, "-an", "-sn"}
+	args = append(args, buildOpts(cq, maxBitrate, bufsize, gop)...)
+	return append(args, sampleName)
+}
+
+// buildAutoCQCachedVMAFArgs is buildAutoCQVMAFArgs with the reference cache as
+// the reference side — no source decode, no filter chain, just format and
+// frame-number timestamps (pitfall 2) on both inputs.
+func buildAutoCQCachedVMAFArgs(refName, sampleName, logName string,
+	fpsNum, fpsDen int) []string {
+
+	normPTS := autoCQNormPTS(fpsNum, fpsDen)
+	var fg strings.Builder
+	fmt.Fprintf(&fg, "[0:V:0]format=yuv420p10le,%s[ref];", normPTS)
+	fmt.Fprintf(&fg, "[1:V:0]format=yuv420p10le,%s[dist];", normPTS)
+	fmt.Fprintf(&fg, "[dist][ref]libvmaf=log_fmt=json:log_path=%s:n_subsample=3:n_threads=%d",
+		logName, autoCQVMAFThreads())
+	return []string{"-i", refName, "-i", sampleName,
+		"-filter_complex", fg.String(), "-f", "null", "-"}
+}
+
 // buildAutoCQVMAFArgs assembles the FFmpeg call that measures an anchor file
 // against the freshly decoded source windows. The reference side runs through
 // the SAME filter chain as the encode, so the score isolates the encoder loss
@@ -508,11 +617,7 @@ func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, filterChain st
 	}
 	args = append(args, "-i", sampleName)
 
-	normPTS := fmt.Sprintf("settb=AVTB,setpts=N*%d/%d/TB", fpsDen, fpsNum)
-	threads := runtime.NumCPU()
-	if threads < 1 {
-		threads = 1
-	}
+	normPTS := autoCQNormPTS(fpsNum, fpsDen)
 	n := len(windows)
 	var fg strings.Builder
 	for i := 0; i < n; i++ {
@@ -524,7 +629,7 @@ func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, filterChain st
 	fmt.Fprintf(&fg, "concat=n=%d:v=1:a=0,%s,format=yuv420p10le,%s[ref];", n, filterChain, normPTS)
 	fmt.Fprintf(&fg, "[%d:V:0]format=yuv420p10le,%s[dist];", n, normPTS)
 	fmt.Fprintf(&fg, "[dist][ref]libvmaf=log_fmt=json:log_path=%s:n_subsample=3:n_threads=%d",
-		logName, threads)
+		logName, autoCQVMAFThreads())
 	return append(args, "-filter_complex", fg.String(), "-f", "null", "-")
 }
 
@@ -598,7 +703,7 @@ func autoCQSpinnerText(format string, args ...any) string {
 // The spinner keeps the analysis visibly alive (a silent multi-second pause
 // would look like a hang).
 func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
-	filterChain, maxBitrate, bufsize string, gop int, sc autoCQScale) (int, bool) {
+	filterChain, maxBitrate, bufsize string, gop int, doScale bool, sc autoCQScale) (int, bool) {
 
 	// The tolerance (INI key autoCQTolerance) deliberately trades invisible
 	// quality for disk space: the whole search runs against the reduced
@@ -657,6 +762,31 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		windows, placement = gw, "bitrate-guided"
 	}
 
+	// Reference cache: decode + filter the sample windows ONCE into a lossless
+	// temp file; every sample encode and VMAF measurement then reads that file
+	// instead of re-decoding (and re-scaling) the source per step — on 4K
+	// sources that repeated decode dominated the analysis time. The pixels are
+	// bit-identical, so the scores and the CQ pick stay exactly the same. Like
+	// the guided placement, the cache is an optimisation: any problem (estimate
+	// above the size cap, encode failure, full temp disk) silently keeps the
+	// direct-from-source path.
+	refCache := ""
+	var cacheErr error
+	fps := float64(stats.FPSNum) / float64(stats.FPSDen)
+	if autoCQRefCacheEstimateBytes(stats.Width, stats.Height, doScale, fps, sampleSec) <= autoCQCacheMaxBytes {
+		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: caching filtered sample windows..."))
+		if cerr := runAutoCQFFmpeg(ctx, tmpDir, buildAutoCQRefCacheArgs(
+			filePath, windows, filterChain, autoCQRefCacheName)); cerr != nil {
+			if ctx.Err() != nil {
+				_ = spinner.Stop()
+				return 0, false
+			}
+			cacheErr = cerr
+		} else {
+			refCache = autoCQRefCacheName
+		}
+	}
+
 	fail := func(step string, err error) (int, bool) {
 		_ = spinner.Stop()
 		if ctx.Err() != nil {
@@ -670,14 +800,24 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	measure := func(cq int) (float64, error) {
 		sampleName := fmt.Sprintf("sample_cq%d.mkv", cq)
 		logName := fmt.Sprintf("vmaf_cq%d.json", cq)
+		var encArgs, vmafArgs []string
+		if refCache != "" {
+			encArgs = buildAutoCQCachedEncodeArgs(refCache, stats.FPSNum, stats.FPSDen,
+				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
+			vmafArgs = buildAutoCQCachedVMAFArgs(refCache, sampleName, logName,
+				stats.FPSNum, stats.FPSDen)
+		} else {
+			encArgs = buildAutoCQEncodeArgs(filePath, windows, filterChain,
+				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
+			vmafArgs = buildAutoCQVMAFArgs(filePath, windows, filterChain,
+				stats.FPSNum, stats.FPSDen, sampleName, logName)
+		}
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: encoding samples at CQ %d...", cq))
-		if err := runAutoCQFFmpeg(ctx, tmpDir, buildAutoCQEncodeArgs(
-			filePath, windows, filterChain, cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)); err != nil {
+		if err := runAutoCQFFmpeg(ctx, tmpDir, encArgs); err != nil {
 			return 0, fmt.Errorf("sample encode at CQ %d: %w", cq, err)
 		}
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: measuring VMAF at CQ %d...", cq))
-		if err := runAutoCQFFmpeg(ctx, tmpDir, buildAutoCQVMAFArgs(
-			filePath, windows, filterChain, stats.FPSNum, stats.FPSDen, sampleName, logName)); err != nil {
+		if err := runAutoCQFFmpeg(ctx, tmpDir, vmafArgs); err != nil {
 			return 0, fmt.Errorf("VMAF measurement at CQ %d: %w", cq, err)
 		}
 		score, err := readVMAFScore(filepath.Join(tmpDir, logName))
@@ -836,16 +976,23 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if ctx.Err() != nil {
 		return 0, false
 	}
+	sourceReads := "direct"
+	if refCache != "" {
+		sourceReads = "cached"
+	}
 	pOK.Printf("Auto-CQ: %d → predicted VMAF %.1f (target %.4g)%s\n",
 		cq, predicted, target, verifyNote)
-	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
-		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,
+	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · source reads: %s · analysis took %s",
+		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement, sourceReads,
 		formatDuration(time.Since(analysisStart).Seconds()))))
 	if len(plateauProbes) > 0 {
 		fmt.Println(pterm.Gray("  · plateau probes: " + strings.Join(plateauProbes, ", ")))
 	}
 	if profileErr != nil && debugMode {
 		fmt.Println(pterm.Gray("  · bitrate profile skipped: " + profileErr.Error()))
+	}
+	if cacheErr != nil && debugMode {
+		fmt.Println(pterm.Gray("  · reference cache skipped: " + cacheErr.Error()))
 	}
 	return cq, true
 }

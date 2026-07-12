@@ -35,6 +35,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🚀 Usage](#-usage)
 - [🎚️ Auto-CQ — measured quality, per file](#auto-cq)
 - [🔮 AV1 mode](#-av1-mode-ready-for-the-future)
+- [🍎 Apple / iPhone MP4](#apple)
 - [🧰 DaVinci Resolve workflow](#-for-davinci-resolve-workflow--davinci)
 - [🪓 Lossless Split / Join](#-lossless-split--join--split---join)
 - [⚙️ Configuration](#configuration)
@@ -116,6 +117,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
+| `-apple` | Write an **iOS-ready MP4** (H.265/`hvc1` + AAC + faststart) that plays on iPhone/iPad & imports into Photos; already-converted `.h265.mkv` files are just repackaged, no re-encode. See [Apple mode](#apple) |
 | `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#auto-cq). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
 | `-cq NN` | Force a fixed CQ for this run: skips Auto-CQ and the configured CQ (scale H.265 1-51, AV1 1-63) |
@@ -142,7 +144,8 @@ This is my personal workflow: pure drag & drop, no command line. Everyone has th
    | `1 NVENCForge Convert 1080` | *(none, default mode)* |
    | `2 NVENCForge Original Copyaudio` | `-original -copyaudio` |
    | `3 NVENCForge AV1 Original` | `-av1 -original` |
-   | `4 NVENCForge DaVinci` | `-davinci` |
+   | `4 NVENCForge iPhone` | `-apple` |
+   | `5 NVENCForge DaVinci` | `-davinci` |
 
 4. **Important:** clear the **"Start in"** field of every shortcut; it must be **empty**, otherwise "Send to" won't work correctly.
 
@@ -181,6 +184,21 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 `-av1` switches the encoder to **av1_nvenc** (RTX 40 series or newer). [Auto-CQ](#auto-cq) now runs here too *(new in v1.3)* and measures the right AV1 CQ per file — av1_nvenc uses its own 1–63 scale, so its anchors were VMAF-calibrated separately; with Auto-CQ off, `av1TargetCQ` is the fixed fallback. AV1 reaches H.265 quality at noticeably smaller sizes thanks to lower bitrate caps. 10-bit and HDR pass-through included. H.265 stays the default; AV1 is strictly opt-in.
 
 > **Black video when playing AV1?** Your player, not your file. In MPC-HC/LAV Filters set *Hardware Decoder* to **D3D11 with device "Automatic"** or **DXVA2 (native)**; the copy-back path of older configs shows black video on 10-bit AV1. Windows Media Player needs the free *AV1 Video Extension* from the Microsoft Store. Note: Apple TV has no AV1 hardware decoding yet.
+
+---
+
+<a id="apple"></a>
+
+## 🍎 Apple / iPhone: gallery-ready MP4
+
+`-apple` writes an **iOS-ready `.mp4`** instead of the usual `.mkv`, so the result plays on iPhone/iPad and imports straight into the Photos app. Two things normally trip up Apple, and `-apple` handles both automatically:
+
+- **The codec tag.** HEVC in MP4 must be tagged **`hvc1`** — Apple refuses the `hev1` tag FFmpeg writes by default. (It's also the tag DaVinci Resolve prefers, so nothing is lost.)
+- **Container & audio.** The iOS gallery won't accept MKV at all, and only plays **AAC** audio. `-apple` delivers MP4 with `+faststart` and re-encodes non-AAC tracks (AC3/DTS/…) to AAC where needed.
+
+A fresh source is encoded to H.265 as usual and then packaged for Apple. A file you **already converted** (`.h265.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept. AV1 can't play on iOS, so `-apple` always uses H.265 (an existing `.av1.mkv` is skipped with a hint to re-run `-apple` on the original source).
+
+> 10-bit and HDR HEVC play fine on modern iPhones/iPads.
 
 ---
 

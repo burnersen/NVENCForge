@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.3.5"
+const appVersion = "1.4.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -682,6 +682,11 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("AV1 mode enabled: encoding with av1_nvenc instead of H.265.")
 			continue
 		}
+		if strings.EqualFold(arg, "-apple") {
+			cfg.apple = true
+			pInfo.Println("Apple mode enabled: output as an iOS-ready MP4 (H.265/hvc1 + AAC + faststart).")
+			continue
+		}
 		if strings.EqualFold(arg, "-keep") {
 			cfg.keepSource = true
 			pInfo.Println("Keep-source mode enabled: originals are NOT moved to the recycle bin.")
@@ -732,12 +737,19 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 					pWarn.Printf("'%s' must be the FIRST argument — ignored here.\n", strings.ToLower(arg))
 					pWarn.Printf("Example: NVENCForge.exe %s file.mkv\n", strings.ToLower(arg))
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
+					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -apple, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
 				}
 				continue
 			}
 		}
 		rest = append(rest, arg)
+	}
+	// -apple targets the iOS Photos app, which cannot decode AV1 at all, so the
+	// Apple output is always H.265 (hvc1). -av1 is overridden here, before the
+	// codec-dependent CQ range and bitrate caps below are resolved.
+	if cfg.apple && cfg.av1 {
+		cfg.av1 = false
+		pWarn.Println("-apple forces H.265: iOS cannot play AV1 — the -av1 flag is ignored for this run.")
 	}
 	// -cq uses the active codec's CQ scale: H.265 1-51, AV1 1-63. The same
 	// number means a different quality per codec, so the upper bound depends
@@ -994,6 +1006,11 @@ func printActiveSettings(cfg *AppConfig) {
 		bfVal = "n/a (AV1)"
 		bfColor = "gray"
 	}
+	// -apple keeps H.265 but repackages the result as an iOS-ready MP4 (hvc1).
+	if cfg != nil && cfg.apple {
+		videoCodec = "H.265 (Apple MP4)"
+		codecActive = true
+	}
 
 	// -autocq replaces the fixed CQ with a per-file VMAF search; showing the
 	// static number would be misleading then. A manual -cq wins over both.
@@ -1244,6 +1261,8 @@ func main() {
 		pterm.Gray("  >>  ") + "Copy audio 1:1 (no AAC re-encode)\n" +
 		pterm.LightYellow("• NVENCForge.exe -av1 <files>      ") +
 		pterm.Gray("  >>  ") + "Encode AV1 instead of H.265 (RTX 40+)\n" +
+		pterm.LightYellow("• NVENCForge.exe -apple <files>   ") +
+		pterm.Gray("   >>  ") + "iOS-ready MP4 for iPhone (H.265/hvc1)\n" +
 		pterm.LightYellow("• NVENCForge.exe -autocq <files>  ") +
 		pterm.Gray("   >>  ") + "Auto-pick CQ per file (VMAF target)\n" +
 		pterm.LightYellow("• NVENCForge.exe -noautocq <files>") +
@@ -1374,7 +1393,12 @@ func main() {
 			results = append(results, ProcessResult{InputFile: f, Skipped: true})
 			continue
 		}
-		results = append(results, processFile(ctx, cfg, f, i+1, len(files)))
+		res := processFile(ctx, cfg, f, i+1, len(files))
+		if cfg.apple {
+			// -apple: repackage the finished MKV output into an iOS-ready MP4.
+			remuxResultToAppleMP4(ctx, &res)
+		}
+		results = append(results, res)
 	}
 
 	printSummary(ctx, cfg, results, time.Since(batchStart))

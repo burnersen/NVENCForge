@@ -30,6 +30,7 @@ type AppConfig struct {
 	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 22000k
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
+	apple          bool     // -apple: Ausgabe als iOS-taugliche MP4 (H.265/hvc1 + AAC + faststart) statt MKV
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
 	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)

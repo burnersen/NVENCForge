@@ -51,6 +51,18 @@ CONVERSION OPTIONS
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
+  -apple         Write an iOS-ready ".mp4" (plays on iPhone/iPad
+                 and imports into the Photos app) instead of
+                 ".mkv": the H.265 video is re-tagged "hvc1" (Apple
+                 refuses the "hev1" tag FFmpeg sets by default),
+                 audio becomes AAC where needed and "+faststart" is
+                 added. A fresh source is encoded as usual and then
+                 repackaged; a file you ALREADY converted
+                 (".h265.mkv") is only repackaged - no second
+                 encode - and the original .mkv is kept. AV1 cannot
+                 play on iOS, so -apple always uses H.265 (an
+                 existing ".av1.mkv" is skipped with a hint - re-run
+                 -apple on the original source).
   -autocq        Pick the CQ automatically per file: short sample
                  windows (placed on the source's bitrate profile,
                  hardest scene always included) are encoded at two

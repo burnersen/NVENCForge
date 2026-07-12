@@ -451,6 +451,12 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	if ext == ".mkv" {
 		for _, suf := range skipInputSuffixes {
 			if strings.HasSuffix(strings.ToLower(base), suf) {
+				// -apple repackages an already-converted file into an iOS-ready
+				// MP4 instead of skipping it (lossless for H.265/H.264; an AV1
+				// file gets a hint inside convertedMKVToAppleMP4).
+				if cfg.apple {
+					return convertedMKVToAppleMP4(ctx, filePath)
+				}
 				fmt.Println(pterm.Gray("  Skipped: already converted."))
 				fmt.Println()
 				result.Skipped = true
@@ -721,7 +727,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 
 	doConvert, doRemux := false, false
 	switch {
-	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" &&
+	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" && !cfg.apple &&
 		!doScale && bitrateKbps <= effCfg.maxBitrateKbps && allAudioSafeAAC(stats.AudioStreams):
 		newPath := filepath.Join(dir, base+outSuffix+ext)
 		if _, statErr := os.Stat(newPath); statErr == nil {
@@ -1080,6 +1086,134 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	result.SavedMB = savedMB
 	result.Success = true
 	fmt.Println()
+	return result
+}
+
+// writeAppleMP4 stream-copies the video of srcMKV into outMP4 with the recipe
+// Apple's players and the Photos app require: HEVC is re-tagged "hvc1" (they
+// reject the "hev1" fourcc FFmpeg picks by default; H.264 keeps its own avc1),
+// any non-AAC audio is transcoded to AAC (48 kHz, ≤5.1 — the DaVinci-safe rule)
+// and "+faststart" moves the moov atom to the front. Subtitles, attachments and
+// data/timecode tracks are dropped; a gallery clip needs none. Shared by the
+// post-conversion hook and the "already-converted MKV" path.
+func writeAppleMP4(ctx context.Context, srcMKV string, stats *VideoStats, outMP4 string) error {
+	args := []string{"-y", "-i", srcMKV, "-map", "0:V:0", "-map", "0:a?", "-c:v", "copy"}
+	if strings.EqualFold(stats.VideoCodec, "hevc") {
+		args = append(args, "-tag:v", "hvc1")
+	}
+	args = append(args, buildPerStreamAudioArgs(stats.AudioStreams, false, false)...)
+	args = append(args, "-sn", "-movflags", "+faststart", outMP4)
+
+	pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
+		Println("  >> Apple MP4 (iOS-ready: hvc1 + AAC, lossless video copy)")
+	return runFFmpeg(ctx, args, stats.DurationSec, 1, 1, getFileSizeMB(srcMKV))
+}
+
+// remuxResultToAppleMP4 repackages a finished conversion output (an .mkv we just
+// wrote into the "output" folder) into an iOS-ready .mp4 and removes the now
+// redundant .mkv. Only -apple runs reach here. On any error the .mkv is kept and
+// the result is left unchanged, so a failed remux never costs the conversion.
+func remuxResultToAppleMP4(ctx context.Context, res *ProcessResult) {
+	if !res.Success || res.IsPreview || res.OutputFile == "" {
+		return
+	}
+	src := res.OutputFile
+	// Only OUR freshly written output is remuxed: an .mkv living in the "output"
+	// folder. Some result paths report back an untouched original (e.g. an
+	// oversized encode was discarded) — that file must stay exactly as it is.
+	if !strings.EqualFold(filepath.Ext(src), ".mkv") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(src)), "output") {
+		return
+	}
+	stats, err := getVideoStats(ctx, src)
+	if err != nil {
+		pWarn.Printf("Apple MP4: cannot probe %s (%v) — MKV kept.\n", filepath.Base(src), err)
+		return
+	}
+	mp4Out, err := uniquePath(strings.TrimSuffix(src, filepath.Ext(src)) + ".mp4")
+	if err != nil {
+		pWarn.Printf("Apple MP4: no free output name (%v) — MKV kept.\n", err)
+		return
+	}
+	if err := writeAppleMP4(ctx, src, stats, mp4Out); err != nil {
+		_ = os.Remove(mp4Out)
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		pWarn.Printf("Apple MP4 creation failed (%v) — the MKV is kept: %s\n",
+			err, filepath.Base(src))
+		return
+	}
+	if tsErr := copyTimestamps(src, mp4Out); tsErr != nil {
+		pWarn.Printf("Apple MP4: could not transfer file timestamps: %v\n", tsErr)
+	}
+	// The MKV was only the intermediate container; -apple wants the MP4.
+	_ = os.Remove(src)
+	res.OutputFile = mp4Out
+	pOK.Printf("    ✓ %s\n", filepath.Base(mp4Out))
+}
+
+// convertedMKVToAppleMP4 handles an already-converted .mkv dropped straight onto
+// -apple: instead of skipping it as "already converted", an H.265/H.264 file is
+// repackaged losslessly into an iOS-ready <name>.mp4 in the output folder (no
+// second encode) and the original .mkv is KEPT — it is the user's finished
+// archive / DaVinci copy. AV1 cannot play on iOS and would need a real re-encode
+// from the untouched source (not available here), so it is skipped with a clear
+// hint. The startup header for this file was already printed by the caller.
+func convertedMKVToAppleMP4(ctx context.Context, filePath string) ProcessResult {
+	result := ProcessResult{InputFile: filePath}
+	dir := filepath.Dir(filePath)
+	base := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+
+	stats, err := getVideoStats(ctx, filePath)
+	if err != nil {
+		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: FFprobe error: %v", err)
+		result.FailedAt = time.Now()
+		return result
+	}
+	if strings.EqualFold(stats.VideoCodec, "av1") {
+		pWarn.Println("  Skipped: AV1 can't play on iOS — re-run -apple on the ORIGINAL source for an iPhone file.")
+		fmt.Println()
+		result.Skipped = true
+		return result
+	}
+
+	outputDir := filepath.Join(dir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: cannot create output folder: %v", err)
+		result.FailedAt = time.Now()
+		return result
+	}
+	if c := cleanFileBaseName(base); c != "" {
+		base = c
+	}
+	outMP4 := filepath.Join(outputDir, base+".mp4")
+	if _, statErr := os.Stat(outMP4); statErr == nil {
+		fmt.Println(pterm.Gray("  Skipped: Apple MP4 already exists."))
+		fmt.Println()
+		result.Skipped = true
+		return result
+	}
+
+	if err := writeAppleMP4(ctx, filePath, stats, outMP4); err != nil {
+		_ = os.Remove(outMP4)
+		if errors.Is(err, context.Canceled) {
+			result.Skipped = true
+			return result
+		}
+		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: %v", err)
+		result.FailedAt = time.Now()
+		pWarn.Printf("  Apple MP4 creation failed: %v\n", err)
+		fmt.Println()
+		return result
+	}
+	if tsErr := copyTimestamps(filePath, outMP4); tsErr != nil {
+		pWarn.Printf("  Could not transfer file timestamps: %v\n", tsErr)
+	}
+	pOK.Printf("    ✓ %s\n", filepath.Base(outMP4))
+	fmt.Println()
+	result.OutputFile = outMP4
+	result.Success = true
 	return result
 }
 

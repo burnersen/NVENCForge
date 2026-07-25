@@ -345,7 +345,11 @@ func classifyFFmpegError(msg string) ffmpegFailKind {
 		return false
 	}
 	switch {
-	case contains("nvenc", "cuda", "cuvid", "no capable devices"):
+	// Video-Encoder-Fehler: beide Backends. Keine Kaskaden-Sprosse kann einen
+	// kaputten Video-Encode reparieren, deshalb wird sofort abgebrochen —
+	// egal ob die GPU (nvenc/cuda) oder der CPU-Encoder (x265/svt) klemmt.
+	case contains("nvenc", "cuda", "cuvid", "no capable devices",
+		"x265", "libx265", "svt", "libsvtav1"):
 		return failVideo
 	case contains("subtitle", "subrip", "mov_text", "hdmv_pgs", "dvb_sub",
 		"dvd_sub", "webvtt", "vobsub"):
@@ -702,21 +706,18 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	maxBR := fmt.Sprintf("%dk", calcKbps)
 	bufBR := fmt.Sprintf("%dk", calcKbps*2)
 	gopSize := calcGOP(stats.FPSNum, stats.FPSDen)
-	var nvencOpts []string
-	switch {
-	case cfg.forcedCQ > 0 && cfg.av1:
-		// -cq on the AV1 scale (1-63) — beats av1TargetCQ; Auto-CQ was
-		// already disabled at parse time.
-		nvencOpts = buildAV1OptsWithCQ(cfg.forcedCQ, maxBR, bufBR, gopSize)
-	case cfg.av1:
-		nvencOpts = buildAV1Opts(maxBR, bufBR, gopSize)
-	case cfg.forcedCQ > 0:
-		// -cq: manually forced CQ for this run — beats the configured
-		// targetCQ; Auto-CQ was already disabled at parse time.
-		nvencOpts = buildNVENCOptsWithCQ(cfg.forcedCQ, maxBR, bufBR, gopSize)
-	default:
-		nvencOpts = buildNVENCOpts(maxBR, bufBR, gopSize)
+	// Der Encoder ergibt sich aus Zielcodec (-av1) und Backend (-cpu); die
+	// Aufrufstelle unterscheidet nur noch, WELCHER Qualitätswert gilt:
+	// -cq schlägt den fest eingestellten Wert der jeweiligen Skala, und
+	// Auto-CQ ersetzt ihn weiter unten gegebenenfalls durch einen gemessenen.
+	buildVideoOpts := activeVideoOptsBuilder(cfg.av1)
+	cqValue := activeManualCQ(cfg.av1)
+	if cfg.forcedCQ > 0 {
+		// -cq: fester Wert nur für diesen Lauf; Auto-CQ wurde dafür schon
+		// beim Argument-Einlesen abgeschaltet.
+		cqValue = cfg.forcedCQ
 	}
+	nvencOpts := buildVideoOpts(cqValue, maxBR, bufBR, gopSize)
 	// HDR signalling is carried by the color tags copied 1:1 from the source in
 	// buildColorOpts (primaries/transfer/colorspace/range — only when present, so
 	// nothing is fabricated). Mastering-display / MaxCLL static metadata rides
@@ -778,10 +779,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		// autoDetectCQ already warned and the codec's configured CQ in nvencOpts
 		// simply stays in effect.
 		if cfg.autoCQ {
-			scale := hevcAutoCQScale
-			if cfg.av1 {
-				scale = av1AutoCQScale
-			}
+			scale := activeAutoCQScale(cfg.av1)
 			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, doScale, scale); ok {
 				nvencOpts = scale.buildOpts(cq, maxBR, bufBR, gopSize)
 				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
@@ -1889,17 +1887,15 @@ func videoIsInterlaced(s *VideoStats) bool {
 	return false
 }
 
-// buildNVENCOpts assembles the H.265 encoder options with the configured
-// targetCQ. -autocq swaps only the CQ via buildNVENCOptsWithCQ; every other
-// parameter stays identical — which also guarantees the Auto-CQ sample
-// encodes run with exactly the settings of the real encode.
+// buildNVENCOptsWithCQ assembles the H.265 encoder options at the given CQ.
+// -cq and Auto-CQ swap only that value; every other parameter stays identical
+// — which also guarantees the Auto-CQ sample encodes run with exactly the
+// settings of the real encode. The fixed value for manual mode comes from
+// activeManualCQ (targetCQ here), so all four encoder backends are chosen in
+// one place.
 // AQ options use the dash spellings (-spatial-aq/-temporal-aq): FFmpeg
 // master removed the old underscore aliases in 2026, and the dash form
 // exists in every supported build.
-func buildNVENCOpts(maxBitrate, bufsize string, gop int) []string {
-	return buildNVENCOptsWithCQ(appSettings.targetCQ, maxBitrate, bufsize, gop)
-}
-
 func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	opts := []string{
 		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
@@ -1923,16 +1919,9 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 	return opts
 }
 
-// buildAV1Opts mirrors buildNVENCOpts for av1_nvenc. Differences: own CQ
-// scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
+// buildAV1OptsWithCQ mirrors buildNVENCOptsWithCQ for av1_nvenc. Differences:
+// own CQ scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
 // B-frame options (not exposed by av1_nvenc), AQ flags use hyphens.
-// -autocq swaps only the CQ via buildAV1OptsWithCQ; every other parameter
-// stays identical — which also guarantees the Auto-CQ sample encodes run
-// with exactly the settings of the real AV1 encode.
-func buildAV1Opts(maxBitrate, bufsize string, gop int) []string {
-	return buildAV1OptsWithCQ(appSettings.av1TargetCQ, maxBitrate, bufsize, gop)
-}
-
 func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	return []string{
 		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
@@ -1942,6 +1931,110 @@ func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 		"-multipass", "qres", "-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1", "-temporal-aq", "1",
 		"-aq-strength", "8",
+	}
+}
+
+// ----------------------------------------------------------------------------
+// CPU-Encoder (-cpu): dieselben Bilder ohne Nvidia-Karte
+// ----------------------------------------------------------------------------
+
+// buildX265OptsWithCQ ist das CPU-Gegenstück zu buildNVENCOptsWithCQ. Alles,
+// was das Bild bestimmt, bleibt gleich (10 Bit, Bitraten-Deckel, GOP) — nur
+// der Encoder wechselt auf libx265. Die NVENC-eigenen Regler (Lookahead,
+// B-Frames, spatial/temporal AQ, multipass) haben hier bewusst KEIN
+// Gegenstück: x265 steuert das über sein Preset selbst und besser, als
+// einzeln durchgereichte Werte es könnten.
+//
+// -crf ist NICHT dieselbe Skala wie NVENCs -cq: aus der Messreihe vom
+// 2026-07-25 liegt gleiche Qualität bei rund CQ-7 (NVENC CQ 26 entspricht
+// x265 CRF ~19). Deshalb hat der CPU-Modus mit cpuTargetCRF einen eigenen
+// INI-Schlüssel und mit x265AutoCQScale ein eigenes Auto-CQ-Profil.
+//
+// log-level=error unterdrückt x265' gesprächige Statuszeilen, die sonst die
+// Fortschrittsanzeige in runFFmpeg überschreiben würden.
+func buildX265OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string {
+	opts := []string{
+		"-c:v", "libx265", "-crf", strconv.Itoa(crf),
+		"-maxrate", maxBitrate, "-bufsize", bufsize,
+		"-profile:v", "main10", "-pix_fmt", "yuv420p10le",
+		"-preset", appSettings.cpuPreset, "-fps_mode", "cfr",
+		"-g", strconv.Itoa(gop),
+		"-x265-params", "log-level=error",
+	}
+	// 0 = alle Kerne (Standard). Ein Deckel hält den Rechner bedienbar,
+	// während im Hintergrund encodiert wird.
+	if appSettings.cpuThreads > 0 {
+		opts = append(opts, "-threads", strconv.Itoa(appSettings.cpuThreads))
+	}
+	return opts
+}
+
+// buildSVTAV1OptsWithCQ spiegelt buildX265OptsWithCQ für AV1 auf dem
+// Prozessor. SVT-AV1 kennt keine Profil-Angabe (Main deckt 8 und 10 Bit ab)
+// und zählt sein Preset numerisch (0 = langsamst/bester, 13 = schnellst).
+// Die Thread-Begrenzung heißt hier lp (logical processors) — libsvtav1
+// ignoriert das allgemeine -threads.
+func buildSVTAV1OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string {
+	opts := []string{
+		"-c:v", "libsvtav1", "-crf", strconv.Itoa(crf),
+		"-maxrate", maxBitrate, "-bufsize", bufsize,
+		"-pix_fmt", "yuv420p10le",
+		"-preset", strconv.Itoa(appSettings.cpuAV1Preset), "-fps_mode", "cfr",
+		"-g", strconv.Itoa(gop),
+	}
+	if appSettings.cpuThreads > 0 {
+		opts = append(opts, "-svtav1-params", "lp="+strconv.Itoa(appSettings.cpuThreads))
+	}
+	return opts
+}
+
+// activeVideoOptsBuilder liefert den Options-Bauer des aktiven Backends für
+// den Zielcodec. Alle vier Bauer haben dieselbe Signatur, damit -cq und
+// Auto-CQ nur den Qualitätswert austauschen müssen und die Aufrufstellen
+// nichts über GPU oder CPU wissen.
+func activeVideoOptsBuilder(av1 bool) func(cq int, maxBitrate, bufsize string, gop int) []string {
+	switch {
+	case av1 && cpuModeActive:
+		return buildSVTAV1OptsWithCQ
+	case av1:
+		return buildAV1OptsWithCQ
+	case cpuModeActive:
+		return buildX265OptsWithCQ
+	default:
+		return buildNVENCOptsWithCQ
+	}
+}
+
+// activeManualCQ liefert den fest eingestellten Qualitätswert des aktiven
+// Backends — den Wert, der ohne Auto-CQ und ohne -cq gilt. Jede Kombination
+// hat einen eigenen INI-Schlüssel, weil dieselbe Zahl je Encoder etwas
+// völlig anderes bedeutet.
+func activeManualCQ(av1 bool) int {
+	switch {
+	case av1 && cpuModeActive:
+		return appSettings.cpuAV1TargetCRF
+	case av1:
+		return appSettings.av1TargetCQ
+	case cpuModeActive:
+		return appSettings.cpuTargetCRF
+	default:
+		return appSettings.targetCQ
+	}
+}
+
+// activeAutoCQScale liefert das Auto-CQ-Profil des aktiven Backends. Die
+// Suchmechanik ist für alle vier identisch — nur Anker, Klemmen und
+// Schrittbreiten unterscheiden sich, weil jede CQ/CRF-Skala anders tickt.
+func activeAutoCQScale(av1 bool) autoCQScale {
+	switch {
+	case av1 && cpuModeActive:
+		return svtav1AutoCQScale
+	case av1:
+		return av1AutoCQScale
+	case cpuModeActive:
+		return x265AutoCQScale
+	default:
+		return hevcAutoCQScale
 	}
 }
 

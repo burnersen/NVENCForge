@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.5.0"
+const appVersion = "1.6.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -454,6 +454,12 @@ func initTools() error {
 // failing on every single file.
 var nvencAdvancedAQ = true
 
+// cpuFallbackPromptTimeout ist die Bedenkzeit bei der Rückfrage "ohne
+// Nvidia-Karte auf dem Prozessor weitermachen?". Läuft sie ab, wird
+// weitergemacht — ein unbeaufsichtigter Stapellauf soll nicht an einer
+// Frage hängen bleiben, vor der niemand sitzt.
+const cpuFallbackPromptTimeout = 15 * time.Second
+
 // checkHardwareCapabilities probes with the SAME flags the real encode uses, so a
 // card that passes here cannot fail later on every file. HEVC B-frames AND Temporal
 // AQ/multipass share the Turing+ gate; older cards (Maxwell-2/Pascal/Volta) are
@@ -541,6 +547,79 @@ func checkAV1Capability() error {
 			err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// checkCPUEncoderCapability is the CPU-mode counterpart of
+// checkHardwareCapabilities: it probes the encoder the run will actually use,
+// with the configured preset, so a missing library or a bad setting fails once
+// here instead of on every single file. Slim FFmpeg builds without libx265 or
+// libsvtav1 exist, so this is a real case, not a formality.
+func checkCPUEncoderCapability(av1 bool) error {
+	label, encoderName := "libx265", "H.265"
+	if av1 {
+		label, encoderName = "libsvtav1", "AV1"
+	}
+	pInfo.Printf("Checking CPU encoder (%s %s 10-bit)...\n", label, encoderName)
+
+	args := []string{
+		"-v", "error", "-f", "lavfi",
+		"-i", "color=c=black:s=1920x1080:d=1",
+	}
+	// Dieselben Optionen wie im echten Lauf, nur ohne Bitraten-Deckel: was
+	// hier läuft, läuft auch beim Encodieren.
+	if av1 {
+		args = append(args, buildSVTAV1OptsWithCQ(appSettings.cpuAV1TargetCRF, "20000k", "40000k", 120)...)
+	} else {
+		args = append(args, buildX265OptsWithCQ(appSettings.cpuTargetCRF, "20000k", "40000k", 120)...)
+	}
+	args = append(args, "-f", "null", "-")
+
+	dummy := exec.Command(ffmpegPath, args...)
+	dummy.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+	out, err := dummy.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("main.go: checkCPUEncoderCapability: %s dummy encode failed: %v | %s",
+			label, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// askYesNoTimeout asks a yes/no question and falls back to defaultYes when the
+// user does not answer within timeout. The timeout exists so unattended runs
+// (Send-to on a batch of files, an overnight queue) keep going instead of
+// waiting forever at a prompt nobody is sitting in front of.
+func askYesNoTimeout(question string, timeout time.Duration, defaultYes bool) bool {
+	suffix := "(y/n)"
+	if defaultYes {
+		suffix = "(Y/n)"
+	}
+	fmt.Printf("  %s %s, continuing in %.0f s: ", question, suffix, timeout.Seconds())
+
+	answer := make(chan string, 1)
+	go func() {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			// Kein lesbares stdin (umgeleitet/geschlossen): wie Zeitablauf
+			// behandeln, damit der Lauf nicht stumm hängen bleibt.
+			return
+		}
+		answer <- strings.TrimSpace(strings.ToLower(line))
+	}()
+
+	select {
+	case a := <-answer:
+		switch a {
+		case "y", "yes", "j", "ja":
+			return true
+		case "n", "no", "nein":
+			return false
+		default:
+			return defaultYes // Enter oder Unsinn: Vorgabe gilt
+		}
+	case <-time.After(timeout):
+		fmt.Println()
+		return defaultYes
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -678,8 +757,13 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			continue
 		}
 		if strings.EqualFold(arg, "-av1") {
+			// Gemeldet wird erst nach der Schleife: welcher AV1-Encoder läuft,
+			// hängt von -cpu ab, und das darf hinter -av1 stehen.
 			cfg.av1 = true
-			pInfo.Println("AV1 mode enabled: encoding with av1_nvenc instead of H.265.")
+			continue
+		}
+		if strings.EqualFold(arg, "-cpu") {
+			cfg.cpu = true
 			continue
 		}
 		if strings.EqualFold(arg, "-apple") {
@@ -737,7 +821,7 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 					pWarn.Printf("'%s' must be the FIRST argument — ignored here.\n", strings.ToLower(arg))
 					pWarn.Printf("Example: NVENCForge.exe %s file.mkv\n", strings.ToLower(arg))
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -apple, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
+					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -apple, -cpu, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
 				}
 				continue
 			}
@@ -750,6 +834,23 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	if cfg.apple && cfg.av1 {
 		cfg.av1 = false
 		pWarn.Println("-apple forces H.265: iOS cannot play AV1 — the -av1 flag is ignored for this run.")
+	}
+	// Backend festlegen: -cpu schlägt die INI (encoder=cpu). Beides kann hinter
+	// -av1 stehen, deshalb erst hier — und deshalb wird der tatsächlich
+	// laufende Encoder auch erst jetzt gemeldet, genau einmal. Findet der
+	// GPU-Test später keine Karte, schaltet main() zusätzlich auf CPU um.
+	cpuModeActive = cfg.cpu || appSettings.encoder == encoderCPU
+	origin := ""
+	if cpuModeActive && !cfg.cpu {
+		origin = " (from configuration: encoder=cpu)"
+	}
+	switch {
+	case cfg.av1 && cpuModeActive:
+		pInfo.Printf("AV1 on the processor%s: encoding with libsvtav1 — no Nvidia card needed, but much slower than a GPU.\n", origin)
+	case cfg.av1:
+		pInfo.Println("AV1 mode enabled: encoding with av1_nvenc instead of H.265.")
+	case cpuModeActive:
+		pInfo.Printf("CPU mode%s: encoding H.265 with libx265 — no Nvidia card needed, but much slower than a GPU.\n", origin)
 	}
 	// -cq uses the active codec's CQ scale: H.265 1-51, AV1 1-63. The same
 	// number means a different quality per codec, so the upper bound depends
@@ -1011,6 +1112,13 @@ func printActiveSettings(cfg *AppConfig) {
 		videoCodec = "H.265 (Apple MP4)"
 		codecActive = true
 	}
+	// -cpu swaps the encoder itself: same codec, but libx265/libsvtav1 on their
+	// own CRF scales, so the fixed quality value comes from a different key.
+	if cpuModeActive {
+		videoCodec += " on CPU"
+		codecActive = true
+		cqVal = activeManualCQ(cfg != nil && cfg.av1)
+	}
 
 	// -autocq replaces the fixed CQ with a per-file VMAF search; showing the
 	// static number would be misleading then. A manual -cq wins over both.
@@ -1037,20 +1145,43 @@ func printActiveSettings(cfg *AppConfig) {
 		color  string
 		active bool
 	}
+	// Die encoder-eigenen Regler unterscheiden sich je Backend: NVENC-Preset,
+	// Lookahead und B-Frames haben im CPU-Modus keinerlei Wirkung, dort zählen
+	// stattdessen das x265-/SVT-Preset und die Thread-Grenze.
+	encoderRows := []entry{
+		{"NVENC preset", s.nvencPreset, "cyan", false},
+		{"NVENC lookahead", fmt.Sprintf("%d fr", s.nvencLookahead), "cyan", false},
+		{"B-frames", bfVal, bfColor, false},
+	}
+	if cpuModeActive {
+		presetVal := s.cpuPreset + " (libx265)"
+		if cfg != nil && cfg.av1 {
+			presetVal = fmt.Sprintf("%d (SVT-AV1)", s.cpuAV1Preset)
+		}
+		threadsVal := "all cores"
+		if s.cpuThreads > 0 {
+			threadsVal = fmt.Sprintf("%d threads", s.cpuThreads)
+		}
+		encoderRows = []entry{
+			{"CPU preset", presetVal, "cyan", false},
+			{"CPU threads", threadsVal, "cyan", s.cpuThreads > 0},
+		}
+	}
+
 	entries := []entry{
 		{"Video codec", videoCodec, "cyan", codecActive},
 		{"Target CQ", cqDisplay, cqColor, codecActive},
 		{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", bitrateActive},
 		{"Resolution", resValue, "cyan", resActive},
-		{"NVENC preset", s.nvencPreset, "cyan", false},
-		{"NVENC lookahead", fmt.Sprintf("%d fr", s.nvencLookahead), "cyan", false},
-		{"B-frames", bfVal, bfColor, false},
+	}
+	entries = append(entries, encoderRows...)
+	entries = append(entries, []entry{
 		{"CAS sharpening", fmt.Sprintf("%.2f", s.casStrength), "cyan", false},
 		{"Audio/channel", fmt.Sprintf("%d k", s.audioKbpsPerChannel), "cyan", false},
 		{"Audio fallback", fmt.Sprintf("%d k", s.fallbackAudioBitrate), "cyan", false},
 		{"Audio mode", audioMode, "cyan", audioModeActive},
 		{"Auto-shutdown", shutdownVal, shutdownColor, false},
-	}
+	}...)
 
 	colorize := func(val, color string) string {
 		switch color {
@@ -1263,6 +1394,8 @@ func main() {
 		pterm.Gray("  >>  ") + "Encode AV1 instead of H.265 (RTX 40+)\n" +
 		pterm.LightYellow("• NVENCForge.exe -apple <files>   ") +
 		pterm.Gray("   >>  ") + "iOS-ready MP4 for iPhone (H.265/hvc1)\n" +
+		pterm.LightYellow("• NVENCForge.exe -cpu <files>     ") +
+		pterm.Gray("   >>  ") + "Encode on the CPU (no Nvidia card, slower)\n" +
 		pterm.LightYellow("• NVENCForge.exe -autocq <files>  ") +
 		pterm.Gray("   >>  ") + "Auto-pick CQ per file (VMAF target)\n" +
 		pterm.LightYellow("• NVENCForge.exe -noautocq <files>") +
@@ -1337,22 +1470,50 @@ func main() {
 	}
 	cfg.parseArgs(os.Args[1:])
 
-	if err := checkHardwareCapabilities(); err != nil {
-		fmt.Println()
-		pFatal.Println("No compatible Nvidia GPU found (NVENC unavailable).")
-		pFatal.Println("NVENCForge requires an Nvidia graphics card.")
-		// Always show the underlying FFmpeg error: a bad ffmpeg build (e.g.
-		// renamed encoder options) fails this probe too, and without the
-		// detail that is indistinguishable from a genuinely missing GPU.
-		pterm.Println(pterm.Gray("  Detail: " + err.Error()))
-		waitForEnter()
-		os.Exit(1)
+	// GPU-Test nur, wenn auch auf der GPU encodiert werden soll. Schlägt er
+	// fehl, ist das kein Abbruchgrund mehr: seit dem CPU-Modus kann derselbe
+	// Auftrag ohne Nvidia-Karte laufen, nur langsamer. Deshalb wird gefragt
+	// statt aufgegeben — mit Zeitlimit, damit unbeaufsichtigte Stapelläufe
+	// (Send-to über Nacht) nicht ewig an der Rückfrage stehen bleiben.
+	if !cpuModeActive {
+		if err := checkHardwareCapabilities(); err != nil {
+			fmt.Println()
+			pWarn.Println("No compatible Nvidia GPU found (NVENC unavailable).")
+			// Always show the underlying FFmpeg error: a bad ffmpeg build (e.g.
+			// renamed encoder options) fails this probe too, and without the
+			// detail that is indistinguishable from a genuinely missing GPU.
+			pterm.Println(pterm.Gray("  Detail: " + err.Error()))
+			fmt.Println()
+			pInfo.Println("NVENCForge can encode on the processor instead (libx265 / libsvtav1).")
+			pInfo.Println("That works on any machine, but takes considerably longer than a GPU.")
+			if !askYesNoTimeout("Continue on the processor?", cpuFallbackPromptTimeout, true) {
+				fmt.Println()
+				pFatal.Println("Stopped — no Nvidia card and CPU mode declined.")
+				pInfo.Println("Tip: encoder=cpu in NVENCForge_Config.ini makes CPU mode permanent, -cpu enables it per run.")
+				waitForEnter()
+				os.Exit(1)
+			}
+			cpuModeActive = true
+			pOK.Println("Switched to CPU mode for this run.")
+		}
 	}
-	if cfg.av1 {
+	switch {
+	case cpuModeActive:
+		// Im CPU-Modus wird der Encoder geprüft, der wirklich läuft — eine
+		// fehlende Bibliothek soll einmal hier auffallen, nicht bei jeder Datei.
+		if err := checkCPUEncoderCapability(cfg.av1); err != nil {
+			fmt.Println()
+			pFatal.Println("The CPU encoder is not available in this FFmpeg build.")
+			pFatal.Println("Delete ffmpeg.exe next to NVENCForge.exe and restart to download a complete build.")
+			pterm.Println(pterm.Gray("  Detail: " + err.Error()))
+			waitForEnter()
+			os.Exit(1)
+		}
+	case cfg.av1:
 		if err := checkAV1Capability(); err != nil {
 			fmt.Println()
 			pFatal.Println("AV1 encoding not available on this GPU (requires RTX 40 series or newer).")
-			pFatal.Println("Run without -av1 to encode H.265 instead.")
+			pFatal.Println("Run without -av1 to encode H.265, or add -cpu to encode AV1 on the processor.")
 			if debugMode {
 				pterm.Println(pterm.Gray("  Detail: " + err.Error()))
 			}
@@ -1365,7 +1526,7 @@ func main() {
 	// warning instead of one failed analysis per file.
 	if cfg.autoCQ {
 		if err := checkLibVMAF(); err != nil {
-			pWarn.Println("Auto-CQ disabled: this FFmpeg build has no libvmaf filter — using targetCQ from the config.")
+			pWarn.Println("Auto-CQ disabled: this FFmpeg build has no libvmaf filter — using the fixed CQ/CRF from the config.")
 			if debugMode {
 				pterm.Println(pterm.Gray("  Detail: " + err.Error()))
 			}

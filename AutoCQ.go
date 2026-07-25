@@ -176,6 +176,64 @@ var av1AutoCQScale = autoCQScale{
 	codecLabel:           "AV1",
 }
 
+// x265AutoCQScale ist das Auto-CQ-Profil für den CPU-Modus (-cpu) mit
+// libx265. Alle Zahlen stammen aus der VMAF-Messreihe vom 2026-07-25
+// (vier Quellen: Animation, Realfilm 1080p60, 4K-HDR mit Downscale,
+// vorkomprimiertes Material), gemessen mit derselben Mechanik, die auch
+// im Betrieb läuft.
+//
+// Anker 18/22: VMAF 96 wird bei frischem Material zwischen CRF 17,3 und
+// 18,5 erreicht (Realfilm 18,0 / Animation 18,5 / 4K 17,3); stark
+// vorkomprimiertes Material liegt erwartungsgemäß höher (22,6) und wird
+// von der Plateau-Logik abgefangen. Merkregel aus derselben Messung:
+// x265-CRF entspricht etwa NVENC-CQ minus 7.
+//
+// Die schrittabhängigen Werte sind NICHT von NVENC abgeschrieben, sondern
+// mit der gemessenen Schrittbreite skaliert: ein x265-CRF-Schritt ist
+// 0,64 VMAF wert, ein NVENC-CQ-Schritt 0,79 — Faktor 0,81. Daraus folgen
+// die feinere Sättigungsschwelle (0,08 statt 0,10), ein Schritt mehr
+// Korrekturweite (4 statt 3) und der etwas größere Kletter-Faktor 1,25.
+var x265AutoCQScale = autoCQScale{
+	anchorLow: 18, anchorHigh: 22,
+	clampMin: 12, clampMax: 28,
+	maxStepDown:          4,
+	saturationSlope:      0.08,
+	climbToleranceFactor: 1.25,
+	buildOpts:            buildX265OptsWithCQ,
+	fallbackCQ:           func() int { return appSettings.cpuTargetCRF },
+	codecLabel:           "H.265 (CPU)",
+}
+
+// svtav1AutoCQFallbackCRF ist der CRF, auf den die AV1-Suche im CPU-Modus
+// zurückfällt, wenn sie nicht messen kann. Wie bei av1_nvenc bewusst NICHT
+// cpuAV1TargetCRF (32 = magerer Handbetriebswert), sondern der untere Anker,
+// damit ein nicht messbarer Clip nahe am Qualitätsziel landet.
+const svtav1AutoCQFallbackCRF = 24
+
+// svtav1AutoCQScale ist das Auto-CQ-Profil für den CPU-Modus mit -av1
+// (libsvtav1). Anker und Klemmen entsprechen denen von av1_nvenc — das ist
+// kein Abschreiben, sondern Messergebnis: die Schrittbreiten liegen mit
+// 0,30 (SVT) gegen 0,23 VMAF/Stufe (av1_nvenc) nah beieinander, weshalb
+// dieselbe Einteilung passt. Sättigungsschwelle und Kletter-Faktor sind mit
+// diesem Verhältnis nachgezogen (0,06 statt 0,05; 1,5 statt 2,0).
+//
+// WICHTIG: SVT-AV1 hat bei Preset 8 einen Qualitätsdeckel um VMAF 96,5 —
+// am Realfilm verläuft die Kurve von CRF 12 bis 24 praktisch flach
+// (96,56 → 96,20 bei 26 % weniger Dateigröße). Niedrigere CRF-Werte
+// erzeugen dort nur größere Dateien. Genau dafür ist die Plateau-Logik
+// (autoCQPlateauTolerance) da; die Anker sind deshalb bewusst nicht tiefer
+// gelegt.
+var svtav1AutoCQScale = autoCQScale{
+	anchorLow: 24, anchorHigh: 32,
+	clampMin: 16, clampMax: 44,
+	maxStepDown:          5,
+	saturationSlope:      0.06,
+	climbToleranceFactor: 1.5,
+	buildOpts:            buildSVTAV1OptsWithCQ,
+	fallbackCQ:           func() int { return svtav1AutoCQFallbackCRF },
+	codecLabel:           "AV1 (CPU)",
+}
+
 // checkLibVMAF reports whether the FFmpeg build carries the libvmaf filter.
 // The auto-downloaded BtbN GPL build has it; slim third-party builds may not.
 func checkLibVMAF() error {

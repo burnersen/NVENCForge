@@ -23,7 +23,8 @@ const helpFileContent = `=======================================================
 
 WHAT IT DOES
   NVENCForge converts video files to H.265 (HEVC) using your
-  Nvidia GPU (NVENC), and can split, extract
+  Nvidia GPU (NVENC) - or, with -cpu, on the processor alone
+  when there is no Nvidia card. It can also split, extract
   and merge audio / subtitle / video streams. Subtitles are
   cleaned automatically.
 
@@ -63,6 +64,29 @@ CONVERSION OPTIONS
                  play on iOS, so -apple always uses H.265 (an
                  existing ".av1.mkv" is skipped with a hint - re-run
                  -apple on the original source).
+  -cpu           Encode on the processor instead of the graphics
+                 card - NO Nvidia card required. H.265 is encoded
+                 with libx265, and together with -av1 the encoder
+                 is SVT-AV1. Everything else stays the same:
+                 downscaling, sharpening, audio handling, bitrate
+                 caps, Auto-CQ and the file naming are identical.
+                 Expect it to take considerably longer than a GPU
+                 (roughly 40 minutes per hour of 1080p video on a
+                 modern 8-core CPU, clearly more on older ones).
+                 The quality settings live on their own scales:
+                 "cpuTargetCRF" for H.265, "cpuAV1TargetCRF" for
+                 AV1 - measured, libx265 needs about CQ minus 7 for
+                 the same quality as NVENC, so 26 and 19 look alike.
+                 Speed is set with "cpuPreset" (libx265) and
+                 "cpuAV1Preset" (SVT-AV1); "cpuThreads" limits how
+                 many cores are used so the machine stays usable
+                 (0 = all cores). To make CPU mode permanent, set
+                 "encoder=cpu" in the config. If no Nvidia card is
+                 found at startup, NVENCForge offers CPU mode by
+                 itself instead of refusing to run.
+                 Tip: with -cpu the AV1 encoder is both faster AND
+                 smaller at equal quality - if the target device
+                 plays AV1, "-cpu -av1" is the better deal.
   -autocq        Pick the CQ automatically per file: short sample
                  windows (placed on the source's bitrate profile,
                  hardest scene always included) are encoded at two

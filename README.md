@@ -7,7 +7,7 @@
 **H.265 / AV1 NVENC batch encoder with a DaVinci Resolve workflow and lossless split/join, for Windows.**
 HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
-*⚙️ Encoding needs an NVIDIA GPU with NVENC — AMD and Intel graphics are not supported (the DaVinci Resolve, split and join tools run on any PC).*
+*⚙️ Encoding uses an NVIDIA GPU with NVENC when you have one — or `-cpu` to encode on the processor instead, which works on **any** PC (as do the DaVinci Resolve, split and join tools).*
 
 *Powered by FFmpeg, which does the actual encoding. NVENCForge is the automation, validation and safety layer around it.*
 
@@ -36,6 +36,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🎚️ Auto-CQ — measured quality, per file](#auto-cq)
 - [🔮 AV1 mode](#-av1-mode-ready-for-the-future)
 - [🍎 Apple / iPhone MP4](#apple)
+- [💻 CPU mode — no NVIDIA card needed](#cpu-mode)
 - [🧰 DaVinci Resolve workflow](#-for-davinci-resolve-workflow--davinci)
 - [🪓 Lossless Split / Join](#-lossless-split--join--split---join)
 - [⚙️ Configuration](#configuration)
@@ -118,6 +119,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
 | `-apple` | Write an **iOS-ready MP4** (H.265/`hvc1` + AAC + faststart) that plays on iPhone/iPad & imports into Photos; already-converted `.h265.mkv` files are just repackaged, no re-encode. See [Apple mode](#apple) |
+| `-cpu` | Encode on the **processor** instead of the GPU — **no NVIDIA card needed** (libx265, or SVT-AV1 together with `-av1`). Much slower, everything else identical. See [CPU mode](#cpu-mode) |
 | `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#auto-cq). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
 | `-cq NN` | Force a fixed CQ for this run: skips Auto-CQ and the configured CQ (scale H.265 1-51, AV1 1-63) |
@@ -203,6 +205,39 @@ A fresh source is encoded to H.265 as usual and then packaged for Apple. A file 
 
 ---
 
+<a id="cpu-mode"></a>
+
+## 💻 CPU mode: no NVIDIA card needed
+
+`-cpu` moves the encode from the graphics card to the processor — **libx265** for H.265, **SVT-AV1** together with `-av1`. Everything else stays exactly the same: downscaling, sharpening, HDR handling, audio, bitrate caps, Auto-CQ, file naming, the safety net that discards an encode that came out bigger.
+
+```
+NVENCForge.exe -cpu Movie.mkv          # H.265 on the processor
+NVENCForge.exe -cpu -av1 Movie.mkv     # AV1 on the processor
+```
+
+Set `encoder=cpu` in the config to make it permanent. And if NVENCForge starts on a machine **without** an NVIDIA card, it no longer gives up — it offers CPU mode right there (and continues by itself after 15 s, so unattended batches keep running).
+
+**The honest numbers.** Measured on an 8-core Ryzen, 24 s of 1080p material, all encoders compared at equal file size:
+
+| Encoder | Time | Quality at equal size |
+|---|---|---|
+| NVENC `p5` (GPU) | 8 s | reference |
+| libx265 `fast` | 33 s | same as NVENC |
+| libx265 `slow` | 106 s | +1.0 VMAF |
+| SVT-AV1 preset 6 | 34 s | +0.4 VMAF |
+
+Two things worth knowing before you switch:
+
+- **CPU mode is not a quality upgrade.** At the default preset it lands where your GPU already is — it exists so people *without* an NVIDIA card can use the tool at all. Want more? `cpuPreset=slow` buys ~1 VMAF for triple the time.
+- **With `-cpu`, AV1 is the better deal.** SVT-AV1 at preset 6 takes about the same time as libx265 `fast` and still delivers smaller files at equal quality. If the target device plays AV1, use `-cpu -av1`.
+
+Rough throughput: about **40 minutes per hour of 1080p video** on a modern 8-core CPU, clearly more on older machines — and unlike a GPU encode it keeps every core busy. `cpuThreads=8` (or any number) in the config caps that so the machine stays usable while it works.
+
+> The quality values live on their own scales — `cpuTargetCRF` for H.265, `cpuAV1TargetCRF` for AV1. Measured: libx265 needs roughly **CQ minus 7** for the same quality, so NVENC CQ 26 and x265 CRF 19 look alike. Auto-CQ knows this and searches on its own anchors per encoder.
+
+---
+
 ## 🧰 For DaVinci Resolve Workflow (`-davinci`)
 
 | You drop… | You get… |
@@ -245,18 +280,21 @@ The silent picture always gets a `.NoSound` suffix, so the original is never ove
 
 Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched):
 
-CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
+CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
+
+> Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. To get the new CPU block written out with its comments, rename the INI and let NVENCForge create a fresh one.
 
 ---
 
 ## 💻 Requirements
 
 - Windows 10/11 x64
-- NVIDIA GPU with NVENC (Maxwell or newer); **RTX 40+ for AV1**
+- For GPU encoding: NVIDIA GPU with NVENC (Maxwell or newer); **RTX 40+ for AV1**
+- **No NVIDIA card? [`-cpu`](#cpu-mode) encodes on the processor instead** — slower, but it runs anywhere
 - The `-davinci`, `-split` and `-join` modes run on **any** hardware (no GPU needed)
 - FFmpeg: downloaded automatically on first run (or drop your own `ffmpeg.exe`/`ffprobe.exe` next to the EXE)
 
-> **Why NVENC and not x265?** Hardware encoding trades a little compression efficiency for a huge speed gain and leaves your CPU free. For batch-crushing a large library that tradeoff is the whole point; if you want the absolute best bytes-per-quality on a single precious file, a slow x265 CPU encode will still beat it. NVENCForge is built for throughput and safety, and tuned (CQ + AQ + lookahead + multipass) to keep the quality hit small.
+> **Why NVENC by default?** Hardware encoding trades a little compression efficiency for a huge speed gain and leaves your CPU free — for batch-crushing a large library that tradeoff is the whole point. Measured on real footage, NVENC `p5` and libx265 `fast` land at the *same* quality per byte, and NVENC does it four times faster; only a slow x265 encode pulls meaningfully ahead (+1 VMAF for triple the time). If you want that, `-cpu` with `cpuPreset=slow` gives it to you.
 
 > **Why CPU decoding?** Decoding runs deliberately on the CPU and only encoding on the GPU: extreme-bitrate HEVC sources (400 Mbit/s+) can crash GPU drivers (TDR) when hardware-decoded. NVENCForge chooses stability over decode speed, verified on real files.
 

@@ -29,7 +29,8 @@ type AppConfig struct {
 	autoShutdown   bool     // PC nach Abschluss herunterfahren
 	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 22000k
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
-	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc) statt H.265
+	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc bzw. libsvtav1) statt H.265
+	cpu            bool     // -cpu: auf dem Prozessor encodieren (libx265/libsvtav1) statt auf der GPU
 	apple          bool     // -apple: Ausgabe als iOS-taugliche MP4 (H.265/hvc1 + AAC + faststart) statt MKV
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
@@ -62,6 +63,12 @@ type AppSettings struct {
 	autoCQTargetVMAF       float64
 	autoCQTolerance        float64
 	autoCQPlateauTolerance float64
+	encoder                string
+	cpuPreset              string
+	cpuAV1Preset           int
+	cpuTargetCRF           int
+	cpuAV1TargetCRF        int
+	cpuThreads             int
 }
 
 var appSettings = defaultAppSettings()
@@ -87,8 +94,28 @@ func defaultAppSettings() AppSettings {
 		autoCQTargetVMAF:       96,
 		autoCQTolerance:        0.5,
 		autoCQPlateauTolerance: 5,
+		encoder:                encoderNvidia,
+		cpuPreset:              "fast",
+		cpuAV1Preset:           6,
+		cpuTargetCRF:           18,
+		cpuAV1TargetCRF:        32,
+		cpuThreads:             0,
 	}
 }
+
+// Encoder-Backends. encoderNvidia ist der Auslieferungszustand (NVENC);
+// encoderCPU rechnet auf dem Prozessor (libx265 / libsvtav1) und braucht
+// keine Nvidia-Karte.
+const (
+	encoderNvidia = "nvidia"
+	encoderCPU    = "cpu"
+)
+
+// cpuModeActive gilt für den ganzen Lauf: gesetzt durch das Flag -cpu, den
+// INI-Schlüssel encoder=cpu oder den Rückfall, wenn keine NVENC-Karte
+// gefunden wurde. Die Options-Bauer lesen es, damit an den Aufrufstellen
+// keine zusätzliche Fallunterscheidung nötig ist.
+var cpuModeActive = false
 
 // loadOrCreateAppConfig legt die INI bei Fehlen an. Ungültige Werte werden
 // einzeln auf ihren Default zurückgesetzt – mit Warnung UND direkt in der INI
@@ -159,6 +186,12 @@ func defaultConfigStrings() map[string]string {
 		"autoCQTargetVMAF":       strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
 		"autoCQTolerance":        strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 		"autoCQPlateauTolerance": strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
+		"encoder":                d.encoder,
+		"cpuPreset":              d.cpuPreset,
+		"cpuAV1Preset":           strconv.Itoa(d.cpuAV1Preset),
+		"cpuTargetCRF":           strconv.Itoa(d.cpuTargetCRF),
+		"cpuAV1TargetCRF":        strconv.Itoa(d.cpuAV1TargetCRF),
+		"cpuThreads":             strconv.Itoa(d.cpuThreads),
 	}
 }
 
@@ -229,6 +262,13 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		"p5": true, "p6": true, "p7": true,
 	}
 	validRes := map[int]bool{720: true, 1080: true, 1440: true, 2160: true}
+	// x265-Presetnamen (nur diese kennt libx265; "placebo" ist bewusst dabei,
+	// auch wenn es praktisch niemand nutzt).
+	validCPUPresets := map[string]bool{
+		"ultrafast": true, "superfast": true, "veryfast": true, "faster": true,
+		"fast": true, "medium": true, "slow": true, "slower": true,
+		"veryslow": true, "placebo": true,
+	}
 
 	bad := func(key, val string) {
 		invalids = append(invalids, invalidSetting{key: key, val: val})
@@ -354,6 +394,46 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "autoCQPlateauTolerance":
 			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 10 {
 				s.autoCQPlateauTolerance = fv
+			} else {
+				bad(key, val)
+			}
+		case "encoder":
+			if e := strings.ToLower(val); e == encoderNvidia || e == encoderCPU {
+				s.encoder = e
+			} else {
+				bad(key, val)
+			}
+		case "cpuPreset":
+			if p := strings.ToLower(val); validCPUPresets[p] {
+				s.cpuPreset = p
+			} else {
+				bad(key, val)
+			}
+		case "cpuAV1Preset":
+			// SVT-AV1 kennt 0-13; ab 11 ist es ausdrücklich nur noch für
+			// Automatisierung gedacht (der Encoder warnt selbst davor).
+			if n, e := strconv.Atoi(val); e == nil && n >= 0 && n <= 13 {
+				s.cpuAV1Preset = n
+			} else {
+				bad(key, val)
+			}
+		case "cpuTargetCRF":
+			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 51 {
+				s.cpuTargetCRF = n
+			} else {
+				bad(key, val)
+			}
+		case "cpuAV1TargetCRF":
+			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 63 {
+				s.cpuAV1TargetCRF = n
+			} else {
+				bad(key, val)
+			}
+		case "cpuThreads":
+			// 0 = alle Kerne. Die Obergrenze ist absichtlich großzügig: mehr
+			// Threads als Kerne schadet nicht, der Encoder deckelt selbst.
+			if n, e := strconv.Atoi(val); e == nil && n >= 0 && n <= 256 {
+				s.cpuThreads = n
 			} else {
 				bad(key, val)
 			}
@@ -504,6 +584,48 @@ autoCQTolerance=%s
 # unreachable; 0 restores the old conservative behaviour.
 # Allowed: 0 to 10.  Default: %s
 autoCQPlateauTolerance=%s
+
+# --- CPU mode (-cpu; no Nvidia card required) ---
+
+# Which encoder to use by default. "nvidia" encodes on the GPU (NVENC,
+# fastest). "cpu" encodes on the processor with libx265 (H.265) or
+# libsvtav1 (with -av1) - much slower, but it runs on ANY machine.
+# The -cpu flag switches a single run to the processor. If no Nvidia card
+# is found at startup, NVENCForge offers CPU mode instead of giving up.
+# Allowed: nvidia, cpu.  Default: %s
+encoder=%s
+
+# libx265 preset for CPU mode. Slower presets compress better.
+# Measured 2026-07-25 at equal file size: "medium" gains almost nothing
+# over "fast" (+0.35 VMAF for 15-40%% more time), "slow" gains +1.3 VMAF
+# but takes 3-4 times as long.
+# Allowed: ultrafast, superfast, veryfast, faster, fast, medium, slow,
+# slower, veryslow, placebo.  Default: %s
+cpuPreset=%s
+
+# SVT-AV1 preset for CPU mode with -av1. 0=slowest/best, 13=fastest.
+# Measured 2026-07-25: preset 6 takes about as long as libx265 "fast" but
+# delivers better quality at the same file size; preset 8 is twice as fast
+# yet its quality tops out around VMAF 96.5 - uncomfortably close to the
+# default Auto-CQ target. Below 6 each step costs ~60%% more time for
+# roughly +0.6 VMAF.  Allowed: 0 to 13.  Default: %d
+cpuAV1Preset=%d
+
+# Fixed CRF for manual CPU mode (Auto-CQ off / -noautocq), H.265 scale.
+# NOT the same number as targetCQ: measured 2026-07-25, libx265 needs
+# roughly CQ-7 for the same quality (NVENC CQ 26 = x265 CRF ~19).
+# Lower = better quality, larger file.  Allowed: 1 to 51.  Default: %d
+cpuTargetCRF=%d
+
+# Fixed CRF for manual CPU mode with -av1 (SVT-AV1 scale 1-63).
+# Allowed: 1 to 63.  Default: %d
+cpuAV1TargetCRF=%d
+
+# How many CPU threads the encoder may use in CPU mode. 0 = all cores
+# (fastest, but the machine is barely usable while encoding). Set e.g. 8
+# on a 16-thread CPU to keep working comfortably alongside it.
+# Allowed: 0 to 256.  Default: %d
+cpuThreads=%d
 `,
 		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
 		d.nvencPreset, d.nvencLookahead, d.bFrames,
@@ -519,7 +641,13 @@ autoCQPlateauTolerance=%s
 		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64))
+		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
+		d.encoder, d.encoder,
+		d.cpuPreset, d.cpuPreset,
+		d.cpuAV1Preset, d.cpuAV1Preset,
+		d.cpuTargetCRF, d.cpuTargetCRF,
+		d.cpuAV1TargetCRF, d.cpuAV1TargetCRF,
+		d.cpuThreads, d.cpuThreads)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}

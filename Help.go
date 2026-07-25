@@ -67,16 +67,17 @@ CONVERSION OPTIONS
                  windows (placed on the source's bitrate profile,
                  hardest scene always included) are encoded at two
                  anchor CQ values, measured with VMAF, and the CQ
-                 that should hit the quality target (default 97,
+                 that should hit the quality target (default 96,
                  key "autoCQTargetVMAF" in the config) is verified
                  by one extra measurement before the real encode.
                  The config key "autoCQTolerance" (default 0.5)
                  lets the pick land that far below the target when
                  it saves CQ steps (smaller files); 0 chases the
-                 full target. On sources whose quality plateaus
-                 flat below the target, higher CQ rungs are probed
-                 too and used when their measured score stays
-                 within that tolerance. Works for H.265 and AV1
+                 full target. On sources whose quality provably
+                 tops out below the target, higher CQ rungs are
+                 probed with real measurements and used while they
+                 stay within "autoCQPlateauTolerance" (default 5)
+                 of the reachable maximum. Works for H.265 and AV1
                  (each on its own CQ scale). Needs an FFmpeg build
                  with the libvmaf filter (the auto-downloaded one
                  has it). Videos shorter than 30 s skip the

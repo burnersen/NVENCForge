@@ -43,48 +43,50 @@ type AppConfig struct {
 // ----------------------------------------------------------------------------
 
 type AppSettings struct {
-	targetCQ              int
-	maxBitrate1080p       int64
-	maxBitrateOriginal    int64
-	maxResolution         int
-	nvencPreset           string
-	nvencLookahead        int
-	bFrames               int
-	casStrength           float64
-	audioKbpsPerChannel   int
-	fallbackAudioBitrate  int
-	autoShutdown          bool
-	extraFilenameChars    string
-	av1TargetCQ           int
-	av1MaxBitrate1080p    int64
-	av1MaxBitrateOriginal int64
-	autoCQ                bool
-	autoCQTargetVMAF      float64
-	autoCQTolerance       float64
+	targetCQ               int
+	maxBitrate1080p        int64
+	maxBitrateOriginal     int64
+	maxResolution          int
+	nvencPreset            string
+	nvencLookahead         int
+	bFrames                int
+	casStrength            float64
+	audioKbpsPerChannel    int
+	fallbackAudioBitrate   int
+	autoShutdown           bool
+	extraFilenameChars     string
+	av1TargetCQ            int
+	av1MaxBitrate1080p     int64
+	av1MaxBitrateOriginal  int64
+	autoCQ                 bool
+	autoCQTargetVMAF       float64
+	autoCQTolerance        float64
+	autoCQPlateauTolerance float64
 }
 
 var appSettings = defaultAppSettings()
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		targetCQ:              26,
-		maxBitrate1080p:       8000,
-		maxBitrateOriginal:    22000,
-		maxResolution:         1080,
-		nvencPreset:           "p5",
-		nvencLookahead:        32,
-		bFrames:               4,
-		casStrength:           0.4,
-		audioKbpsPerChannel:   96,
-		fallbackAudioBitrate:  128,
-		autoShutdown:          false,
-		extraFilenameChars:    "",
-		av1TargetCQ:           32,
-		av1MaxBitrate1080p:    6000,
-		av1MaxBitrateOriginal: 13000,
-		autoCQ:                true,
-		autoCQTargetVMAF:      97,
-		autoCQTolerance:       0.5,
+		targetCQ:               26,
+		maxBitrate1080p:        8000,
+		maxBitrateOriginal:     22000,
+		maxResolution:          1080,
+		nvencPreset:            "p5",
+		nvencLookahead:         32,
+		bFrames:                4,
+		casStrength:            0.4,
+		audioKbpsPerChannel:    96,
+		fallbackAudioBitrate:   128,
+		autoShutdown:           false,
+		extraFilenameChars:     "",
+		av1TargetCQ:            32,
+		av1MaxBitrate1080p:     6000,
+		av1MaxBitrateOriginal:  13000,
+		autoCQ:                 true,
+		autoCQTargetVMAF:       96,
+		autoCQTolerance:        0.5,
+		autoCQPlateauTolerance: 5,
 	}
 }
 
@@ -139,23 +141,24 @@ type invalidSetting struct{ key, val string }
 func defaultConfigStrings() map[string]string {
 	d := defaultAppSettings()
 	return map[string]string{
-		"targetCQ":              strconv.Itoa(d.targetCQ),
-		"maxBitrate1080p":       strconv.FormatInt(d.maxBitrate1080p, 10),
-		"maxBitrateOriginal":    strconv.FormatInt(d.maxBitrateOriginal, 10),
-		"maxResolution":         strconv.Itoa(d.maxResolution),
-		"nvencPreset":           d.nvencPreset,
-		"nvencLookahead":        strconv.Itoa(d.nvencLookahead),
-		"bFrames":               strconv.Itoa(d.bFrames),
-		"casStrength":           strconv.FormatFloat(d.casStrength, 'g', -1, 64),
-		"audioKbpsPerChannel":   strconv.Itoa(d.audioKbpsPerChannel),
-		"fallbackAudioBitrate":  strconv.Itoa(d.fallbackAudioBitrate),
-		"autoShutdown":          strconv.FormatBool(d.autoShutdown),
-		"av1TargetCQ":           strconv.Itoa(d.av1TargetCQ),
-		"av1MaxBitrate1080p":    strconv.FormatInt(d.av1MaxBitrate1080p, 10),
-		"av1MaxBitrateOriginal": strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
-		"autoCQ":                strconv.FormatBool(d.autoCQ),
-		"autoCQTargetVMAF":      strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
-		"autoCQTolerance":       strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
+		"targetCQ":               strconv.Itoa(d.targetCQ),
+		"maxBitrate1080p":        strconv.FormatInt(d.maxBitrate1080p, 10),
+		"maxBitrateOriginal":     strconv.FormatInt(d.maxBitrateOriginal, 10),
+		"maxResolution":          strconv.Itoa(d.maxResolution),
+		"nvencPreset":            d.nvencPreset,
+		"nvencLookahead":         strconv.Itoa(d.nvencLookahead),
+		"bFrames":                strconv.Itoa(d.bFrames),
+		"casStrength":            strconv.FormatFloat(d.casStrength, 'g', -1, 64),
+		"audioKbpsPerChannel":    strconv.Itoa(d.audioKbpsPerChannel),
+		"fallbackAudioBitrate":   strconv.Itoa(d.fallbackAudioBitrate),
+		"autoShutdown":           strconv.FormatBool(d.autoShutdown),
+		"av1TargetCQ":            strconv.Itoa(d.av1TargetCQ),
+		"av1MaxBitrate1080p":     strconv.FormatInt(d.av1MaxBitrate1080p, 10),
+		"av1MaxBitrateOriginal":  strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
+		"autoCQ":                 strconv.FormatBool(d.autoCQ),
+		"autoCQTargetVMAF":       strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		"autoCQTolerance":        strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
+		"autoCQPlateauTolerance": strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
 	}
 }
 
@@ -348,6 +351,12 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "autoCQPlateauTolerance":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 10 {
+				s.autoCQPlateauTolerance = fv
+			} else {
+				bad(key, val)
+			}
 		case "extraFilenameChars":
 			// Windows-forbidden path characters and whitespace can never be
 			// allowed; they are dropped individually with a warning.
@@ -470,7 +479,8 @@ autoCQ=%t
 # at two anchor CQ values (per codec), measured with VMAF against the source,
 # and the CQ expected to hit this target is verified by one extra measurement
 # before the real encode. 97 stays visually transparent even in direct
-# comparison; lower = smaller files.
+# comparison; 96 is indistinguishable in normal viewing at a noticeably
+# smaller file; lower = smaller files.
 # Allowed: 70 to 99.  Default: %s
 autoCQTargetVMAF=%s
 
@@ -483,6 +493,17 @@ autoCQTargetVMAF=%s
 # Differences up to ~0.5 VMAF are invisible; 0 always chases the target.
 # Allowed: 0 to 5.  Default: %s
 autoCQTolerance=%s
+
+# Extra savings budget for sources whose quality tops out BELOW the VMAF
+# target (heavily pre-compressed material, e.g. streaming rips): the target
+# is then unreachable anyway, and the pick may drop up to this many VMAF
+# points below the measured maximum when a real measurement confirms it —
+# on such sources the low CQ steps often ride the bitrate cap and waste
+# space for no visible gain. Every candidate CQ is verified by an actual
+# VMAF measurement, never estimated. Only active when the target is proven
+# unreachable; 0 restores the old conservative behaviour.
+# Allowed: 0 to 10.  Default: %s
+autoCQPlateauTolerance=%s
 `,
 		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
 		d.nvencPreset, d.nvencLookahead, d.bFrames,
@@ -496,7 +517,9 @@ autoCQTolerance=%s
 		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
 		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
 		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64))
+		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
+		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
+		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64))
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}

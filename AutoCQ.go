@@ -33,14 +33,14 @@ import (
 // anchor CQ values with EXACTLY the settings of the real encode, measure
 // VMAF against the identically filtered source, interpolate the CQ that
 // should hit the configured quality target (autoCQTargetVMAF minus the
-// space-saving autoCQTolerance, defaults 97 and 0.5), then confirm the
+// space-saving autoCQTolerance, defaults 96 and 0.5), then confirm the
 // pick with one verification measurement. A saturated
 // curve (pre-compressed source, target unreachable) falls back to the
-// cheapest CQ on the measured plateau instead of chasing the target; when
-// that plateau is flat across the anchors, rungs above the high anchor
-// (up to the clamp ceiling) are probed too and taken when their measured
-// score stays within the tolerance of the high anchor — the file shrinks
-// as far as real measurements justify, never on extrapolation.
+// cheapest CQ on the measured plateau instead of chasing the target; on
+// every proven-unreachable target, rungs above the pick (up to the clamp
+// ceiling) are probed too and taken when their measured score stays within
+// autoCQPlateauTolerance of the plateau top — the file shrinks as far as
+// real measurements justify, never on extrapolation.
 // H.265 and AV1 both run this search — the per-codec numbers (anchors, clamps,
 // saturation slope, encoder) live in autoCQScale; av1_nvenc uses a wider CQ
 // scale (1-63), so its anchors and clamps differ from H.265.
@@ -154,7 +154,7 @@ var hevcAutoCQScale = autoCQScale{
 // av1AutoCQFallbackCQ is the CQ the AV1 Auto-CQ search falls back to when its
 // analysis cannot run (clip too short, unknown frame rate, libvmaf missing). It
 // is deliberately NOT av1TargetCQ: that value (32 ≈ VMAF 94) is a lean manual-
-// mode setting, too far below the VMAF target (97) for a graceful fallback. 24
+// mode setting, too far below the VMAF target (default 96) for a graceful fallback. 24
 // equals the low anchor (≈ VMAF 96), so an unmeasurable AV1 clip lands near the
 // search intent instead of visibly softer, while manual AV1 mode keeps its own
 // av1TargetCQ. H.265 needs no such constant — its manual targetCQ (26) already
@@ -316,15 +316,25 @@ func autoCQPlateauPick(sc autoCQScale, vmafLow, vmafHigh, tolerance float64) (in
 }
 
 // autoCQClimbCandidates returns the CQ rungs the plateau climb probes above
-// the high anchor, cheapest file first: the clamp ceiling, then the midpoint
-// between anchor and ceiling as the smaller fallback step. With the current
-// constants that is CQ 34, then CQ 32.
-func autoCQClimbCandidates(sc autoCQScale) []int {
+// the current pick, cheapest file first: the clamp ceiling, the midpoint
+// between high anchor and ceiling, and — when the pick sits below it — the
+// high anchor itself. Rungs at or below the pick are dropped, duplicates on
+// narrow scales collapse. With the current constants that is 34, 32 for a
+// pick at the high anchor, and 34, 32, 30 for a pick below it (AV1: 44, 38
+// and 44, 38, 32).
+func autoCQClimbCandidates(sc autoCQScale, pick int) []int {
 	mid := (sc.anchorHigh + sc.clampMax) / 2
-	if mid <= sc.anchorHigh || mid >= sc.clampMax {
-		return []int{sc.clampMax}
+	var rungs []int
+	for _, r := range []int{sc.clampMax, mid, sc.anchorHigh} {
+		if r <= pick {
+			continue
+		}
+		if n := len(rungs); n > 0 && r >= rungs[n-1] {
+			continue
+		}
+		rungs = append(rungs, r)
 	}
-	return []int{sc.clampMax, mid}
+	return rungs
 }
 
 // autoCQClimbFloor is the minimum VMAF a plateau-climb rung must still reach to
@@ -335,6 +345,20 @@ func autoCQClimbCandidates(sc autoCQScale) []int {
 // steep plateau (a rung well below the floor) still keeps the conservative pick.
 func autoCQClimbFloor(sc autoCQScale, vmafHigh, tolerance float64) float64 {
 	return vmafHigh - tolerance*sc.climbToleranceFactor
+}
+
+// autoCQPlateauFloor is the minimum VMAF a climb rung must reach when the
+// target is proven unreachable: the measured plateau top minus the configured
+// plateau tolerance. Unlike autoCQClimbFloor this is an absolute VMAF budget
+// shared by both codecs — on a source whose quality tops out below the target,
+// how much of that unreachable quality the savings may cost does not depend on
+// the CQ scale. The budget is deliberately wider than autoCQTolerance: the
+// spread inside a saturated plateau is largely re-encode noise of an already
+// degraded picture, while every skipped CQ step wastes real bitrate (measured
+// 2026-07-25: CQ 26 vs 28 both ride the maxrate cap and differ by ~2% file
+// size at 0.03 VMAF).
+func autoCQPlateauFloor(plateauTop, plateauTolerance float64) float64 {
+	return plateauTop - plateauTolerance
 }
 
 // bitrateBucket is one window-sized slice of the source with its average
@@ -851,7 +875,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// how many CQ steps the shortfall costs and steps down in one go.
 	slope := (vmafHigh - vmafLow) / float64(sc.anchorHigh-sc.anchorLow)
 	verifyNote := ""
-	plateauLevel := 0.0 // > 0: a plateau path picked the high anchor — climb may probe higher
+	plateauLevel := 0.0 // > 0: target proven unreachable — climb may probe higher rungs
 	switch {
 	case cq == sc.anchorLow:
 		predicted, verifyNote = vmafLow, " (anchor measurement)"
@@ -860,14 +884,12 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 			// only reachable (if at all) by escalating below the low anchor —
 			// the same spend-vs-gain trade the saturation brake handles. The
 			// tolerance picks the cheapest CQ within reach of the anchor score.
+			plateauLevel = vmafLow
 			if satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh, tolerance); satCQ != cq {
 				verifyNote = fmt.Sprintf(
 					" (VMAF tops out at ~%.1f — target %.4g unreachable, tolerance picks CQ %d)",
 					vmafLow, target, satCQ)
 				cq, predicted = satCQ, satVMAF
-				if satCQ == sc.anchorHigh {
-					plateauLevel = vmafLow
-				}
 			}
 		}
 	case cq == sc.anchorHigh:
@@ -891,9 +913,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				" (VMAF saturates at ~%.1f — target %.4g unreachable, picking efficient CQ %d)",
 				math.Max(verified, vmafLow), target, satCQ)
 			cq, predicted = satCQ, satVMAF
-			if satCQ == sc.anchorHigh {
-				plateauLevel = math.Max(verified, vmafLow)
-			}
+			plateauLevel = math.Max(verified, vmafLow)
 		case verified < target:
 			stepped, pred, capped := autoCQStepDown(sc, cq, target, verified, slope)
 			switch {
@@ -946,19 +966,31 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		}
 	}
 
-	// Plateau climb: a flat anchor span that sent the plateau pick to the
-	// high anchor says nothing about where the plateau ENDS — CQ rungs above
-	// the high anchor may still cost next to nothing on such sources. Probe the clamp
-	// ceiling first (cheapest file), then the midpoint; a rung is taken only
-	// when its REAL measurement stays within the climb tolerance of the high
-	// anchor's score. A probe failure keeps the safe high-anchor pick — the
-	// climb is a bonus, never a reason to fail the analysis. A healthy curve
-	// that reaches its target at the high anchor never gets here (plateauLevel == 0).
+	// Plateau climb: a measured plateau below the target says nothing about
+	// where the plateau ENDS — CQ rungs above the pick may still cost next to
+	// nothing on such sources (2026-07-25 case: CQ 26 and 28 both ride the
+	// maxrate cap, the real savings only start above the high anchor). Probe
+	// the clamp ceiling first (cheapest file), then the lower rungs; a rung is
+	// taken only when its REAL measurement holds the floor. With the plateau
+	// tolerance configured the floor is (plateau top - autoCQPlateauTolerance)
+	// and every unreachable-target pick climbs; at 0 the pre-1.5.0 behaviour
+	// remains (only a flat anchor span climbs, floored by autoCQClimbFloor).
+	// A probe failure keeps the safe pick — the climb is a bonus, never a
+	// reason to fail the analysis. A healthy curve that reaches its target
+	// never gets here (plateauLevel == 0).
 	var plateauProbes []string
 	anchorGainPerStep := -slope // VMAF gained per CQ step down, across the anchors
-	if plateauLevel > 0 && tolerance > 0 && anchorGainPerStep < sc.saturationSlope {
-		climbFloor := autoCQClimbFloor(sc, vmafHigh, tolerance)
-		for _, rung := range autoCQClimbCandidates(sc) {
+	climbFloor, climbing := 0.0, false
+	switch {
+	case plateauLevel <= 0 || tolerance <= 0:
+		// healthy curve, or savings disabled entirely
+	case appSettings.autoCQPlateauTolerance > 0:
+		climbFloor, climbing = autoCQPlateauFloor(plateauLevel, appSettings.autoCQPlateauTolerance), true
+	case anchorGainPerStep < sc.saturationSlope && cq == sc.anchorHigh:
+		climbFloor, climbing = autoCQClimbFloor(sc, vmafHigh, tolerance), true
+	}
+	if climbing {
+		for _, rung := range autoCQClimbCandidates(sc, cq) {
 			score, cerr := measure(rung)
 			if cerr != nil {
 				if ctx.Err() == nil {

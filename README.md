@@ -163,17 +163,18 @@ Before each encode, NVENCForge runs a short per-file analysis (typically well un
 
 1. **Scan.** The source's bitrate profile is read without decoding, and a few short sample windows are placed on the demanding scenes — the hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels with *exactly* the settings of the real encode, and each result is scored with **VMAF** (a perceptual video-quality metric developed by Netflix, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 97) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
+3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 96) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
 
-Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and picks the cheapest CQ that still delivers the reachable maximum, probing even higher CQ levels when the quality curve is flat, purely for extra savings.
+Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and climbs to cheaper CQ levels that provably stay near the reachable maximum — every candidate is confirmed by a real VMAF measurement, and on such sources the file often shrinks by a third or more at no visible cost.
 
 Tuning knobs in `NVENCForge_Config.ini`:
 
 | Key | Default | Meaning |
 |---|---|---|
 | `autoCQ` | `true` | Auto-CQ as the startup default (off = classic fixed `targetCQ`) |
-| `autoCQTargetVMAF` | `97` | The quality target of the search (70–99) |
+| `autoCQTargetVMAF` | `96` | The quality target of the search (70–99) |
 | `autoCQTolerance` | `0.5` | May land up to this far below the target when that saves a CQ step → smaller files; `0` = exact targeting |
+| `autoCQPlateauTolerance` | `5` | Extra savings budget when the target is provably unreachable (pre-compressed sources): the pick may drop up to this many VMAF points below the measured maximum, each step confirmed by a real measurement; `0` = keep the conservative pick |
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ works for both H.265 and AV1 — each on its own VMAF-calibrated CQ scale — and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
 
@@ -244,7 +245,7 @@ The silent picture always gets a `.NoSound` suffix, so the original is never ove
 
 Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched):
 
-CQ quality level, Auto-CQ (on/off, VMAF target, tolerance), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
+CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters.
 
 ---
 
@@ -336,7 +337,7 @@ The [Auto-CQ section above](#auto-cq) covers *what* it does; here's *how* it sta
 - **Sample encodes use the real settings.** The little test clips are encoded with the *exact* encoder options of the final run, and the reference side runs through the *same* downscale/sharpen filter chain — so the VMAF score isolates the encoder's loss alone, not the scaling.
 - **Finds the hard scenes without decoding.** Sample windows are placed using the source's bitrate profile, read straight from the container by demuxing packet *sizes* (no decoding — seconds even on a multi-GB movie). The single heaviest scene is always included; intros, credits and near-black frames (which score a flattering fake-perfect VMAF) are deliberately avoided.
 - **Two nasty VMAF pitfalls handled.** Decoded segments are re-based to a zero start time, and both comparison inputs are forced onto frame-number-based timestamps — otherwise Matroska's millisecond rounding pairs the wrong frames and tanks the score. (These are the kind of bugs that silently make a quality measurement meaningless.)
-- **Trust, but verify.** The interpolated pick is always confirmed with one extra real measurement; on a miss it steps down along the measured slope. A **saturation brake** detects pre-compressed sources whose quality plateaus below the target and picks the *cheapest* level on that plateau instead of pointlessly burning bitrate; a **plateau climb** even probes higher CQ levels when the curve is provably flat, purely for extra savings.
+- **Trust, but verify.** The interpolated pick is always confirmed with one extra real measurement; on a miss it steps down along the measured slope. A **saturation brake** detects pre-compressed sources whose quality plateaus below the target, and a **plateau climb** then probes higher CQ levels with real measurements — on such sources the low CQ steps often just ride the bitrate cap, so the climb routinely cuts a third of the file size at no visible cost (budget: `autoCQPlateauTolerance`).
 - **It can never break a conversion.** Any hiccup (clip under 30 s, unknown frame rate, an FFmpeg build without `libvmaf`, a wedged step) just falls back to the configured CQ with a warning. The whole analysis runs at idle priority with hard per-step timeouts, and `libvmaf`'s presence is checked once up front — one clear notice, not one failure per file.
 - **Calibrated per codec.** H.265 and AV1 each search on their own VMAF-calibrated CQ scale, because the same number means very different quality on the two encoders.
 

@@ -441,20 +441,27 @@ func TestAutoCQPlateauPick(t *testing.T) {
 }
 
 // TestAutoCQClimbCandidates pins the probing order of the plateau climb:
-// the cheapest rung (clamp ceiling) first, the midpoint as fallback, and
-// nothing at or below the high anchor. Hard-coded values on purpose — a
-// change to the anchor/clamp constants must consciously revisit the climb.
+// the cheapest rung (clamp ceiling) first, then the midpoint, then — for a
+// pick below the high anchor — the high anchor itself; never anything at or
+// below the pick. Hard-coded values on purpose — a change to the anchor/clamp
+// constants must consciously revisit the climb.
 func TestAutoCQClimbCandidates(t *testing.T) {
 	cases := []struct {
 		name string
 		sc   autoCQScale
+		pick int
 		want []int
 	}{
-		{"h265 climb 34,32", hevcAutoCQScale, []int{34, 32}},
-		{"av1 climb 44,38", av1AutoCQScale, []int{44, 38}},
+		{"h265 pick at high anchor", hevcAutoCQScale, 30, []int{34, 32}},
+		{"h265 pick between anchors", hevcAutoCQScale, 28, []int{34, 32, 30}},
+		{"h265 pick at low anchor", hevcAutoCQScale, 26, []int{34, 32, 30}},
+		{"h265 pick below midpoint drops it", hevcAutoCQScale, 32, []int{34}},
+		{"h265 pick at ceiling climbs nowhere", hevcAutoCQScale, 34, nil},
+		{"av1 pick at high anchor", av1AutoCQScale, 32, []int{44, 38}},
+		{"av1 pick at low anchor", av1AutoCQScale, 24, []int{44, 38, 32}},
 	}
 	for _, c := range cases {
-		got := autoCQClimbCandidates(c.sc)
+		got := autoCQClimbCandidates(c.sc, c.pick)
 		if len(got) != len(c.want) {
 			t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
 		}
@@ -464,9 +471,9 @@ func TestAutoCQClimbCandidates(t *testing.T) {
 			}
 		}
 		for _, rung := range got {
-			if rung <= c.sc.anchorHigh || rung > c.sc.clampMax {
+			if rung <= c.pick || rung > c.sc.clampMax {
 				t.Errorf("%s: rung %d outside the measurable range (%d, %d]",
-					c.name, rung, c.sc.anchorHigh, c.sc.clampMax)
+					c.name, rung, c.pick, c.sc.clampMax)
 			}
 		}
 	}
@@ -493,6 +500,35 @@ func TestAutoCQClimbFloor(t *testing.T) {
 	}
 	for _, c := range cases {
 		floor := autoCQClimbFloor(c.sc, c.vmafHigh, c.tol)
+		if got := c.rungScore >= floor; got != c.wantAccept {
+			t.Errorf("%s: rung %.2f vs floor %.2f → accept=%v, want %v",
+				c.name, c.rungScore, floor, got, c.wantAccept)
+		}
+	}
+}
+
+// TestAutoCQPlateauFloor pins the unreachable-target climb floor against the
+// real 2026-07-25 measurement series (1080p60 H.264 source, 12.5 Mb/s, VMAF
+// target 95 unreachable): plateau top CQ 26 = 90.62, rungs CQ 30 = 89.88,
+// CQ 32 = 88.01, CQ 34 = 84.90. The default budget of 5 accepts CQ 32 (a
+// third of the file size saved) but still rejects the visibly softer CQ 34;
+// a conservative 2 stops at CQ 30.
+func TestAutoCQPlateauFloor(t *testing.T) {
+	const plateauTop = 90.62
+	cases := []struct {
+		name       string
+		tol        float64
+		rungScore  float64
+		wantAccept bool
+	}{
+		{"default 5 rejects CQ 34", 5, 84.90, false},
+		{"default 5 accepts CQ 32", 5, 88.01, true},
+		{"budget 3 rejects CQ 34", 3, 84.90, false},
+		{"conservative 2 rejects CQ 32", 2, 88.01, false},
+		{"conservative 2 accepts CQ 30", 2, 89.88, true},
+	}
+	for _, c := range cases {
+		floor := autoCQPlateauFloor(plateauTop, c.tol)
 		if got := c.rungScore >= floor; got != c.wantAccept {
 			t.Errorf("%s: rung %.2f vs floor %.2f → accept=%v, want %v",
 				c.name, c.rungScore, floor, got, c.wantAccept)

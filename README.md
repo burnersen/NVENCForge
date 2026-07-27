@@ -176,7 +176,7 @@ Tuning knobs in `NVENCForge_Config.ini`:
 | `autoCQ` | `true` | Auto-CQ as the startup default (off = classic fixed `targetCQ`) |
 | `autoCQTargetVMAF` | `96` | The quality target of the search (70–99) |
 | `autoCQTolerance` | `0.5` | May land up to this far below the target when that saves a CQ step → smaller files; `0` = exact targeting |
-| `autoCQPlateauTolerance` | `5` | Extra savings budget when the target is provably unreachable (pre-compressed sources): the pick may drop up to this many VMAF points below the measured maximum, each step confirmed by a real measurement. The full budget applies only where the measured curve is flat (plateau noise) — a target merely grazed on a steep curve spends at most `autoCQTolerance`; `0` = keep the conservative pick |
+| `autoCQPlateauTolerance` | `2.5` | Extra savings budget when the target is provably unreachable (pre-compressed sources): the pick may drop up to this many VMAF points below the measured maximum, each step confirmed by a real measurement. The full budget applies only where the measured curve is flat (plateau noise) — a target merely grazed on a steep curve spends at most `autoCQTolerance`; `0` = keep the conservative pick |
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ works for both H.265 and AV1 — each on its own VMAF-calibrated CQ scale — and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
 

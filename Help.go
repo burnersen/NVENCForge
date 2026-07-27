@@ -100,7 +100,7 @@ CONVERSION OPTIONS
                  full target. On sources whose quality provably
                  tops out below the target, higher CQ rungs are
                  probed with real measurements and used while they
-                 stay within "autoCQPlateauTolerance" (default 5)
+                 stay within "autoCQPlateauTolerance" (default 2.5)
                  of the reachable maximum on flat curves — a
                  steep curve only spends autoCQTolerance, so
                  visible quality is never traded away for a

@@ -254,6 +254,34 @@ func checkLibVMAF() error {
 	return errors.New("AutoCQ.go: checkLibVMAF: libvmaf filter missing in this FFmpeg build")
 }
 
+// parseMaxrateKbps reads the "8000k" form the encoder options carry for
+// -maxrate back into plain kbit/s. Anything unparsable answers 0 (unknown),
+// which keeps callers on their silent path.
+func parseMaxrateKbps(maxBitrate string) int64 {
+	kbps, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(maxBitrate), "k"), 10, 64)
+	if err != nil || kbps <= 0 {
+		return 0
+	}
+	return kbps
+}
+
+// autoCQCapLimitsQuality reports whether the configured bitrate ceiling — and
+// not the source material — is what holds the measured quality down. The encode
+// aims at bitrateTargetPercent of the source rate; once the ceiling has cut that
+// target, every low CQ rung rides the cap and measures the same score, so the
+// saturation brake sees a plateau the source alone would not have produced
+// (measured 2026-07-27: CQ 20/22/26 all landed on 23.08 MB and VMAF 89.9).
+// The verdict only means something after the target proved unreachable. Returns
+// the source rate in kbit/s for the message; false whenever a rate is unknown.
+func autoCQCapLimitsQuality(stats *VideoStats, maxBitrate string) (int64, bool) {
+	capKbps := parseMaxrateKbps(maxBitrate)
+	sourceKbps := determineBitrateKbps(stats)
+	if capKbps <= 0 || sourceKbps <= 0 {
+		return 0, false
+	}
+	return sourceKbps, capKbps < sourceKbps*bitrateTargetPercent/100
+}
+
 // autoCQSampleWindows returns the (start, length) sample windows in seconds
 // for a source of the given duration. Start and end of the video are avoided
 // (intros, credits, fade-outs are not representative). Returns nil when the
@@ -1136,6 +1164,17 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		formatDuration(time.Since(analysisStart).Seconds()))))
 	if len(plateauProbes) > 0 {
 		fmt.Println(pterm.Gray("  · plateau probes: " + strings.Join(plateauProbes, ", ")))
+	}
+	// An unreachable target on a cap-limited source says something about the
+	// configured ceiling, not about the material. Without this line the plateau
+	// message reads as "the source is exhausted" while the real limit is a
+	// setting the user can change.
+	if plateauLevel > 0 {
+		if sourceKbps, capLimited := autoCQCapLimitsQuality(stats, maxBitrate); capLimited {
+			fmt.Println(pterm.Gray(fmt.Sprintf(
+				"  · note: this ceiling comes from the %s bitrate cap, not from the source (source runs at %.1f Mbit/s) — a higher cap buys quality at the price of size",
+				maxBitrate, float64(sourceKbps)/1000)))
+		}
 	}
 	if profileErr != nil && debugMode {
 		fmt.Println(pterm.Gray("  · bitrate profile skipped: " + profileErr.Error()))

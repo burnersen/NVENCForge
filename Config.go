@@ -93,7 +93,7 @@ func defaultAppSettings() AppSettings {
 		autoCQ:                 true,
 		autoCQTargetVMAF:       96,
 		autoCQTolerance:        0.5,
-		autoCQPlateauTolerance: 5,
+		autoCQPlateauTolerance: 2.5,
 		encoder:                encoderNvidia,
 		cpuPreset:              "fast",
 		cpuAV1Preset:           6,

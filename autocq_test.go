@@ -7,6 +7,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -659,5 +660,68 @@ func TestAutoCQSpinnerText(t *testing.T) {
 			t.Errorf("%s: padded width %d, want %d (%q)",
 				c.name, len(c.got), autoCQSpinnerTextWidth, c.got)
 		}
+	}
+}
+
+func TestParseMaxrateKbps(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"8000k", 8000},
+		{"8000", 8000},
+		{" 12000k ", 12000},
+		{"", 0},
+		{"k", 0},
+		{"abc", 0},
+		{"0k", 0},
+		{"-5000k", 0},
+	}
+	for _, c := range cases {
+		if got := parseMaxrateKbps(c.in); got != c.want {
+			t.Errorf("parseMaxrateKbps(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestAutoCQCapLimitsQuality uses the two real sources that prompted the hint
+// (measured 2026-07-27): a ~12.3 Mbit/s file whose 8000k ceiling provably
+// flattened the CQ curve, and a ~7.4 Mbit/s file where the ceiling never bit.
+// The maxrate argument is derived with cappedTargetKbps exactly as processFile
+// builds it, so the test fails if the two ever drift apart.
+func TestAutoCQCapLimitsQuality(t *testing.T) {
+	const shippedCeiling = 8000 // maxBitrate1080p default, spelled out so other tests cannot shift it
+	stereoAAC := []AudioStreamInfo{{Codec: "aac", Channels: 2}}
+	cases := []struct {
+		name        string
+		fileSizeMB  float64
+		durationSec float64
+		want        bool
+	}{
+		{"ceiling clamps a 12 Mbit/s source", 3013, 1958.1, true},
+		{"ceiling never bites at 7.4 Mbit/s", 1833, 1969.4, false},
+	}
+	for _, c := range cases {
+		stats := &VideoStats{
+			FileSizeMB:   c.fileSizeMB,
+			DurationSec:  c.durationSec,
+			Height:       1080,
+			AudioStreams: stereoAAC,
+		}
+		sourceKbps := determineBitrateKbps(stats)
+		maxBR := fmt.Sprintf("%dk", cappedTargetKbps(sourceKbps, 1080, shippedCeiling))
+		gotKbps, got := autoCQCapLimitsQuality(stats, maxBR)
+		if got != c.want {
+			t.Errorf("%s: autoCQCapLimitsQuality(%s) = %v, want %v (source %d kbps)",
+				c.name, maxBR, got, c.want, sourceKbps)
+		}
+		if gotKbps != sourceKbps {
+			t.Errorf("%s: reported %d kbps, want the source rate %d", c.name, gotKbps, sourceKbps)
+		}
+	}
+	// An unreadable maxrate must stay silent instead of guessing.
+	stats := &VideoStats{FileSizeMB: 3013, DurationSec: 1958.1, Height: 1080, AudioStreams: stereoAAC}
+	if _, got := autoCQCapLimitsQuality(stats, ""); got {
+		t.Error("unparsable maxrate must not report a cap limit")
 	}
 }

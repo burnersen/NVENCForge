@@ -1810,13 +1810,19 @@ func bitrateFloorKbps(height int) int64 {
 	}
 }
 
+// bitrateTargetPercent is the share of the source video bitrate the encode aims
+// at before the per-mode ceiling applies, so a re-encode shrinks the file even
+// when the ceiling is generous. autoCQCapLimitsQuality repeats this arithmetic
+// to tell a ceiling-limited Auto-CQ analysis from a genuinely exhausted source.
+const bitrateTargetPercent = 80
+
 // cappedTargetKbps restores the source-derived ceiling dropped in 1.1.3: target
-// 80% of the source video bitrate (so the re-encode shrinks), clamped UP to the
-// resolution floor and DOWN to the per-mode ceiling. It only sets -maxrate/-bufsize;
-// -cq still governs the picture. The ceiling is applied last so an explicit -NNNN
-// override always wins, even over the floor.
+// bitrateTargetPercent of the source video bitrate (so the re-encode shrinks),
+// clamped UP to the resolution floor and DOWN to the per-mode ceiling. It only
+// sets -maxrate/-bufsize; -cq still governs the picture. The ceiling is applied
+// last so an explicit -NNNN override always wins, even over the floor.
 func cappedTargetKbps(sourceKbps int64, outHeight int, ceiling int64) int64 {
-	target := sourceKbps * 80 / 100
+	target := sourceKbps * bitrateTargetPercent / 100
 	if floor := bitrateFloorKbps(outHeight); target < floor {
 		target = floor
 	}

@@ -38,9 +38,11 @@ import (
 // curve (pre-compressed source, target unreachable) falls back to the
 // cheapest CQ on the measured plateau instead of chasing the target; on
 // every proven-unreachable target, rungs above the pick (up to the clamp
-// ceiling) are probed too and taken when their measured score stays within
-// autoCQPlateauTolerance of the plateau top — the file shrinks as far as
-// real measurements justify, never on extrapolation.
+// ceiling) are probed too and taken when their measured score holds the
+// climb floor: within autoCQPlateauTolerance of the plateau top on a
+// proven-flat curve, only within the small search tolerance on a steep one
+// (a grazed target is not a plateau) — the file shrinks as far as real
+// measurements justify, never on extrapolation.
 // H.265 and AV1 both run this search — the per-codec numbers (anchors, clamps,
 // saturation slope, encoder) live in autoCQScale; av1_nvenc uses a wider CQ
 // scale (1-63), so its anchors and clamps differ from H.265.
@@ -375,15 +377,17 @@ func autoCQPlateauPick(sc autoCQScale, vmafLow, vmafHigh, tolerance float64) (in
 
 // autoCQClimbCandidates returns the CQ rungs the plateau climb probes above
 // the current pick, cheapest file first: the clamp ceiling, the midpoint
-// between high anchor and ceiling, and — when the pick sits below it — the
-// high anchor itself. Rungs at or below the pick are dropped, duplicates on
-// narrow scales collapse. With the current constants that is 34, 32 for a
+// between high anchor and ceiling, and — when the pick sits below them — the
+// two anchors themselves. Rungs at or below the pick are dropped, duplicates
+// on narrow scales collapse. With the current constants that is 34, 32 for a
 // pick at the high anchor, and 34, 32, 30 for a pick below it (AV1: 44, 38
-// and 44, 38, 32).
+// and 44, 38, 32). The low anchor only ever surfaces for a pick at the clamp
+// floor (target missed even there); both anchor rungs are free — their scores
+// were measured at the start of the search and are reused by the climb.
 func autoCQClimbCandidates(sc autoCQScale, pick int) []int {
 	mid := (sc.anchorHigh + sc.clampMax) / 2
 	var rungs []int
-	for _, r := range []int{sc.clampMax, mid, sc.anchorHigh} {
+	for _, r := range []int{sc.clampMax, mid, sc.anchorHigh, sc.anchorLow} {
 		if r <= pick {
 			continue
 		}
@@ -417,6 +421,21 @@ func autoCQClimbFloor(sc autoCQScale, vmafHigh, tolerance float64) float64 {
 // size at 0.03 VMAF).
 func autoCQPlateauFloor(plateauTop, plateauTolerance float64) float64 {
 	return plateauTop - plateauTolerance
+}
+
+// autoCQClimbBudgetFloor returns the climb floor for a proven-unreachable
+// target. The wide plateau budget is only justified when the measured curve is
+// FLAT: the spread between rungs is then re-encode noise of an already
+// degraded picture (the autoCQPlateauFloor rationale). On a steep curve the
+// same spread is real, visible quality — a near-miss at the low anchor must
+// not give away several VMAF points for savings — so the climb may only spend
+// the small search tolerance there, scaled per codec like autoCQClimbFloor.
+func autoCQClimbBudgetFloor(sc autoCQScale, plateauTop float64, flatCurve bool,
+	plateauTolerance, tolerance float64) float64 {
+	if flatCurve {
+		return autoCQPlateauFloor(plateauTop, plateauTolerance)
+	}
+	return autoCQClimbFloor(sc, plateauTop, tolerance)
 }
 
 // bitrateBucket is one window-sized slice of the source with its average
@@ -934,6 +953,11 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	slope := (vmafHigh - vmafLow) / float64(sc.anchorHigh-sc.anchorLow)
 	verifyNote := ""
 	plateauLevel := 0.0 // > 0: target proven unreachable — climb may probe higher rungs
+	// plateauFlat: the measured curve is proven flat around the pick, so the
+	// spread up to the climb rungs is mostly re-encode noise and the full
+	// plateau budget applies. A steep curve (real quality per CQ step) keeps
+	// the climb on the small search tolerance instead — see autoCQClimbBudgetFloor.
+	plateauFlat := false
 	switch {
 	case cq == sc.anchorLow:
 		predicted, verifyNote = vmafLow, " (anchor measurement)"
@@ -942,7 +966,10 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 			// only reachable (if at all) by escalating below the low anchor —
 			// the same spend-vs-gain trade the saturation brake handles. The
 			// tolerance picks the cheapest CQ within reach of the anchor score.
+			// Flatness evidence here is the anchor span alone: a near-miss on
+			// a steep curve is NOT a plateau, merely a target grazed by.
 			plateauLevel = vmafLow
+			plateauFlat = -slope < sc.saturationSlope
 			if satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh, tolerance); satCQ != cq {
 				verifyNote = fmt.Sprintf(
 					" (VMAF tops out at ~%.1f — target %.4g unreachable, tolerance picks CQ %d)",
@@ -972,12 +999,18 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				math.Max(verified, vmafLow), target, satCQ)
 			cq, predicted = satCQ, satVMAF
 			plateauLevel = math.Max(verified, vmafLow)
+			plateauFlat = true // saturation proven by the real sub-anchor measurement
 		case verified < target:
 			stepped, pred, capped := autoCQStepDown(sc, cq, target, verified, slope)
 			switch {
 			case stepped == cq:
+				// The clamp floor itself measured below the target — proven
+				// unreachable, so the climb may still trade quality for size.
+				// The curve is NOT saturated here (the brake would have fired),
+				// so only the small climb budget applies.
 				predicted = verified
 				verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", verified)
+				plateauLevel = verified
 			case capped:
 				// The verification miss already proved the anchor slope too
 				// optimistic, and the correction jump was capped at maxStepDown —
@@ -1006,9 +1039,15 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 					localSlope := (verified - remeasured) / float64(cq-stepped)
 					final, finalPred, _ := autoCQStepDown(sc, stepped, target, remeasured, localSlope)
 					if final == stepped {
-						predicted = remeasured
+						// Same proven-unreachable case as the direct clamp-floor
+						// branch above: allow the (small-budget) climb. The pick
+						// moves to the clamp floor it just measured — keeping the
+						// interpolated CQ would pair the floor's score and note
+						// with a pick whose own measurement already fell below
+						// the climb budget.
+						cq, predicted = stepped, remeasured
 						verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", remeasured)
-					} else {
+						plateauLevel = remeasured
 						verifyNote = fmt.Sprintf(" (CQ %d = %.1f, CQ %d = %.1f, stepped down to CQ %d)",
 							cq, verified, stepped, remeasured, final)
 						cq, predicted = final, finalPred
@@ -1030,12 +1069,14 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// maxrate cap, the real savings only start above the high anchor). Probe
 	// the clamp ceiling first (cheapest file), then the lower rungs; a rung is
 	// taken only when its REAL measurement holds the floor. With the plateau
-	// tolerance configured the floor is (plateau top - autoCQPlateauTolerance)
-	// and every unreachable-target pick climbs; at 0 the pre-1.5.0 behaviour
-	// remains (only a flat anchor span climbs, floored by autoCQClimbFloor).
-	// A probe failure keeps the safe pick — the climb is a bonus, never a
-	// reason to fail the analysis. A healthy curve that reaches its target
-	// never gets here (plateauLevel == 0).
+	// tolerance configured every unreachable-target pick climbs; the floor is
+	// (plateau top - autoCQPlateauTolerance) on a proven-flat curve and the
+	// much tighter search-tolerance floor on a steep one (see
+	// autoCQClimbBudgetFloor). At 0 the pre-1.5.0 behaviour remains (only a
+	// flat anchor span climbs, floored by autoCQClimbFloor). A probe failure
+	// keeps the safe pick — the climb is a bonus, never a reason to fail the
+	// analysis. A healthy curve that reaches its target never gets here
+	// (plateauLevel == 0).
 	var plateauProbes []string
 	anchorGainPerStep := -slope // VMAF gained per CQ step down, across the anchors
 	climbFloor, climbing := 0.0, false
@@ -1043,18 +1084,31 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	case plateauLevel <= 0 || tolerance <= 0:
 		// healthy curve, or savings disabled entirely
 	case appSettings.autoCQPlateauTolerance > 0:
-		climbFloor, climbing = autoCQPlateauFloor(plateauLevel, appSettings.autoCQPlateauTolerance), true
+		climbFloor = autoCQClimbBudgetFloor(sc, plateauLevel, plateauFlat,
+			appSettings.autoCQPlateauTolerance, tolerance)
+		climbing = true
 	case anchorGainPerStep < sc.saturationSlope && cq == sc.anchorHigh:
 		climbFloor, climbing = autoCQClimbFloor(sc, vmafHigh, tolerance), true
 	}
 	if climbing {
 		for _, rung := range autoCQClimbCandidates(sc, cq) {
-			score, cerr := measure(rung)
-			if cerr != nil {
-				if ctx.Err() == nil {
-					pErr.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
+			// The anchor rungs were already measured at the start of the
+			// search — reuse those scores instead of burning ~15 s on an
+			// identical encode+measurement. (No switch here: its break would
+			// only leave the switch, not this probing loop.)
+			var score float64
+			if rung == sc.anchorHigh {
+				score = vmafHigh
+			} else if rung == sc.anchorLow {
+				score = vmafLow
+			} else {
+				var cerr error
+				if score, cerr = measure(rung); cerr != nil {
+					if ctx.Err() == nil {
+						pErr.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
+					}
+					break
 				}
-				break
 			}
 			plateauProbes = append(plateauProbes, fmt.Sprintf("CQ %d = %.2f", rung, score))
 			if score >= climbFloor {

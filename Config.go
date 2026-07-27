@@ -580,8 +580,12 @@ autoCQTolerance=%s
 # points below the measured maximum when a real measurement confirms it —
 # on such sources the low CQ steps often ride the bitrate cap and waste
 # space for no visible gain. Every candidate CQ is verified by an actual
-# VMAF measurement, never estimated. Only active when the target is proven
-# unreachable; 0 restores the old conservative behaviour.
+# VMAF measurement, never estimated. The full budget only applies when the
+# measured curve is flat (the spread is then re-encode noise); a target
+# merely grazed on a steep curve spends at most autoCQTolerance, so real
+# visible quality is never traded this aggressively. Only active when the
+# target is proven unreachable AND autoCQTolerance is above 0; 0 restores
+# the old conservative behaviour.
 # Allowed: 0 to 10.  Default: %s
 autoCQPlateauTolerance=%s
 

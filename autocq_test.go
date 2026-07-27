@@ -7,6 +7,7 @@
 package main
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -442,9 +443,11 @@ func TestAutoCQPlateauPick(t *testing.T) {
 
 // TestAutoCQClimbCandidates pins the probing order of the plateau climb:
 // the cheapest rung (clamp ceiling) first, then the midpoint, then — for a
-// pick below the high anchor — the high anchor itself; never anything at or
-// below the pick. Hard-coded values on purpose — a change to the anchor/clamp
-// constants must consciously revisit the climb.
+// pick below them — the high and low anchors; never anything at or below the
+// pick. The low anchor only surfaces for a clamp-floor pick (target missed
+// even there) and is free: its score is reused from the anchor measurement.
+// Hard-coded values on purpose — a change to the anchor/clamp constants must
+// consciously revisit the climb.
 func TestAutoCQClimbCandidates(t *testing.T) {
 	cases := []struct {
 		name string
@@ -457,8 +460,10 @@ func TestAutoCQClimbCandidates(t *testing.T) {
 		{"h265 pick at low anchor", hevcAutoCQScale, 26, []int{34, 32, 30}},
 		{"h265 pick below midpoint drops it", hevcAutoCQScale, 32, []int{34}},
 		{"h265 pick at ceiling climbs nowhere", hevcAutoCQScale, 34, nil},
+		{"h265 pick at clamp floor adds low anchor", hevcAutoCQScale, 20, []int{34, 32, 30, 26}},
 		{"av1 pick at high anchor", av1AutoCQScale, 32, []int{44, 38}},
 		{"av1 pick at low anchor", av1AutoCQScale, 24, []int{44, 38, 32}},
+		{"av1 pick at clamp floor adds low anchor", av1AutoCQScale, 16, []int{44, 38, 32, 24}},
 	}
 	for _, c := range cases {
 		got := autoCQClimbCandidates(c.sc, c.pick)
@@ -504,6 +509,47 @@ func TestAutoCQClimbFloor(t *testing.T) {
 			t.Errorf("%s: rung %.2f vs floor %.2f → accept=%v, want %v",
 				c.name, c.rungScore, floor, got, c.wantAccept)
 		}
+	}
+}
+
+// TestAutoCQClimbBudgetFloor pins the curve-shape rule of the unreachable-
+// target climb (2026-07-27 fix): the wide plateau budget only applies when
+// the measured curve is FLAT — its spread is re-encode noise. A steep curve
+// (a target merely grazed at the low anchor, or a rising curve clamped at
+// the CQ floor) spends at most the small search tolerance, so the climb can
+// never trade several points of real, visible quality for savings. Numbers
+// from the real 2026-07-25 series (plateau top 90.62, tolerance 0.5).
+func TestAutoCQClimbBudgetFloor(t *testing.T) {
+	const plateauTop, plateauTol, tol = 90.62, 5, 0.5
+	cases := []struct {
+		name      string
+		sc        autoCQScale
+		flat      bool
+		wantFloor float64
+	}{
+		// Flat curve: full plateau budget, identical to autoCQPlateauFloor.
+		{"flat curve gets plateau budget", hevcAutoCQScale, true, 85.62},
+		// Steep curve: only the search tolerance (H.265 factor 1.0).
+		{"steep curve gets search tolerance", hevcAutoCQScale, false, 90.12},
+		// AV1 scales the small budget with climbToleranceFactor 2.0.
+		{"av1 steep curve scales the tolerance", av1AutoCQScale, false, 89.62},
+	}
+	for _, c := range cases {
+		got := autoCQClimbBudgetFloor(c.sc, plateauTop, c.flat, plateauTol, tol)
+		if math.Abs(got-c.wantFloor) > 1e-9 {
+			t.Errorf("%s: floor %.4f, want %.4f", c.name, got, c.wantFloor)
+		}
+	}
+	// A near-miss on a steep curve must reject every real rung of the
+	// 2026-07-25 curve (CQ 30 = 89.88 < 90.12) while the proven-flat brake
+	// path still accepts CQ 32 = 88.01 — the live-tested v1.5.0 outcome.
+	steepFloor := autoCQClimbBudgetFloor(hevcAutoCQScale, plateauTop, false, plateauTol, tol)
+	if 89.88 >= steepFloor {
+		t.Errorf("steep near-miss must not take CQ 30 (89.88 vs floor %.2f)", steepFloor)
+	}
+	flatFloor := autoCQClimbBudgetFloor(hevcAutoCQScale, plateauTop, true, plateauTol, tol)
+	if 88.01 < flatFloor {
+		t.Errorf("flat plateau must keep taking CQ 32 (88.01 vs floor %.2f)", flatFloor)
 	}
 }
 

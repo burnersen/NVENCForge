@@ -101,7 +101,10 @@ CONVERSION OPTIONS
                  tops out below the target, higher CQ rungs are
                  probed with real measurements and used while they
                  stay within "autoCQPlateauTolerance" (default 5)
-                 of the reachable maximum. Works for H.265 and AV1
+                 of the reachable maximum on flat curves — a
+                 steep curve only spends autoCQTolerance, so
+                 visible quality is never traded away for a
+                 merely grazed target. Works for H.265 and AV1
                  (each on its own CQ scale). Needs an FFmpeg build
                  with the libvmaf filter (the auto-downloaded one
                  has it). Videos shorter than 30 s skip the

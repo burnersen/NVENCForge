@@ -105,7 +105,7 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	windows := [][2]float64{{36, 8}, {84, 8}, {132, 8}, {180, 8}}
 	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 
-	enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, chain,
+	enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
 		30, "8000k", "16000k", 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
 	encStr := strings.Join(enc, " ")
 	if got := strings.Count(encStr, "-ss "); got != len(windows) {
@@ -126,7 +126,7 @@ func TestBuildAutoCQArgs(t *testing.T) {
 
 	// AV1 samples must run through av1_nvenc at the requested CQ (same builder,
 	// different encoder profile) — the whole point of the per-codec buildOpts.
-	av1enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, chain,
+	av1enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
 		32, "6000k", "12000k", 120, "sample_cq32.mkv", buildAV1OptsWithCQ)
 	av1Str := strings.Join(av1enc, " ")
 	for _, want := range []string{"-c:v av1_nvenc", "-cq 32", "-maxrate 6000k"} {
@@ -135,7 +135,7 @@ func TestBuildAutoCQArgs(t *testing.T) {
 		}
 	}
 
-	vmaf := buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, chain,
+	vmaf := buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, nil, chain,
 		30000, 1001, "sample_cq30.mkv", "vmaf_cq30.json")
 	vmafStr := strings.Join(vmaf, " ")
 	for _, want := range []string{
@@ -193,7 +193,7 @@ func TestBuildAutoCQRefCacheArgs(t *testing.T) {
 	windows := [][2]float64{{36, 8}, {84, 8}, {132, 8}, {180, 8}}
 	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 
-	args := buildAutoCQRefCacheArgs("C:\\videos\\in.mp4", windows, chain, "ref_windows.mkv")
+	args := buildAutoCQRefCacheArgs("C:\\videos\\in.mp4", windows, nil, chain, "ref_windows.mkv")
 	s := strings.Join(args, " ")
 	if got := strings.Count(s, "-ss "); got != len(windows) {
 		t.Errorf("ref cache args: %d -ss occurrences, want %d", got, len(windows))

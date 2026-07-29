@@ -198,6 +198,22 @@ CONFIGURATION
   at startup and reset to their default in the file individually;
   your other settings stay untouched.
 
+  Two keys steer speed without touching quality:
+    "gpuDecode"  decodes on the GPU (NVDEC) instead of the CPU —
+                 about 20% faster on 4K sources at a bit-identical
+                 picture, because the decoding step is defined
+                 exactly by the codec standard. A decoder error
+                 falls back to the CPU automatically. Sources above
+                 "gpuDecodeMaxMbit" (default 100) always stay on the
+                 CPU: extreme-bitrate HEVC has crashed display
+                 drivers, and no fallback can catch that.
+    "casStrength" set to 0 skips the sharpening pass after the
+                 downscale entirely. That is the single most
+                 expensive filter step, so turning it off speeds
+                 4K conversions up noticeably — the picture just
+                 gets slightly softer. Set it back to 0.4 (or any
+                 value up to 1.0) if you prefer the sharper look.
+
 OUTPUT & REQUIREMENTS
   Output folder:  output (next to the processed files)
   System:         Windows 10/11 x64, Nvidia GPU (Maxwell+)

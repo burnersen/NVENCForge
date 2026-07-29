@@ -69,6 +69,8 @@ type AppSettings struct {
 	cpuTargetCRF           int
 	cpuAV1TargetCRF        int
 	cpuThreads             int
+	gpuDecode              bool
+	gpuDecodeMaxMbit       int
 }
 
 var appSettings = defaultAppSettings()
@@ -100,8 +102,28 @@ func defaultAppSettings() AppSettings {
 		cpuTargetCRF:           18,
 		cpuAV1TargetCRF:        32,
 		cpuThreads:             0,
+		gpuDecode:              true,
+		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
 	}
 }
+
+// Schutzgrenze für das Entpacken auf der Grafikkarte (NVDEC). Der Treiber
+// stürzte 2026-06 an einer HEVC-Datei mit rund 400 Mbit/s ab (TDR, Windows
+// riss den Grafiktreiber weg) — deshalb bleibt NVDEC oberhalb dieser Grenze
+// abgeschaltet und solche Dateien laufen weiter über den bewährten
+// Prozessor-Weg.
+//
+// 50 Mbit/s ist bewusst vorsichtig gewählt: acht Mal unter dem bekannten
+// Absturzfall und trotzdem weit über allem, was übliche Quellen liefern
+// (4K-Material aus dem Netz liegt bei 10–30 Mbit/s). Wer nachweislich
+// höherbitratiges Material fährt, hebt den Wert in der INI an.
+//
+// Die Grenze wurde NICHT durch Ausprobieren ermittelt — der Test dafür wäre
+// genau der Absturz, den sie verhindern soll. Eine Messreihe bis 394 Mbit/s
+// (2026-07-29, 15-Sekunden-Ausschnitte) blieb zwar folgenlos, beweist aber
+// nur, dass DIESE Ausschnitte liefen: kurze Proben treffen seltene
+// Problemstellen im Datenstrom nicht.
+const gpuDecodeDefaultMaxMbit = 50
 
 // Encoder-Backends. encoderNvidia ist der Auslieferungszustand (NVENC);
 // encoderCPU rechnet auf dem Prozessor (libx265 / libsvtav1) und braucht
@@ -192,6 +214,8 @@ func defaultConfigStrings() map[string]string {
 		"cpuTargetCRF":           strconv.Itoa(d.cpuTargetCRF),
 		"cpuAV1TargetCRF":        strconv.Itoa(d.cpuAV1TargetCRF),
 		"cpuThreads":             strconv.Itoa(d.cpuThreads),
+		"gpuDecode":              strconv.FormatBool(d.gpuDecode),
+		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
 	}
 }
 
@@ -437,6 +461,20 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "gpuDecode":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.gpuDecode = b
+			} else {
+				bad(key, val)
+			}
+		case "gpuDecodeMaxMbit":
+			// Obergrenze 500 statt "beliebig": ein Tippfehler darf nicht dazu
+			// führen, dass die Schutzgrenze faktisch wegfällt. 1 = praktisch aus.
+			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 500 {
+				s.gpuDecodeMaxMbit = n
+			} else {
+				bad(key, val)
+			}
 		case "extraFilenameChars":
 			// Windows-forbidden path characters and whitespace can never be
 			// allowed; they are dropped individually with a warning.
@@ -630,6 +668,22 @@ cpuAV1TargetCRF=%d
 # on a 16-thread CPU to keep working comfortably alongside it.
 # Allowed: 0 to 256.  Default: %d
 cpuThreads=%d
+
+# Decode on the GPU (NVDEC) instead of the CPU. Measured about 20%% faster
+# on 4K sources, and the picture is bit-identical: HEVC/H.264 decoding is
+# defined exactly by the standard, so the GPU returns the very same pixels.
+# On any decoder error the file is retried on the CPU automatically.
+# Allowed: true, false.  Default: %t
+gpuDecode=%t
+
+# Safety limit for the option above: sources ABOVE this bitrate are always
+# decoded on the CPU. Extreme-bitrate HEVC has crashed the display driver
+# (taking Windows with it), which no fallback can catch — it has to be
+# avoided beforehand. The default is deliberately cautious; typical 4K
+# sources run at 10-30 Mbit/s, so it costs you nothing. Raise it only if
+# your files really are higher and your card handles them.
+# Allowed: 1 to 500.  Default: %d
+gpuDecodeMaxMbit=%d
 `,
 		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
 		d.nvencPreset, d.nvencLookahead, d.bFrames,
@@ -651,7 +705,9 @@ cpuThreads=%d
 		d.cpuAV1Preset, d.cpuAV1Preset,
 		d.cpuTargetCRF, d.cpuTargetCRF,
 		d.cpuAV1TargetCRF, d.cpuAV1TargetCRF,
-		d.cpuThreads, d.cpuThreads)
+		d.cpuThreads, d.cpuThreads,
+		d.gpuDecode, d.gpuDecode,
+		d.gpuDecodeMaxMbit, d.gpuDecodeMaxMbit)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}

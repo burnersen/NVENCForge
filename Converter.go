@@ -34,6 +34,7 @@ type convJob struct {
 	outputPath    string
 	nvencOpts     []string
 	vfOpts        []string
+	hwaccelOpts   []string // Entpacken auf der Grafikkarte; leer = Prozessor
 	withSubs      bool
 	audioCopy     bool
 	isTS          bool
@@ -73,12 +74,61 @@ func sourceTagArgs(sourceTag string) []string {
 	return []string{"-metadata", sourceTagKey + "=" + sourceTag}
 }
 
+// gpuDecodeDisabled schaltet NVDEC für den REST des Laufs ab, sobald ein
+// Entpack-Versuch auf der Grafikkarte schiefgegangen ist. Ohne dieses Merken
+// würde jede weitere Datei denselben Fehlversuch samt Wiederholung bezahlen.
+// Der Ablauf ist sequenziell (eine Datei nach der anderen), daher genügt eine
+// einfache Variable ohne Sperre.
+var gpuDecodeDisabled bool
+
+// gpuDecodeSafeCodecs listet die Codecs, die NVDEC auf allen unterstützten
+// Karten sicher beherrscht. Alles andere (exotische oder sehr alte Formate)
+// läuft weiter über den Prozessor — dort kostet der Entpack-Vorgang ohnehin
+// wenig, weil solche Dateien klein sind.
+var gpuDecodeSafeCodecs = map[string]bool{
+	"h264": true, "hevc": true, "av1": true, "vp9": true,
+}
+
+// gpuDecodeArgs liefert die FFmpeg-Argumente zum Entpacken auf der Grafikkarte
+// — oder nil, wenn dafür auch nur ein Zweifel besteht.
+//
+// Warum das Bild dabei gleich bleibt: H.264/HEVC/AV1 schreiben den
+// Dekodier-Vorgang bitgenau vor. NVDEC MUSS also dieselben Pixel liefern wie
+// der Software-Dekodierer; nachgewiesen am 2026-07-29 per framemd5 (identischer
+// Hash über den ganzen Videostrom). Beschleunigt wird nur der Weg dorthin.
+//
+// Die Bitratengrenze ist KEIN Tempo-, sondern ein Sicherheitsventil: an einer
+// HEVC-Datei mit ~400 Mbit/s riss NVDEC 2026-06 den Grafiktreiber mit (TDR).
+// So etwas kann kein Rückfall auffangen — wenn der Treiber fällt, läuft kein
+// Code mehr. Deshalb greift die Grenze VOR dem Versuch, und im Zweifel
+// (unbekannte Bitrate, fremder Codec) gewinnt immer der Prozessor-Weg.
+func gpuDecodeArgs(stats *VideoStats) []string {
+	if !appSettings.gpuDecode || gpuDecodeDisabled || cpuModeActive || stats == nil {
+		return nil
+	}
+	if !gpuDecodeSafeCodecs[strings.ToLower(strings.TrimSpace(stats.VideoCodec))] {
+		return nil
+	}
+	// Unbekannte Bitrate heißt: die Schutzgrenze lässt sich nicht prüfen.
+	if stats.BitrateBps <= 0 {
+		return nil
+	}
+	limitBps := int64(appSettings.gpuDecodeMaxMbit) * 1_000_000
+	if stats.BitrateBps > limitBps {
+		return nil
+	}
+	return []string{"-hwaccel", "cuda"}
+}
+
 func (j convJob) buildConvertArgs() []string {
 	a := make([]string, 0, 32)
 	a = append(a, "-y")
-	// Decode strictly on the CPU: NVDEC (-hwaccel cuda / av1_cuvid) is removed
-	// because it TDR-crashes the GPU driver on extreme-bitrate HEVC. Encoding
-	// stays on the GPU via hevc_nvenc (an output option, set in nvencOpts).
+	// Entpacken auf der Grafikkarte (NVDEC), sofern gpuDecodeArgs es für diese
+	// Datei freigegeben hat — bildgleich, aber schneller. Bleibt die Liste leer,
+	// entpackt wie bisher der Prozessor. "-hwaccel" ist eine EINGABE-Option und
+	// muss deshalb vor "-i" stehen. Das Kodieren läuft unverändert auf der GPU
+	// (hevc_nvenc, steckt in nvencOpts).
+	a = append(a, j.hwaccelOpts...)
 	if j.isTS {
 		a = append(a, "-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt")
 	}
@@ -797,6 +847,11 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		subCodecs:    stats.SubCodecs,
 		sourceTag:    srcID,
 	}
+	// Nur ein echtes Umwandeln entpackt überhaupt Bilder; beim Remux werden die
+	// Spuren nur umkopiert, da gibt es nichts zu beschleunigen.
+	if doConvert {
+		baseJob.hwaccelOpts = gpuDecodeArgs(stats)
+	}
 
 	var outputFile string
 	encodingOK := false
@@ -833,12 +888,19 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			firstRun = false
 			pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).Printf("  >> %s%s\n", labelPrefix, att.label)
 			job := baseJob
+			// Ist das Entpacken auf der Grafikkarte in diesem Lauf schon einmal
+			// gescheitert, nehmen auch alle folgenden Stufen gleich den
+			// Prozessor-Weg statt denselben Fehler noch einmal zu bezahlen.
+			if gpuDecodeDisabled {
+				job.hwaccelOpts = nil
+			}
 			job.outputPath = outputFile
 			job.audioCopy = att.audioCopy
 			job.withSubs = att.withSubs
 			job.noAudio = att.noAudio
 			job.pureAudioCopy = cfg.copyAudio
-			err := runFFmpeg(ctx, buildArgs(job), stats.DurationSec, idx, total, stats.FileSizeMB)
+			err := runFFmpegWithCPUDecodeFallback(ctx, job, buildArgs,
+				stats.DurationSec, idx, total, stats.FileSizeMB)
 			if errors.Is(err, context.Canceled) {
 				encodingOK = true
 				noAudioUsed = att.noAudio
@@ -1387,6 +1449,35 @@ func extractTimeSec(timeStr string) float64 {
 	return -1
 }
 
+// runFFmpegWithCPUDecodeFallback führt einen Umwandel-Lauf aus und wiederholt
+// ihn EINMAL mit Entpacken auf dem Prozessor, falls der Versuch mit der
+// Grafikkarte scheitert. Danach bleibt NVDEC für den Rest des Laufs aus.
+//
+// Was das auffängt: saubere Absagen der Grafikkarte — ein Format, das ihr
+// Dekodierer nicht kennt, belegter Grafikspeicher, ein abweisender Treiber.
+// In diesen Fällen beendet sich FFmpeg mit einer Fehlermeldung, und die Datei
+// wird auf dem bewährten Weg fertig umgewandelt.
+//
+// Was das NICHT auffangen kann: einen echten Treiberabsturz (TDR), der das
+// System mitreißt — dann läuft hier kein Code mehr. Davor schützt allein die
+// Bitratengrenze in gpuDecodeArgs, die schon vor dem Versuch greift.
+//
+// Ein Abbruch durch den Nutzer (Strg+C) ist kein Grafikkarten-Fehler und wird
+// deshalb unverändert durchgereicht.
+func runFFmpegWithCPUDecodeFallback(ctx context.Context, job convJob,
+	buildArgs func(convJob) []string, durationSec float64,
+	fileIdx, fileTotal int, inputSizeMB float64) error {
+
+	err := runFFmpeg(ctx, buildArgs(job), durationSec, fileIdx, fileTotal, inputSizeMB)
+	if err == nil || len(job.hwaccelOpts) == 0 || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		return err
+	}
+	pWarn.Println("GPU decoding failed — repeating this file with CPU decoding.")
+	gpuDecodeDisabled = true
+	job.hwaccelOpts = nil
+	return runFFmpeg(ctx, buildArgs(job), durationSec, fileIdx, fileTotal, inputSizeMB)
+}
+
 func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx, fileTotal int, inputSizeMB float64) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -1873,12 +1964,19 @@ func buildVideoFilter(doScale, deinterlace bool) string {
 	if doScale {
 		short := appSettings.maxResolution
 		long := short * 16 / 9
-		cas := strconv.FormatFloat(appSettings.casStrength, 'f', -1, 64)
-		return pre + fmt.Sprintf(
+		chain := fmt.Sprintf(
 			"scale='if(gte(iw,ih),%d,%d)':'if(gte(iw,ih),%d,%d)'"+
-				":force_original_aspect_ratio=decrease:force_divisible_by=2,"+
-				"cas=strength=%s,format=p010le",
-			long, short, short, long, cas)
+				":force_original_aspect_ratio=decrease:force_divisible_by=2",
+			long, short, short, long)
+		// casStrength=0 lässt das Nachschärfen ganz weg statt es mit Stärke 0
+		// mitlaufen zu lassen: der Filter würde sonst jedes Bild anfassen, ohne
+		// etwas zu ändern. Gemessen 2026-07-29 kostet er rund 8 s je 90 s Video
+		// (4K→1080p) — der zweitteuerste Posten der ganzen Kette.
+		if appSettings.casStrength > 0 {
+			chain += ",cas=strength=" +
+				strconv.FormatFloat(appSettings.casStrength, 'f', -1, 64)
+		}
+		return pre + chain + ",format=p010le"
 	}
 	return pre + "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 }

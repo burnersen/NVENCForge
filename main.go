@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.6.2"
+const appVersion = "1.7.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1175,8 +1175,20 @@ func printActiveSettings(cfg *AppConfig) {
 		{"Resolution", resValue, "cyan", resActive},
 	}
 	entries = append(entries, encoderRows...)
+	// Entpacken: zeigt an, ob die Grafikkarte mithilft und ab welcher Bitrate
+	// sicherheitshalber wieder der Prozessor übernimmt. Im CPU-Modus gibt es
+	// keine Grafikkarte im Spiel, dann ist die Zeile schlicht "CPU".
+	decodeVal, decodeColor := "CPU", "gray"
+	if s.gpuDecode && !cpuModeActive {
+		decodeVal, decodeColor = fmt.Sprintf("GPU (< %d Mbit)", s.gpuDecodeMaxMbit), "cyan"
+	}
+	casVal, casColor := fmt.Sprintf("%.2f", s.casStrength), "cyan"
+	if s.casStrength <= 0 {
+		casVal, casColor = "off", "gray"
+	}
 	entries = append(entries, []entry{
-		{"CAS sharpening", fmt.Sprintf("%.2f", s.casStrength), "cyan", false},
+		{"Decoding", decodeVal, decodeColor, false},
+		{"CAS sharpening", casVal, casColor, false},
 		{"Audio/channel", fmt.Sprintf("%d k", s.audioKbpsPerChannel), "cyan", false},
 		{"Audio fallback", fmt.Sprintf("%d k", s.fallbackAudioBitrate), "cyan", false},
 		{"Audio mode", audioMode, "cyan", audioModeActive},

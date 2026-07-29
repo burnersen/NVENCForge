@@ -74,6 +74,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 
 - 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
 - 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#auto-cq).
+- ⚡ **GPU decoding — same pixels, less waiting** *(new)*. 4K sources are decoded on the GPU (NVDEC) instead of the CPU: measured **~20% faster end-to-end**, and the output is **bit-identical** — verified by comparing frame hashes, not by eyeballing it. That is not a lucky coincidence: H.264/HEVC/AV1 define decoding exactly, so the GPU has to return the very same pixels. Sources above a configurable bitrate ceiling stay on the CPU on purpose, and any decoder hiccup silently falls back to it.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -282,7 +283,16 @@ Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; inval
 
 CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
 
-> Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. To get the new CPU block written out with its comments, rename the INI and let NVENCForge create a fresh one.
+Two keys steer **speed** rather than quality:
+
+| Key | Default | What it does |
+|---|---|---|
+| `gpuDecode` | `true` | Decode on the GPU (NVDEC) instead of the CPU. The picture is bit-identical, so this costs nothing in quality. A decoder error automatically retries the file on the CPU. |
+| `gpuDecodeMaxMbit` | `50` | Sources above this bitrate always decode on the CPU. Extreme-bitrate HEVC has been known to crash display drivers, and no fallback can catch that — it has to be avoided beforehand. Typical 4K sources run at 10–30 Mbit/s, so the cautious default costs nothing. Raise it only if your files really are higher. |
+
+Want maximum speed and can live with a slightly softer picture? Set `casStrength=0`. That skips the sharpening pass after the downscale entirely — the single most expensive filter step, worth roughly another 25% on 4K conversions. Set it back to `0.4` any time.
+
+> Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. GPU decoding therefore switches itself on after an update, since `gpuDecode` defaults to `true` — the output stays bit-identical either way. To get the newer blocks written out with their comments, rename the INI and let NVENCForge create a fresh one.
 
 ---
 

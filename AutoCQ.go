@@ -610,17 +610,32 @@ func autoCQGuidedWindows(buckets []bitrateBucket, durationSec float64,
 // given CQ — so H.265 and AV1 each sample through their own encoder.
 // setpts=PTS-STARTPTS per window re-bases the decoded segment timestamps
 // (pitfall 1), concat then joins the windows into one stream.
-func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, filterChain string,
-	cq int, maxBitrate, bufsize string, gop int, sampleName string,
-	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string) []string {
-
-	args := []string{"-y"}
+// autoCQWindowInputs baut die Eingabe-Argumente der Messfenster: je Fenster
+// Startzeit, Dauer und die Quelldatei.
+//
+// hwaccel (aus gpuDecodeArgs, sonst nil) muss VOR JEDEM "-i" wiederholt
+// werden: FFmpeg wertet "-hwaccel" immer nur für die unmittelbar folgende
+// Eingabe aus. Einmal vorne gesetzt würde also nur das erste Fenster auf der
+// Grafikkarte entpackt — ein Fehler, der nicht auffällt, weil das Ergebnis
+// stimmt und nur die Zeitersparnis ausbleibt.
+func autoCQWindowInputs(sourcePath string, windows [][2]float64, hwaccel []string) []string {
+	args := make([]string, 0, len(windows)*(6+len(hwaccel)))
 	for _, w := range windows {
+		args = append(args, hwaccel...)
 		args = append(args,
 			"-ss", strconv.FormatFloat(w[0], 'f', 3, 64),
 			"-t", strconv.FormatFloat(w[1], 'f', 3, 64),
 			"-i", sourcePath)
 	}
+	return args
+}
+
+func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, hwaccel []string,
+	filterChain string, cq int, maxBitrate, bufsize string, gop int, sampleName string,
+	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string) []string {
+
+	args := []string{"-y"}
+	args = append(args, autoCQWindowInputs(sourcePath, windows, hwaccel)...)
 	var fg strings.Builder
 	for i := range windows {
 		fmt.Fprintf(&fg, "[%d:V:0]setpts=PTS-STARTPTS[w%d];", i, i)
@@ -678,16 +693,11 @@ func autoCQRefCacheEstimateBytes(srcW, srcH int, doScale bool, fps, sampleSec fl
 // resulting CQ pick cannot change. FFV1 is compiled into every FFmpeg build
 // (no external library); level 3 with slices makes encode and decode
 // multi-threaded, and the skipped slice CRCs are never read by the analysis.
-func buildAutoCQRefCacheArgs(sourcePath string, windows [][2]float64,
+func buildAutoCQRefCacheArgs(sourcePath string, windows [][2]float64, hwaccel []string,
 	filterChain, refName string) []string {
 
 	args := []string{"-y"}
-	for _, w := range windows {
-		args = append(args,
-			"-ss", strconv.FormatFloat(w[0], 'f', 3, 64),
-			"-t", strconv.FormatFloat(w[1], 'f', 3, 64),
-			"-i", sourcePath)
-	}
+	args = append(args, autoCQWindowInputs(sourcePath, windows, hwaccel)...)
 	var fg strings.Builder
 	for i := range windows {
 		fmt.Fprintf(&fg, "[%d:V:0]setpts=PTS-STARTPTS[w%d];", i, i)
@@ -739,16 +749,13 @@ func buildAutoCQCachedVMAFArgs(refName, sampleName, logName string,
 // (not scaling/sharpening). Both sides are forced to yuv420p10le and to
 // frame-number-based timestamps (pitfall 2). n_subsample=3 scores every third
 // frame — plenty for a sample and three times faster.
-func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, filterChain string,
-	fpsNum, fpsDen int, sampleName, logName string) []string {
+func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, hwaccel []string,
+	filterChain string, fpsNum, fpsDen int, sampleName, logName string) []string {
 
-	var args []string
-	for _, w := range windows {
-		args = append(args,
-			"-ss", strconv.FormatFloat(w[0], 'f', 3, 64),
-			"-t", strconv.FormatFloat(w[1], 'f', 3, 64),
-			"-i", sourcePath)
-	}
+	args := autoCQWindowInputs(sourcePath, windows, hwaccel)
+	// Die Vergleichsdatei bleibt bewusst auf dem Prozessor: sie ist bereits
+	// klein (Zielauflösung) und der Messlauf hängt ohnehin an libvmaf, nicht
+	// am Entpacken. So bleibt auch der Grafikspeicher-Bedarf niedrig.
 	args = append(args, "-i", sampleName)
 
 	normPTS := autoCQNormPTS(fpsNum, fpsDen)
@@ -904,13 +911,35 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// the guided placement, the cache is an optimisation: any problem (estimate
 	// above the size cap, encode failure, full temp disk) silently keeps the
 	// direct-from-source path.
+	// Entpacken auf der Grafikkarte gilt auch für die Messläufe. Das ist
+	// bildgleich (siehe gpuDecodeArgs), die gemessenen VMAF-Werte und damit die
+	// CQ-Wahl bleiben also unverändert — nur die Analyse wird schneller.
+	hwaccel := gpuDecodeArgs(stats)
+
+	// runAutoCQStep führt einen Messlauf aus und wiederholt ihn EINMAL ohne
+	// Grafikkarte, falls diese ihn abweist. Ohne diesen Rückfall würde ein
+	// Entpack-Problem die komplette Analyse scheitern lassen und die Datei
+	// bekäme den groben Ersatzwert statt eines gemessenen CQ.
+	runAutoCQStep := func(build func(hw []string) []string) error {
+		err := runAutoCQFFmpeg(ctx, tmpDir, build(hwaccel))
+		if err == nil || len(hwaccel) == 0 || ctx.Err() != nil {
+			return err
+		}
+		pWarn.Println("Auto-CQ: GPU decoding failed — continuing on the CPU.")
+		gpuDecodeDisabled = true
+		hwaccel = nil
+		return runAutoCQFFmpeg(ctx, tmpDir, build(nil))
+	}
+
 	refCache := ""
 	var cacheErr error
 	fps := float64(stats.FPSNum) / float64(stats.FPSDen)
 	if autoCQRefCacheEstimateBytes(stats.Width, stats.Height, doScale, fps, sampleSec) <= autoCQCacheMaxBytes {
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: caching filtered sample windows..."))
-		if cerr := runAutoCQFFmpeg(ctx, tmpDir, buildAutoCQRefCacheArgs(
-			filePath, windows, filterChain, autoCQRefCacheName)); cerr != nil {
+		cerr := runAutoCQStep(func(hw []string) []string {
+			return buildAutoCQRefCacheArgs(filePath, windows, hw, filterChain, autoCQRefCacheName)
+		})
+		if cerr != nil {
 			if ctx.Err() != nil {
 				_ = spinner.Stop()
 				return 0, false
@@ -934,24 +963,31 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	measure := func(cq int) (float64, error) {
 		sampleName := fmt.Sprintf("sample_cq%d.mkv", cq)
 		logName := fmt.Sprintf("vmaf_cq%d.json", cq)
-		var encArgs, vmafArgs []string
-		if refCache != "" {
-			encArgs = buildAutoCQCachedEncodeArgs(refCache, stats.FPSNum, stats.FPSDen,
+		// Aus dem Zwischenspeicher gelesen wird nicht mehr aus der Quelle
+		// entpackt — dort gibt es also nichts zu beschleunigen und der
+		// hw-Parameter bleibt ungenutzt.
+		buildEnc := func(hw []string) []string {
+			if refCache != "" {
+				return buildAutoCQCachedEncodeArgs(refCache, stats.FPSNum, stats.FPSDen,
+					cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
+			}
+			return buildAutoCQEncodeArgs(filePath, windows, hw, filterChain,
 				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
-			vmafArgs = buildAutoCQCachedVMAFArgs(refCache, sampleName, logName,
-				stats.FPSNum, stats.FPSDen)
-		} else {
-			encArgs = buildAutoCQEncodeArgs(filePath, windows, filterChain,
-				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
-			vmafArgs = buildAutoCQVMAFArgs(filePath, windows, filterChain,
+		}
+		buildVMAF := func(hw []string) []string {
+			if refCache != "" {
+				return buildAutoCQCachedVMAFArgs(refCache, sampleName, logName,
+					stats.FPSNum, stats.FPSDen)
+			}
+			return buildAutoCQVMAFArgs(filePath, windows, hw, filterChain,
 				stats.FPSNum, stats.FPSDen, sampleName, logName)
 		}
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: encoding samples at CQ %d...", cq))
-		if err := runAutoCQFFmpeg(ctx, tmpDir, encArgs); err != nil {
+		if err := runAutoCQStep(buildEnc); err != nil {
 			return 0, fmt.Errorf("sample encode at CQ %d: %w", cq, err)
 		}
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: measuring VMAF at CQ %d...", cq))
-		if err := runAutoCQFFmpeg(ctx, tmpDir, vmafArgs); err != nil {
+		if err := runAutoCQStep(buildVMAF); err != nil {
 			return 0, fmt.Errorf("VMAF measurement at CQ %d: %w", cq, err)
 		}
 		score, err := readVMAFScore(filepath.Join(tmpDir, logName))

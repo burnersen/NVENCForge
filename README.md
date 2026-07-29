@@ -51,7 +51,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 1. Download `NVENCForge.exe`, a single file with nothing to install.
 2. Drag a video (or a whole folder) onto it.
-3. Done. Your video is now H.265, smaller, and the original sits safely in the recycle bin.
+3. Done. Your video is now H.265, smaller, and the original waits untouched in an `originals` folder next to it.
 
 On first run NVENCForge fetches FFmpeg automatically: no setup, no PATH fiddling, no dependencies.
 
@@ -66,7 +66,7 @@ On first run NVENCForge fetches FFmpeg automatically: no setup, no PATH fiddling
 
 A reality check on these figures: the −96 % case is a best case, a short clip with an absurdly high source bitrate, and most of that saving comes from the source being wildly inefficient, not from magic. Typical, already-compressed material shrinks far less, and some files get skipped or remuxed entirely because re-encoding wouldn't help. That skip logic is a feature, not a shortcoming. The encoder is CQ-based (constant quality) in every mode: the size shrinks to whatever the chosen quality level needs. In the default mode (no flags) material above 1080p is also downscaled to 1080p.
 
-> **A word of honesty:** NVENCForge re-encodes, and re-encoding is lossy. It shines on bulky, already-compressed or inefficient files where the space saving is worth a quality hit you won't notice in normal playback. It is **not** an archival tool: keep untouched masters of anything irreplaceable. Originals go to the recycle bin (recoverable), not a permanent delete, but treat that as a safety net, not a backup.
+> **A word of honesty:** NVENCForge re-encodes, and re-encoding is lossy. It shines on bulky, already-compressed or inefficient files where the space saving is worth a quality hit you won't notice in normal playback. It is **not** an archival tool: keep untouched masters of anything irreplaceable. Originals are moved aside into an `originals` folder, never deleted — but treat that as a safety net, not a backup.
 
 ---
 
@@ -76,7 +76,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 - 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#auto-cq).
 - ⚡ **GPU decoding — same pixels, less waiting** *(new)*. 4K sources are decoded on the GPU (NVDEC) instead of the CPU: measured **~20% faster end-to-end**, and the output is **bit-identical** — verified by comparing frame hashes, not by eyeballing it. That is not a lucky coincidence: H.264/HEVC/AV1 define decoding exactly, so the GPU has to return the very same pixels. Sources above a configurable bitrate ceiling stay on the CPU on purpose, and any decoder hiccup silently falls back to it.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
-- 🛡️ **Safe with your files.** Originals go to the **recycle bin** only after the output is probed and validated, never hard-deleted. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
+- 🛡️ **Safe with your files.** Originals are moved into an **`originals` folder** only after the output is probed and validated — nothing is ever deleted, so you can check the result yourself and clear that folder when you're happy. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
 - 👯 **Parallel out of the box.** Start the same command in two terminals; instances lock files individually and split the work automatically.
 - 🎛️ **DaVinci-Resolve-safe audio.** DTS, TrueHD, EAC3, FLAC, Opus & >5.1 layouts are converted to AAC that Resolve actually imports (≤5.1, ≤48 kHz), or kept 1:1 with `-copyaudio`.
@@ -98,6 +98,8 @@ You can tell the two apart at a glance by the filename:
 |---|---|
 | `Movie.h265.mkv` | Re-encoded to H.265 (smaller) |
 | `Movie.h264.mkv` | Left in its codec, just repackaged (already efficient) |
+
+The finished files land in an `output` subfolder, and each source that was converted successfully moves into an `originals` subfolder — so you can compare the two and delete the originals yourself once you're happy. Both folders are skipped on later runs.
 
 Already-processed files are recognized by name and content, so running NVENCForge twice on the same folder never converts anything a second time.
 
@@ -124,7 +126,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#auto-cq). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
 | `-cq NN` | Force a fixed CQ for this run: skips Auto-CQ and the configured CQ (scale H.265 1-51, AV1 1-63) |
-| `-keep` | Keep the originals: don't move them to the recycle bin after a successful convert |
+| `-keep` | Keep the originals exactly where they are: don't move them aside after a successful convert |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-davinci` | For DaVinci Resolve workflow (split / extract / merge, re-encodes where needed); must be the first argument |
 | `-split` | Lossless split: every stream copied 1:1 into separate files; must be the first argument |
@@ -290,6 +292,12 @@ Two keys steer **speed** rather than quality:
 | `gpuDecode` | `true` | Decode on the GPU (NVDEC) instead of the CPU. The picture is bit-identical, so this costs nothing in quality. A decoder error automatically retries the file on the CPU. |
 | `gpuDecodeMaxMbit` | `50` | Sources above this bitrate always decode on the CPU. Extreme-bitrate HEVC has been known to crash display drivers, and no fallback can catch that — it has to be avoided beforehand. Typical 4K sources run at 10–30 Mbit/s, so the cautious default costs nothing. Raise it only if your files really are higher. |
 
+One key decides what happens to the **original** once its conversion is done:
+
+| Key | Default | What it does |
+|---|---|---|
+| `retireMode` | `folder` | `folder` moves the source into an `originals` subfolder next to it — same drive, so it's instant, and nothing is deleted: you check the result and empty that folder yourself. `recyclebin` uses the Windows recycle bin instead (with the checks described above). `-keep` always wins and leaves originals exactly where they are. |
+
 Want maximum speed and can live with a slightly softer picture? Set `casStrength=0`. That skips the sharpening pass after the downscale entirely — the single most expensive filter step, worth roughly another 25% on 4K conversions. Set it back to `0.4` any time.
 
 > Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. GPU decoding therefore switches itself on after an update, since `gpuDecode` defaults to `true` — the output stays bit-identical either way. To get the newer blocks written out with their comments, rename the INI and let NVENCForge create a fresh one.
@@ -342,12 +350,13 @@ Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that �
 <details>
 <summary><b>🛡️ Your files are safe — no matter what</b></summary>
 
-- **Validate, *then* recycle.** An original is only moved to the recycle bin *after* the new file has been re-probed and confirmed valid (right codec, no lost audio tracks, plausible duration, sane file size). If validation fails, the original stays exactly where it is.
-- **The real Windows recycle bin.** Deletion goes through the actual Windows shell API with the "allow undo" flag, so originals are restorable — not a custom "move to a folder" hack. It even detects a drive that has no recycle bin (instead of silently failing) and tells you the original was kept.
+- **Validate, *then* move aside.** An original is only moved into the `originals` folder *after* the new file has been re-probed and confirmed valid (right codec, no lost audio tracks, plausible duration, sane file size). If validation fails, the original stays exactly where it is.
+- **Nothing is deleted — and nothing can silently vanish.** The `originals` folder sits next to the source, on the same drive, so moving a 60 GB file is instant (a rename, not a copy), and *you* decide when it goes. That is deliberately not the recycle bin: Windows empties the bin on its own — Storage Sense, and the `SilentCleanup` task as soon as a drive runs low on space — which can make "safely recycled" originals disappear without a trace. Same-named files from different folders never overwrite each other (`clip (2).mkv`), and if a move fails for any reason the original simply stays put.
+- **Recycle bin still available, and now honest about it.** Prefer the bin? Set `retireMode=recyclebin`. NVENCForge then checks *beforehand* whether that drive's bin can actually accept the file (drive type, per-volume setting, and the bin's size limit — Windows would otherwise answer its own "too big for the recycle bin?" prompt with *yes* and destroy the file silently), and *afterwards* whether the file really arrived. If the bin can't take it, the original is kept and you're told why.
 - **Never overwrite anything.** If an output name is already taken, NVENCForge writes an automatic numbered name (`Movie.2`, `Movie.3`, …). Nothing you already have is ever clobbered.
 - **A re-encode is never bigger than the source.** If a conversion somehow comes out larger (it happens on already-lean files), the result is thrown away and the file is losslessly repackaged instead. You never trade quality *and* gain size.
 - **Crash-safe output.** Abort mid-encode, close the window, or lose power — you're left with a playable `.preview.mkv`, never a corrupt zero-byte file. FFmpeg is asked to *finish cleanly* (a graceful "q"), not killed mid-frame.
-- **Video-only fallback keeps the original.** If the only way to salvage a file is to drop its audio, the source — the only copy of that audio — is deliberately **not** recycled.
+- **Video-only fallback keeps the original.** If the only way to salvage a file is to drop its audio, the source — the only copy of that audio — is deliberately **not** moved aside at all.
 - **A corrupt output can never masquerade as a good one.** If a broken result can't be deleted, it's renamed `.broken`, and if even that fails a `.invalid` marker is dropped next to it, so a later run treats it as garbage instead of "already done". Half-written files from an earlier crash ("crash ghosts") are detected and cleared too.
 - **Won't convert the same file twice.** Every file NVENCForge *produces* gets a small origin tag in its header (`NVENCFORGE_SOURCE` — just the source's name; it never touches the picture, and your untouched originals get no tag at all). Before working, NVENCForge looks in the `output` folder and skips anything already finished for that source and codec: a re-run simply does nothing, an `.h265` and an `.av1` of the same film happily coexist, and two *different* sources that clean to the same name are told apart instead of one shadowing the other. The skip depends only on whether a finished output already exists — not on flags like `-cq` or a bitrate override — so to deliberately redo a file with new settings, remove its finished file from the `output` folder first.
 - **Keeps the original's date.** The output inherits the source file's creation and modification timestamps, so your library sorts by date exactly as before.
@@ -480,7 +489,7 @@ NVENCForge is free and made in my spare time, on my own hardware and electricity
 
 ## ⚠️ Disclaimer
 
-NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved to the recycle bin after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).
+NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved into an `originals` folder after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).
 
 ---
 

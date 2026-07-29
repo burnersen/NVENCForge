@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.7.1"
+const appVersion = "1.8.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -933,7 +933,10 @@ func collectInputFiles(cfg *AppConfig, args []string) []string {
 					return nil
 				}
 				if d.IsDir() {
-					if strings.EqualFold(d.Name(), "output") {
+					// Weder unsere Ausgabe noch die beiseitegelegten
+					// Originale dürfen erneut eingesammelt werden.
+					if strings.EqualFold(d.Name(), "output") ||
+						strings.EqualFold(d.Name(), originalsFolderName) {
 						return filepath.SkipDir
 					}
 					return nil

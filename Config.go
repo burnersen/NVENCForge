@@ -71,6 +71,7 @@ type AppSettings struct {
 	cpuThreads             int
 	gpuDecode              bool
 	gpuDecodeMaxMbit       int
+	retireMode             string
 }
 
 var appSettings = defaultAppSettings()
@@ -104,6 +105,7 @@ func defaultAppSettings() AppSettings {
 		cpuThreads:             0,
 		gpuDecode:              true,
 		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
+		retireMode:             retireModeFolder,
 	}
 }
 
@@ -131,6 +133,24 @@ const gpuDecodeDefaultMaxMbit = 50
 const (
 	encoderNvidia = "nvidia"
 	encoderCPU    = "cpu"
+)
+
+// Wohin das Original nach erfolgreicher Konvertierung geht.
+//
+// retireModeFolder ist seit 1.8.0 der Auslieferungszustand: der Unterordner
+// "originals" liegt neben der Quelldatei (also auf demselben Laufwerk, das
+// Verschieben ist dadurch sofort fertig) und wird von Windows NICHT von
+// selbst geleert. Der Papierkorb dagegen wird geleert — durch die
+// Speicheroptimierung und durch die Aufgabe SilentCleanup, sobald ein
+// Laufwerk knapp wird. Genau dadurch verschwanden Originale unbemerkt.
+// Preis der neuen Voreinstellung: der Platz wird erst frei, wenn der
+// Anwender den Ordner selbst leert.
+const (
+	retireModeFolder     = "folder"
+	retireModeRecycleBin = "recyclebin"
+
+	// originalsFolderName ist das Gegenstück zum Ausgabeordner "output".
+	originalsFolderName = "originals"
 )
 
 // cpuModeActive gilt für den ganzen Lauf: gesetzt durch das Flag -cpu, den
@@ -216,6 +236,7 @@ func defaultConfigStrings() map[string]string {
 		"cpuThreads":             strconv.Itoa(d.cpuThreads),
 		"gpuDecode":              strconv.FormatBool(d.gpuDecode),
 		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
+		"retireMode":             d.retireMode,
 	}
 }
 
@@ -424,6 +445,12 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "encoder":
 			if e := strings.ToLower(val); e == encoderNvidia || e == encoderCPU {
 				s.encoder = e
+			} else {
+				bad(key, val)
+			}
+		case "retireMode":
+			if m := strings.ToLower(val); m == retireModeFolder || m == retireModeRecycleBin {
+				s.retireMode = m
 			} else {
 				bad(key, val)
 			}
@@ -684,6 +711,20 @@ gpuDecode=%t
 # your files really are higher and your card handles them.
 # Allowed: 1 to 500.  Default: %d
 gpuDecodeMaxMbit=%d
+
+# --- What happens to the original after a successful conversion ---
+
+# "folder" moves it into an "originals" subfolder next to the source file.
+# That is on the same drive, so moving is instant even for a 60 GB file, and
+# Windows never touches it: your originals wait there until YOU delete them.
+# "recyclebin" is the old behaviour. It looks safer but is not - Windows
+# empties the recycle bin on its own (Storage Sense, and the SilentCleanup
+# task as soon as a drive runs low on space), which is how originals used to
+# disappear unnoticed. Downside of "folder": the disk space is only freed
+# when you empty that folder yourself.
+# The -keep flag always wins and leaves the original exactly where it is.
+# Allowed: folder, recyclebin.  Default: %s
+retireMode=%s
 `,
 		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
 		d.nvencPreset, d.nvencLookahead, d.bFrames,
@@ -707,7 +748,8 @@ gpuDecodeMaxMbit=%d
 		d.cpuAV1TargetCRF, d.cpuAV1TargetCRF,
 		d.cpuThreads, d.cpuThreads,
 		d.gpuDecode, d.gpuDecode,
-		d.gpuDecodeMaxMbit, d.gpuDecodeMaxMbit)
+		d.gpuDecodeMaxMbit, d.gpuDecodeMaxMbit,
+		d.retireMode, d.retireMode)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}

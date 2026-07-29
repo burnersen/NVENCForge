@@ -474,19 +474,31 @@ func removeOrRename(path string) {
 	pWarn.Printf("Corrupt output blocked → marker set: %s\n", filepath.Base(marker))
 }
 
-// retireOriginal disposes of a successfully converted source file. By default
-// it goes to the recycle bin (restorable); with -keep (cfg.keepSource) the
-// original is left exactly where it is. The output already lives in its own
-// folder, so keeping the source can never overwrite anything.
+// retireOriginal disposes of a successfully converted source file. The output
+// already lives in its own folder, so keeping the source can never overwrite
+// anything. Three ways, in order of precedence:
 //
-// If the drive cannot put the file into its recycle bin at all (network path,
-// removable drive, recycle bin switched off, or the file is larger than the
-// bin's size limit), the original stays untouched instead of being destroyed.
+//	-keep                     leave the original exactly where it is
+//	retireMode=folder         move it into the "originals" subfolder (default)
+//	retireMode=recyclebin     hand it to the Windows recycle bin
+//
+// Whatever goes wrong, the original is never destroyed as a side effect: on
+// any error it simply stays where it is and the reason is printed.
 func retireOriginal(cfg *AppConfig, filePath string) {
 	if cfg.keepSource {
 		pInfo.Printf("Original kept (-keep): %s\n", filepath.Base(filePath))
 		return
 	}
+	if appSettings.retireMode == retireModeFolder {
+		moved, err := moveOriginalToFolder(filePath)
+		if err != nil {
+			pWarn.Printf("Original is kept: %s → %v\n", filePath, err)
+			return
+		}
+		pInfo.Printf("Original moved to \"%s\": %s\n", originalsFolderName, filepath.Base(moved))
+		return
+	}
+
 	err := sendToRecycleBin(filePath)
 	switch {
 	case err == nil:
@@ -499,6 +511,49 @@ func retireOriginal(cfg *AppConfig, filePath string) {
 	default:
 		pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
 	}
+}
+
+// maxOriginalsNameTries begrenzt die Suche nach einem freien Namen im
+// Originale-Ordner. Wer 99 gleichnamige Dateien dorthin schiebt, hat ein
+// anderes Problem als eine fehlende Nummer 100.
+const maxOriginalsNameTries = 99
+
+// moveOriginalToFolder verschiebt die Quelldatei in den Unterordner
+// "originals" NEBEN ihr — also auf dasselbe Laufwerk, wodurch das Verschieben
+// ein reines Umbenennen bleibt und auch bei 60-GB-Dateien sofort fertig ist.
+// Zurückgegeben wird der neue Pfad.
+func moveOriginalToFolder(filePath string) (string, error) {
+	targetDir := filepath.Join(filepath.Dir(filePath), originalsFolderName)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create \"%s\" folder: %w", originalsFolderName, err)
+	}
+	target, err := freeOriginalsPath(targetDir, filepath.Base(filePath))
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(filePath, target); err != nil {
+		return "", fmt.Errorf("cannot move it into \"%s\": %w", originalsFolderName, err)
+	}
+	return target, nil
+}
+
+// freeOriginalsPath findet einen freien Namen im Zielordner. Gleichnamige
+// Quellen aus verschiedenen Ordnern dürfen sich nicht gegenseitig
+// überschreiben, deshalb wird bei Bedarf " (2)", " (3)" … angehängt.
+func freeOriginalsPath(targetDir, name string) (string, error) {
+	candidate := filepath.Join(targetDir, name)
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate, nil
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := 2; i <= maxOriginalsNameTries; i++ {
+		candidate = filepath.Join(targetDir, fmt.Sprintf("%s (%d)%s", stem, i, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no free name in \"%s\" for %s", originalsFolderName, name)
 }
 
 // ----------------------------------------------------------------------------

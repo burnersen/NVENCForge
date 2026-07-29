@@ -33,10 +33,11 @@ QUICK START
   With no arguments it processes every supported video in the
   current folder. Converted files are written to an "output"
   subfolder; after a successful conversion the original is moved
-  to the recycle bin (restorable from there). If that drive cannot
-  take it (network path, removable drive, or the file is bigger
-  than the recycle bin's size limit), the original is left in
-  place instead of being destroyed - you will see a note saying so.
+  into an "originals" subfolder next to it. Nothing is deleted -
+  the originals wait there until you delete them yourself. Set
+  retireMode=recyclebin in the config to use the recycle bin
+  instead (Windows may empty that on its own), or use -keep to
+  leave the originals exactly where they are.
   Files already efficiently compressed are repackaged instead of
   re-encoded (the output keeps its codec, e.g. ".h264.mkv") - a
   re-encode would only make them bigger. Already-processed files
@@ -120,8 +121,8 @@ CONVERSION OPTIONS
                  and ignores the configured CQ. The scale depends
                  on the codec (H.265 1-51; AV1 1-63 with -av1).
                  Example:  NVENCForge.exe -cq 28 video.mp4
-  -keep          Keep the original files: after a successful
-                 conversion they are NOT moved to the recycle bin.
+  -keep          Keep the original files where they are: after a
+                 successful conversion they are NOT moved at all.
                  The output lives in its own folder, so nothing is
                  overwritten. Use this if you want both files.
   -shutdown      Shut the PC down 30 s after the batch finishes

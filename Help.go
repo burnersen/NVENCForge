@@ -33,7 +33,10 @@ QUICK START
   With no arguments it processes every supported video in the
   current folder. Converted files are written to an "output"
   subfolder; after a successful conversion the original is moved
-  to the recycle bin (restorable from there).
+  to the recycle bin (restorable from there). If that drive cannot
+  take it (network path, removable drive, or the file is bigger
+  than the recycle bin's size limit), the original is left in
+  place instead of being destroyed - you will see a note saying so.
   Files already efficiently compressed are repackaged instead of
   re-encoded (the output keeps its codec, e.g. ".h264.mkv") - a
   re-encode would only make them bigger. Already-processed files

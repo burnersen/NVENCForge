@@ -478,12 +478,25 @@ func removeOrRename(path string) {
 // it goes to the recycle bin (restorable); with -keep (cfg.keepSource) the
 // original is left exactly where it is. The output already lives in its own
 // folder, so keeping the source can never overwrite anything.
+//
+// If the drive cannot put the file into its recycle bin at all (network path,
+// removable drive, recycle bin switched off, or the file is larger than the
+// bin's size limit), the original stays untouched instead of being destroyed.
 func retireOriginal(cfg *AppConfig, filePath string) {
 	if cfg.keepSource {
 		pInfo.Printf("Original kept (-keep): %s\n", filepath.Base(filePath))
 		return
 	}
-	if err := sendToRecycleBin(filePath); err != nil {
+	err := sendToRecycleBin(filePath)
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, errRecycleNotVerified):
+		// Windows reported success, but the file is not in the bin — it is
+		// gone for good. Say so plainly instead of pretending it was kept.
+		pWarn.Printf("Original was deleted PERMANENTLY — Windows did not put it into the recycle bin: %s\n",
+			filePath)
+	default:
 		pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
 	}
 }

@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/pterm/pterm"
 )
 
 const helpFileName = "NVENCForge_Help.txt"
@@ -21,27 +24,55 @@ const helpFileContent = `=======================================================
   H.265 NVENC batch encoder + DaVinci Resolve workflow & lossless tools
 ============================================================
 
-WHAT IT DOES
-  NVENCForge converts video files to H.265 (HEVC) using your
-  Nvidia GPU (NVENC) - or, with -cpu, on the processor alone
-  when there is no Nvidia card. It can also split, extract
-  and merge audio / subtitle / video streams. Subtitles are
-  cleaned automatically.
+------------------------------------------------------------
+  THE SHORT VERSION  -  this is all most people ever need
+------------------------------------------------------------
 
-QUICK START
-  Drag one or more video files (or a folder) onto NVENCForge.exe.
-  With no arguments it processes every supported video in the
-  current folder. Converted files are written to an "output"
-  subfolder; after a successful conversion the original is moved
-  into an "originals" subfolder next to it. Nothing is deleted -
-  the originals wait there until you delete them yourself. Set
-  retireMode=recyclebin in the config to use the recycle bin
-  instead (Windows may empty that on its own), or use -keep to
-  leave the originals exactly where they are.
-  Files already efficiently compressed are repackaged instead of
-  re-encoded (the output keeps its codec, e.g. ".h264.mkv") - a
-  re-encode would only make them bigger. Already-processed files
-  are detected and skipped, so running a second time is safe.
+  Drag video files or a whole folder onto NVENCForge.exe.
+  That is it. There is nothing to set up and nothing to type.
+
+  What happens then:
+    - Every video is converted to H.265, which usually cuts the
+      file size by half or more at the same visible quality.
+    - The right quality setting is MEASURED for each file
+      individually, so you neither waste space nor lose quality.
+    - Results land in an "output" subfolder. Your original is
+      moved into an "originals" subfolder next to it and is
+      never deleted - it waits there until you delete it.
+    - Videos larger than 1080p are scaled down to 1080p and
+      lightly sharpened. Use -original to keep the resolution.
+    - Files that are already compressed efficiently are only
+      repackaged, never re-encoded (that would just make them
+      bigger). Files you converted before are skipped, so
+      running NVENCForge a second time is always safe.
+
+  Nothing to install: FFmpeg does the actual encoding work, and
+  NVENCForge fetches a tested copy of it by itself on the first
+  run - once, roughly 80 MB, no setup on your part.
+
+  The three options people actually use:
+    -original     keep the resolution (no downscale to 1080p)
+    -copyaudio    leave the audio exactly as it is
+    -av1          AV1 instead of H.265: smaller files, but it
+                  needs an RTX 40 series card or newer
+
+  Worth doing once - the "Send to" menu:
+    Put NVENCForge into the Windows right-click menu and you can
+    convert any video without opening a folder first.
+      1. Press Win+R, type  shell:sendto  and press Enter.
+      2. Drop a SHORTCUT to NVENCForge.exe into the folder that
+         opens (right-drag the exe there and choose "Create
+         shortcut here" - do not move the exe itself).
+    From then on: right-click any video -> Send to -> NVENCForge.
+    You can add a second shortcut with an option in its Target
+    field (e.g. ...\NVENCForge.exe -original) to have both.
+
+  For the complete option list, run:  NVENCForge.exe -help
+  Everything below is detail you only need when you want it.
+
+============================================================
+  EVERYTHING ELSE
+============================================================
 
 CONVERSION OPTIONS
   -NNNN          Set the maximum target bitrate in kbit/s.
@@ -69,52 +100,46 @@ CONVERSION OPTIONS
                  existing ".av1.mkv" is skipped with a hint - re-run
                  -apple on the original source).
   -cpu           Encode on the processor instead of the graphics
-                 card - NO Nvidia card required. H.265 is encoded
-                 with libx265, and together with -av1 the encoder
-                 is SVT-AV1. Everything else stays the same:
-                 downscaling, sharpening, audio handling, bitrate
-                 caps, Auto-CQ and the file naming are identical.
-                 Expect it to take considerably longer than a GPU
-                 (roughly 40 minutes per hour of 1080p video on a
-                 modern 8-core CPU, clearly more on older ones).
-                 The quality settings live on their own scales:
-                 "cpuTargetCRF" for H.265, "cpuAV1TargetCRF" for
-                 AV1 - measured, libx265 needs about CQ minus 7 for
-                 the same quality as NVENC, so 26 and 19 look alike.
-                 Speed is set with "cpuPreset" (libx265) and
-                 "cpuAV1Preset" (SVT-AV1); "cpuThreads" limits how
-                 many cores are used so the machine stays usable
-                 (0 = all cores). To make CPU mode permanent, set
-                 "encoder=cpu" in the config. If no Nvidia card is
-                 found at startup, NVENCForge offers CPU mode by
-                 itself instead of refusing to run.
-                 Tip: with -cpu the AV1 encoder is both faster AND
-                 smaller at equal quality - if the target device
-                 plays AV1, "-cpu -av1" is the better deal.
-  -autocq        Pick the CQ automatically per file: short sample
-                 windows (placed on the source's bitrate profile,
-                 hardest scene always included) are encoded at two
-                 anchor CQ values, measured with VMAF, and the CQ
-                 that should hit the quality target (default 96,
-                 key "autoCQTargetVMAF" in the config) is verified
-                 by one extra measurement before the real encode.
-                 The config key "autoCQTolerance" (default 0.5)
-                 lets the pick land that far below the target when
-                 it saves CQ steps (smaller files); 0 chases the
-                 full target. On sources whose quality provably
-                 tops out below the target, higher CQ rungs are
-                 probed with real measurements and used while they
-                 stay within "autoCQPlateauTolerance" (default 2.5)
-                 of the reachable maximum on flat curves — a
-                 steep curve only spends autoCQTolerance, so
-                 visible quality is never traded away for a
-                 merely grazed target. Works for H.265 and AV1
-                 (each on its own CQ scale). Needs an FFmpeg build
-                 with the libvmaf filter (the auto-downloaded one
-                 has it). Videos shorter than 30 s skip the
-                 analysis and use the codec's configured CQ as-is.
-                 Auto-CQ is enabled by default (config key autoCQ);
-                 set autoCQ=false there to opt out.
+                 card - NO Nvidia card required (libx265, or
+                 SVT-AV1 when combined with -av1). Everything else
+                 is identical: downscaling, sharpening, audio,
+                 bitrate caps, Auto-CQ and the file names.
+                 It is much slower - roughly 40 minutes per hour of
+                 1080p video on a modern 8-core CPU, clearly more
+                 on older machines. Speed, quality and how many
+                 cores may be used are set with the "cpu..." keys
+                 in the config file; "encoder=cpu" there makes CPU
+                 mode permanent. If no Nvidia card is found at
+                 startup, NVENCForge offers CPU mode by itself
+                 instead of refusing to run.
+                 Tip: on the CPU, AV1 is both faster AND smaller at
+                 equal quality - if your player handles AV1,
+                 "-cpu -av1" is the better deal.
+  -autocq        Find the best quality setting for every file
+                 automatically. This is ON by default - you never
+                 have to type it.
+                 How it works: a few short sample scenes (the
+                 hardest one is always included) are encoded at two
+                 test settings and compared against the original
+                 with VMAF, a measurement of how much visible
+                 quality is left. The setting that should reach the
+                 quality target is then verified by one more real
+                 measurement before the actual encode starts. It
+                 costs a minute or two per file and replaces all
+                 guesswork about "which CQ should I use".
+                 The target is "autoCQTargetVMAF" in the config
+                 file (default 96 of 100 - at that level the
+                 result is indistinguishable in normal viewing).
+                 Sources that were already heavily compressed
+                 cannot reach the target at all. NVENCForge then
+                 measures how far they CAN go and picks the most
+                 economical setting instead of wasting space on a
+                 target that is out of reach. Two config keys
+                 steer how thrifty it may be: "autoCQTolerance"
+                 and "autoCQPlateauTolerance".
+                 Works for H.265 and AV1 alike. Videos shorter
+                 than 30 seconds skip the analysis. Turn it off
+                 with -noautocq, or autoCQ=false in the config.
   -noautocq      Disable Auto-CQ for this run (overrides the
                  autoCQ=true config default).
   -cq NN         Force a fixed CQ for this run only: skips Auto-CQ
@@ -127,6 +152,11 @@ CONVERSION OPTIONS
                  overwritten. Use this if you want both files.
   -shutdown      Shut the PC down 30 s after the batch finishes
                  ("shutdown /a" cancels it).
+  -help          Print the complete option list in the console and
+                 exit. Also works as -h, -?, /? or --help, and can
+                 stand anywhere in the command. Nothing is
+                 downloaded and no graphics card is checked - you
+                 get the list and nothing else.
   Options can be combined, e.g.:  -original -copyaudio -shutdown
   Always list options FIRST, then the files to process.
   -davinci, -split and -join must be the very first argument.
@@ -191,16 +221,37 @@ SUBTITLE CLEANER
   tags, invisible characters and advertising lines are removed.
 
 FFMPEG
-  ffmpeg.exe and ffprobe.exe are used for all processing. If they
-  are missing, NVENCForge downloads them automatically. You may
-  also place them next to NVENCForge.exe.
+  ffmpeg.exe and ffprobe.exe do the actual encoding work.
+  NVENCForge looks for them in this order:
+    1. right next to NVENCForge.exe
+    2. if they are not there: it downloads a tested build by
+       itself (a stable FFmpeg release, roughly 80 MB, once)
+    3. only if that download fails - no internet, for example -
+       it falls back to an FFmpeg from the Windows search path,
+       and tells you that it did
+  NVENCForge deliberately prefers its own copy. Every quality
+  value it works with was measured against a known build, and a
+  different FFmpeg can behave differently - so an unknown one is
+  a last resort, not the first choice.
+  Want to use your own build? Just put ffmpeg.exe and ffprobe.exe
+  next to the exe: a local copy always wins and nothing is
+  downloaded. It needs the "libvmaf" filter for the automatic
+  quality search - the downloaded build always has it.
+  The settings panel shows which one is in use ("own copy" or
+  "from PATH").
 
 CONFIGURATION
-  Encoder defaults live in "NVENCForge_Config.ini" next to the
-  exe (created on first run). Edit it to change CQ, presets,
-  resolution cap, audio bitrate, etc. Invalid values are reported
-  at startup and reset to their default in the file individually;
-  your other settings stay untouched.
+  All settings live in "NVENCForge_Config.ini" next to the exe,
+  created on first run. You do not have to change anything in it.
+  The file has two parts: PART 1 holds the handful of settings
+  people actually change (target resolution, quality target, audio
+  bitrate, what happens to the original, which encoder). PART 2
+  holds the expert settings, which are already set to measured
+  values. Every single entry explains what it does and which
+  values are allowed.
+  Invalid values are reported at startup and reset to their
+  default in the file individually; your other settings and your
+  comments stay untouched.
 
   Two keys steer speed without touching quality:
     "gpuDecode"  decodes on the GPU (NVDEC) instead of the CPU —
@@ -219,10 +270,15 @@ CONFIGURATION
                  value up to 1.0) if you prefer the sharper look.
 
 OUTPUT & REQUIREMENTS
-  Output folder:  output (next to the processed files)
-  System:         Windows 10/11 x64, Nvidia GPU (Maxwell+)
-                  with up-to-date drivers.
-                  (The -davinci, -split and -join modes need no Nvidia GPU.)
+  Output folder:    output (next to the processed files)
+  Originals go to:  originals (next to the processed files)
+  System:           Windows 10/11 x64. For encoding on the graphics
+                    card: an Nvidia GPU (Maxwell or newer) with
+                    up-to-date drivers.
+                    No Nvidia card? Everything still works: -cpu
+                    encodes on the processor, and the -davinci,
+                    -split and -join tools never needed a GPU
+                    in the first place.
 
   Press Ctrl+C during a conversion to stop; the partial result is
   saved as a playable ".preview.mkv" instead of being discarded.
@@ -248,4 +304,105 @@ func syncHelpFile() error {
 		return fmt.Errorf("Help.go: syncHelpFile: %w", err)
 	}
 	return nil
+}
+
+// printFirstRunWelcome greets the user on the very first start — recognised by
+// the config file not existing yet, so it is shown exactly once per install.
+// Its whole job is to defuse the "do I have to set all this up now?" reflex
+// that two unfamiliar files appearing next to the exe otherwise trigger.
+func printFirstRunWelcome() {
+	fmt.Println()
+	fmt.Println("  " + pterm.LightCyan("Welcome!") + " NVENCForge just set itself up next to the exe:")
+	fmt.Println("    " + pterm.LightYellow(fmt.Sprintf("%-24s", helpFileName)) +
+		pterm.Gray("the full manual"))
+	fmt.Println("    " + pterm.LightYellow(fmt.Sprintf("%-24s", "NVENCForge_Config.ini")) +
+		pterm.Gray("every setting, explained line by line"))
+	fmt.Println()
+	fmt.Println("  " + pterm.Gray("You do not have to change either of them. The preset values are the"))
+	fmt.Println("  " + pterm.Gray("ones this tool was tuned with — good for everyday use as they are."))
+	fmt.Println()
+}
+
+// helpFlags are the spellings a user might reach for when looking for the
+// option list. Windows users routinely type "/?", people coming from Unix
+// tools type "--help" — accepting all of them costs nothing and avoids the
+// worst first impression a tool can make: answering "unknown option".
+var helpFlags = []string{"-help", "--help", "-h", "-?", "/?"}
+
+// wantsHelp reports whether any argument asks for the option list. It scans
+// every argument, not just the first: "NVENCForge.exe video.mp4 -help" is a
+// perfectly reasonable thing to type when you are stuck mid-command.
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		for _, flag := range helpFlags {
+			if strings.EqualFold(arg, flag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// printConsoleHelp writes the one-screen option overview that -help shows.
+//
+// It deliberately lists EVERY option: someone typing -help wants the complete
+// picture, not a teaser. What keeps it readable is the one-line-per-option
+// limit — the long explanations live in NVENCForge_Help.txt, which this text
+// points to at the end. The startup box, by contrast, shows only the three
+// options most people ever need.
+func printConsoleHelp() {
+	const flagColumnWidth = 22
+
+	section := func(title string) {
+		fmt.Println()
+		fmt.Println("  " + pterm.LightCyan(title))
+	}
+	// Padding happens BEFORE colouring: pterm wraps the text in ANSI escape
+	// sequences, and those invisible characters would otherwise be counted by
+	// the field width and shift every description sideways.
+	option := func(flags, description string) {
+		fmt.Printf("    %s%s\n",
+			pterm.LightYellow(fmt.Sprintf("%-*s", flagColumnWidth, flags)),
+			description)
+	}
+	plain := func(left, description string) {
+		fmt.Printf("    %s%s\n",
+			pterm.LightWhite(fmt.Sprintf("%-*s", flagColumnWidth, left)),
+			pterm.Gray(description))
+	}
+
+	fmt.Println()
+	fmt.Println("  " + pterm.LightWhite(pterm.Bold.Sprint("NVENCForge v"+appVersion)) +
+		pterm.Gray("  -  H.265 / AV1 batch converter for Nvidia GPUs"))
+
+	section("USAGE")
+	fmt.Println("    " + pterm.LightWhite("NVENCForge.exe [options] [files or folders]"))
+	plain("NVENCForge.exe", "converts every video in the current folder")
+	plain("drag files onto it", "the same thing - nothing to type at all")
+
+	section("OPTIONS")
+	option("-original, -orig", "keep the source resolution (no downscale to 1080p)")
+	option("-copyaudio, -ca", "copy all audio tracks 1:1 (no AAC re-encode)")
+	option("-av1", "encode AV1 instead of H.265 (needs an RTX 40 or newer)")
+	option("-apple", "write an iOS-ready .mp4 for iPhone/iPad instead of .mkv")
+	option("-cpu", "encode on the processor - no Nvidia card needed, slower")
+	option("-cq NN", "force a fixed quality (H.265 1-51, AV1 1-63; lower = better)")
+	option("-noautocq", "switch the automatic quality search off for this run")
+	option("-autocq", "switch it on for this run (it is already on by default)")
+	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
+	option("-keep", "leave the originals exactly where they are")
+	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")
+
+	section("MODES") // must be the first argument - runMode dispatch happens on os.Args[1]
+	option("-davinci <files>", "DaVinci Resolve workflow: split, extract, merge, AAC")
+	option("-split <files>", "lossless split into video, audio and subtitle files")
+	option("-join <files>", "lossless join back into a single .mkv")
+	fmt.Println()
+	fmt.Println(pterm.Gray("    A mode must be the FIRST argument, e.g.:  NVENCForge.exe -split movie.mkv"))
+
+	section("HELP")
+	option("-help, -h, -?, /?", "this list")
+	plain("NVENCForge_Help.txt", "the full manual, written next to the exe")
+	plain("NVENCForge_Config.ini", "all settings, with an explanation per entry")
+	fmt.Println()
 }

@@ -28,7 +28,10 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 ---
 
-### 📑 Contents
+<details>
+<summary><b>📑 Contents</b> — click to expand</summary>
+
+<br>
 
 - [⚡ 30 seconds, no manual](#-30-seconds-no-manual)
 - [✨ What NVENCForge does](#-what-nvencforge-does)
@@ -45,6 +48,8 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🔨 Building from source](#-building-from-source)
 - [📜 License](#-license) · [💬 Feedback](#-feedback--contributions) · [☕ Support](#-support)
 
+</details>
+
 ---
 
 ## ⚡ 30 seconds, no manual
@@ -53,7 +58,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 2. Drag a video (or a whole folder) onto it.
 3. Done. Your video is now H.265, smaller, and the original waits untouched in an `originals` folder next to it.
 
-On first run NVENCForge fetches FFmpeg automatically: no setup, no PATH fiddling, no dependencies.
+On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, no dependencies. It deliberately uses its **own** copy rather than whatever happens to be in your `PATH` — every quality value in this tool was measured against a known build. Want your own instead? Put `ffmpeg.exe` and `ffprobe.exe` next to the EXE; a local copy always wins and nothing is downloaded.
 
 **Some real numbers** from 12 mixed 4K HDR test files on an RTX 5070 Ti, run with `-original -copyaudio` (original 4K resolution kept, audio copied 1:1, so every saved megabyte comes from the video encode alone):
 
@@ -117,6 +122,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | Flag | Effect |
 |---|---|
 | *(none)* | Convert every supported video in the current folder |
+| `-help` / `-h` / `-?` | Print the complete option list in the console and exit — no download, no GPU probe, just the list |
 | `-NNNN` | Max target bitrate in kbps (e.g. `-10000`) |
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
@@ -281,7 +287,9 @@ The silent picture always gets a `.NoSound` suffix, so the original is never ove
 
 ## ⚙️ Configuration
 
-Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched):
+Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; invalid values are reset to their default in the file individually with a warning, all valid settings left untouched).
+
+**You don't have to touch it at all.** The file is split in two: **PART 1** holds the handful of settings people actually change (`maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder`), **PART 2** the expert settings, already set to measured values. Every entry explains what it does and which values are allowed. The full list:
 
 CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
 

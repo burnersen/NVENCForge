@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.8.0"
+const appVersion = "1.9.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -58,6 +58,16 @@ const appVersion = "1.8.0"
 var (
 	ffmpegPath  string
 	ffprobePath string
+	// ffmpegSource hält fest, WOHER die benutzten FFmpeg-Programme stammen, und
+	// wird in der Einstellungs-Box mit angezeigt. Ohne diese Angabe ist von
+	// außen nicht erkennbar, ob gerade der geprüfte Build oder ein fremder aus
+	// dem Suchpfad rechnet — ein Unterschied, der die Qualitätsmessung betrifft.
+	ffmpegSource string
+)
+
+const (
+	ffmpegSourceLocal = "own copy"
+	ffmpegSourcePath  = "from PATH"
 )
 
 // errFFmpegStall is the sentinel reported by the stall-watchdog via
@@ -412,36 +422,57 @@ func initTools() error {
 	}
 	exeDir := filepath.Dir(exePath)
 
-	resolve := func(name string) (string, bool) {
+	// Nur direkt neben der exe suchen — das ist die Kopie, die NVENCForge
+	// mitbringt oder selbst geladen hat, und die einzige, deren Fähigkeiten
+	// bekannt sind.
+	resolveLocal := func(name string) (string, bool) {
 		local := filepath.Join(exeDir, name)
 		if info, statErr := os.Stat(local); statErr == nil && !info.IsDir() {
 			return local, true
 		}
-		if p, lookErr := exec.LookPath(name); lookErr == nil {
-			return p, true
-		}
 		return "", false
 	}
 
-	fp, okF := resolve("ffmpeg.exe")
-	pp, okP := resolve("ffprobe.exe")
-
-	if !okF || !okP {
-		pInfo.Println("FFmpeg not found locally or in PATH. Attempting auto-download...")
-		if dlErr := downloadFFmpeg(exeDir); dlErr != nil {
-			return fmt.Errorf("main.go: initTools: auto-download failed: %w", dlErr)
-		}
-		// Re-resolve after download.
-		fp, okF = resolve("ffmpeg.exe")
-		pp, okP = resolve("ffprobe.exe")
-		if !okF || !okP {
-			return errors.New("main.go: initTools: ffmpeg.exe / ffprobe.exe still missing after download")
+	if fp, okF := resolveLocal("ffmpeg.exe"); okF {
+		if pp, okP := resolveLocal("ffprobe.exe"); okP {
+			ffmpegPath, ffprobePath, ffmpegSource = fp, pp, ffmpegSourceLocal
+			return nil
 		}
 	}
 
-	ffmpegPath = fp
-	ffprobePath = pp
-	return nil
+	// Kein eigenes FFmpeg da: den geprüften Build holen, statt einfach das
+	// nächstbeste aus dem Suchpfad zu nehmen. Bis 1.9.0 gewann der Suchpfad
+	// vor dem Download — dann lief NVENCForge mit einem beliebigen fremden
+	// Build, und da sämtliche CQ- und VMAF-Werte des Programms an einem
+	// bekannten Encoder ausgemessen wurden, sind sie mit einem fremden nicht
+	// mehr belastbar.
+	pInfo.Println("No FFmpeg next to NVENCForge.exe — downloading the tested build...")
+	dlErr := downloadFFmpeg(exeDir)
+	if dlErr == nil {
+		fp, okF := resolveLocal("ffmpeg.exe")
+		pp, okP := resolveLocal("ffprobe.exe")
+		if okF && okP {
+			ffmpegPath, ffprobePath, ffmpegSource = fp, pp, ffmpegSourceLocal
+			return nil
+		}
+		dlErr = errors.New("ffmpeg.exe / ffprobe.exe still missing after download")
+	}
+
+	// Notnagel: ohne Internet (oder wenn GitHub gerade nicht erreichbar ist)
+	// ist ein fremdes FFmpeg immer noch besser als ein Programm, das gar nicht
+	// startet. Der Nutzer erfährt aber ausdrücklich, was gerade passiert.
+	fp, errF := exec.LookPath("ffmpeg.exe")
+	pp, errP := exec.LookPath("ffprobe.exe")
+	if errF == nil && errP == nil {
+		pWarn.Printf("Download failed: %v\n", dlErr)
+		pWarn.Println("Using the FFmpeg found in your PATH instead. It works, but its build is")
+		pWarn.Println("unknown — quality measurements can differ from the tested one. To fix")
+		pWarn.Println("this, put ffmpeg.exe and ffprobe.exe next to NVENCForge.exe.")
+		ffmpegPath, ffprobePath, ffmpegSource = fp, pp, ffmpegSourcePath
+		return nil
+	}
+
+	return fmt.Errorf("main.go: initTools: auto-download failed: %w", dlErr)
 }
 
 // ----------------------------------------------------------------------------
@@ -773,7 +804,10 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		if strings.EqualFold(arg, "-keep") {
 			cfg.keepSource = true
-			pInfo.Println("Keep-source mode enabled: originals are NOT moved to the recycle bin.")
+			// Seit 1.8.0 wandern Originale in den Unterordner "originals", nicht
+			// mehr in den Papierkorb — die Meldung sprach bis 1.9.0 noch vom
+			// Papierkorb und beschrieb damit einen Zustand, den es nicht mehr gibt.
+			pInfo.Println("Keep-source mode enabled: originals stay exactly where they are.")
 			continue
 		}
 		if strings.EqualFold(arg, "-autocq") {
@@ -821,7 +855,11 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 					pWarn.Printf("'%s' must be the FIRST argument — ignored here.\n", strings.ToLower(arg))
 					pWarn.Printf("Example: NVENCForge.exe %s file.mkv\n", strings.ToLower(arg))
 				} else {
-					pWarn.Printf("Unknown option %q ignored. Available: -NNNN, -cq, -orig/-original, -copyaudio/-ca, -av1, -apple, -cpu, -autocq, -noautocq, -keep, -shutdown, -davinci, -split, -join\n", arg)
+					// Pointing at -help beats reciting fourteen flags: the list
+					// was too long to scan for the one that was meant, and it
+					// dated silently every time an option was added.
+					pWarn.Printf("Unknown option %q — ignored.\n", arg)
+					pWarn.Println("Run \"NVENCForge.exe -help\" to see every available option.")
 				}
 				continue
 			}
@@ -1065,7 +1103,7 @@ func printActiveSettings(cfg *AppConfig) {
 
 	bitrate := s.maxBitrate1080p
 	bitrateActive := false
-	resValue := fmt.Sprintf("%d p", s.maxResolution)
+	resValue := fmt.Sprintf("max %dp", s.maxResolution)
 	resActive := false
 	autoShutdown := s.autoShutdown
 	if cfg != nil {
@@ -1074,17 +1112,10 @@ func printActiveSettings(cfg *AppConfig) {
 			bitrateActive = true
 		}
 		if cfg.keepOriginal {
-			resValue = "original"
+			resValue = "original (no downscale)"
 			resActive = true
 		}
 		autoShutdown = cfg.autoShutdown
-	}
-
-	shutdownVal := "off"
-	shutdownColor := "gray"
-	if autoShutdown {
-		shutdownVal = "on"
-		shutdownColor = "yellow"
 	}
 
 	// -copyaudio switches the whole audio pipeline to 1:1 copy; the AAC
@@ -1102,13 +1133,11 @@ func printActiveSettings(cfg *AppConfig) {
 	codecActive := false
 	cqVal := s.targetCQ
 	bfVal := fmt.Sprintf("%d", s.bFrames)
-	bfColor := "cyan"
 	if cfg != nil && cfg.av1 {
 		videoCodec = "AV1"
 		codecActive = true
 		cqVal = s.av1TargetCQ
 		bfVal = "n/a (AV1)"
-		bfColor = "gray"
 	}
 	// -apple keeps H.265 but repackages the result as an iOS-ready MP4 (hvc1).
 	if cfg != nil && cfg.apple {
@@ -1126,20 +1155,41 @@ func printActiveSettings(cfg *AppConfig) {
 	// -autocq replaces the fixed CQ with a per-file VMAF search; showing the
 	// static number would be misleading then. A manual -cq wins over both.
 	// Auto-CQ and -cq now apply to AV1 too, so this display simply layers over
-	// the AV1 branch above — both paths set the same cqDisplay/cqColor.
-	cqDisplay := fmt.Sprintf("%d", cqVal)
-	cqColor := "cyan"
+	// the AV1 branch above. The wording avoids "CQ" wherever it can: the number
+	// means nothing to most users, while "measured per file" states exactly
+	// what the tool is about to do. The numeric target moved to the detail line.
+	qualityText := fmt.Sprintf("fixed CQ %d", cqVal)
+	qualityColor := "cyan"
 	switch {
 	case cfg != nil && cfg.forcedCQ > 0:
-		cqDisplay = fmt.Sprintf("%d (forced)", cfg.forcedCQ)
-		cqColor = "yellow"
+		qualityText = fmt.Sprintf("fixed CQ %d (-cq)", cfg.forcedCQ)
+		qualityColor = "yellow"
 	case cfg != nil && cfg.autoCQ:
-		cqDisplay = fmt.Sprintf("auto (VMAF %.4g)", s.autoCQTargetVMAF)
-		if s.autoCQTolerance > 0 {
-			cqDisplay = fmt.Sprintf("auto (VMAF %.4g -%.4g)",
-				s.autoCQTargetVMAF, s.autoCQTolerance)
-		}
-		cqColor = "yellow"
+		qualityText = "measured per file"
+		qualityColor = "yellow"
+	}
+
+	// Where the original ends up is the question users care about most ("where
+	// did my file go?") and it was missing from this panel entirely until 1.9.0.
+	// -keep beats the configured mode, so it is checked first.
+	originalsText, originalsActive := "moved to \""+originalsFolderName+"\" folder", false
+	switch {
+	case cfg != nil && cfg.keepSource:
+		originalsText, originalsActive = "left exactly where they are", true
+	case s.retireMode == retireModeRecycleBin:
+		originalsText = "moved to the recycle bin"
+	}
+
+	// Entpacken: zeigt an, ob die Grafikkarte mithilft und ab welcher Bitrate
+	// sicherheitshalber wieder der Prozessor übernimmt. Im CPU-Modus gibt es
+	// keine Grafikkarte im Spiel, dann ist die Zeile schlicht "CPU".
+	decodeVal := "CPU"
+	if s.gpuDecode && !cpuModeActive {
+		decodeVal = fmt.Sprintf("GPU (< %d Mbit)", s.gpuDecodeMaxMbit)
+	}
+	casVal := fmt.Sprintf("%.2f", s.casStrength)
+	if s.casStrength <= 0 {
+		casVal = "off"
 	}
 
 	type entry struct {
@@ -1148,13 +1198,40 @@ func printActiveSettings(cfg *AppConfig) {
 		color  string
 		active bool
 	}
+
+	// Zwei Ebenen statt eines gleichrangigen 13-Felder-Rasters: oben steht, was
+	// mit DIESEM Video passiert, darunter gedämpft die Regler dahinter. Die
+	// alte Tabelle stellte "NVENC lookahead" gleichberechtigt neben "Codec" —
+	// technisch vollständig, aber für Einsteiger eine Wand aus Fachbegriffen.
+	primary := []entry{
+		{"Codec", videoCodec, "cyan", codecActive},
+		{"Quality", qualityText, qualityColor, false},
+		{"Resolution", resValue, "cyan", resActive},
+		{"Audio", audioMode, "cyan", audioModeActive},
+		{"Originals", originalsText, "cyan", originalsActive},
+	}
+	// Ein von Hand gesetzter Deckel (-NNNN) gehört nach oben: der Nutzer hat ihn
+	// bewusst mitgegeben und will ihn bestätigt sehen. Der Standardwert bleibt
+	// unten bei den Details stehen.
+	if bitrateActive {
+		primary = append(primary,
+			entry{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", true})
+	}
+	if autoShutdown {
+		// Nur wenn eingeschaltet, dafür dann prominent: dass sich der PC gleich
+		// von selbst abschaltet, darf niemanden überraschen. Ein "off" in der
+		// Liste wäre dagegen reines Rauschen.
+		primary = append(primary,
+			entry{"Auto-shutdown", "PC turns off when finished", "yellow", true})
+	}
+
 	// Die encoder-eigenen Regler unterscheiden sich je Backend: NVENC-Preset,
 	// Lookahead und B-Frames haben im CPU-Modus keinerlei Wirkung, dort zählen
 	// stattdessen das x265-/SVT-Preset und die Thread-Grenze.
-	encoderRows := []entry{
-		{"NVENC preset", s.nvencPreset, "cyan", false},
-		{"NVENC lookahead", fmt.Sprintf("%d fr", s.nvencLookahead), "cyan", false},
-		{"B-frames", bfVal, bfColor, false},
+	encoderDetails := []string{
+		"NVENC preset " + s.nvencPreset,
+		fmt.Sprintf("lookahead %d fr", s.nvencLookahead),
+		"B-frames " + bfVal,
 	}
 	if cpuModeActive {
 		presetVal := s.cpuPreset + " (libx265)"
@@ -1165,38 +1242,30 @@ func printActiveSettings(cfg *AppConfig) {
 		if s.cpuThreads > 0 {
 			threadsVal = fmt.Sprintf("%d threads", s.cpuThreads)
 		}
-		encoderRows = []entry{
-			{"CPU preset", presetVal, "cyan", false},
-			{"CPU threads", threadsVal, "cyan", s.cpuThreads > 0},
-		}
+		encoderDetails = []string{"CPU preset " + presetVal, "threads " + threadsVal}
 	}
 
-	entries := []entry{
-		{"Video codec", videoCodec, "cyan", codecActive},
-		{"Target CQ", cqDisplay, cqColor, codecActive},
-		{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", bitrateActive},
-		{"Resolution", resValue, "cyan", resActive},
+	var details []string
+	if !bitrateActive {
+		details = append(details, fmt.Sprintf("max bitrate %d k", bitrate))
 	}
-	entries = append(entries, encoderRows...)
-	// Entpacken: zeigt an, ob die Grafikkarte mithilft und ab welcher Bitrate
-	// sicherheitshalber wieder der Prozessor übernimmt. Im CPU-Modus gibt es
-	// keine Grafikkarte im Spiel, dann ist die Zeile schlicht "CPU".
-	decodeVal, decodeColor := "CPU", "gray"
-	if s.gpuDecode && !cpuModeActive {
-		decodeVal, decodeColor = fmt.Sprintf("GPU (< %d Mbit)", s.gpuDecodeMaxMbit), "cyan"
+	if cfg != nil && cfg.autoCQ {
+		target := fmt.Sprintf("quality target VMAF %.4g", s.autoCQTargetVMAF)
+		if s.autoCQTolerance > 0 {
+			target = fmt.Sprintf("quality target VMAF %.4g -%.4g",
+				s.autoCQTargetVMAF, s.autoCQTolerance)
+		}
+		details = append(details, target)
 	}
-	casVal, casColor := fmt.Sprintf("%.2f", s.casStrength), "cyan"
-	if s.casStrength <= 0 {
-		casVal, casColor = "off", "gray"
+	details = append(details, encoderDetails...)
+	details = append(details,
+		"decoding "+decodeVal,
+		"sharpening "+casVal,
+		fmt.Sprintf("audio %d k per channel", s.audioKbpsPerChannel),
+		fmt.Sprintf("audio fallback %d k", s.fallbackAudioBitrate))
+	if ffmpegSource != "" {
+		details = append(details, "ffmpeg "+ffmpegSource)
 	}
-	entries = append(entries, []entry{
-		{"Decoding", decodeVal, decodeColor, false},
-		{"CAS sharpening", casVal, casColor, false},
-		{"Audio/channel", fmt.Sprintf("%d k", s.audioKbpsPerChannel), "cyan", false},
-		{"Audio fallback", fmt.Sprintf("%d k", s.fallbackAudioBitrate), "cyan", false},
-		{"Audio mode", audioMode, "cyan", audioModeActive},
-		{"Auto-shutdown", shutdownVal, shutdownColor, false},
-	}...)
 
 	colorize := func(val, color string) string {
 		switch color {
@@ -1209,39 +1278,73 @@ func printActiveSettings(cfg *AppConfig) {
 		}
 	}
 
-	const cols = 3
-
-	// Column widths derive from the actual cell contents (longest cell per
-	// column + fixed gap), so the grid stays aligned for every flag
-	// combination — "(active)" suffixes previously pushed columns sideways.
-	valTexts := make([]string, len(entries))
-	visLens := make([]int, len(entries))
-	var colWidth [cols]int
-	for i, e := range entries {
-		valTexts[i] = e.value
+	// Die sichtbare Länge muss getrennt mitgeführt werden: pterm packt die
+	// Farben in ANSI-Steuerzeichen, und die zählt jede Breitenrechnung sonst
+	// mit — genau daran verrutschte die alte Tabelle bei "(active)".
+	renderCell := func(e entry) (text string, visibleLen int) {
+		val := e.value
+		color := e.color
 		if e.active {
-			valTexts[i] = e.value + " (active)"
+			val += " (active)"
+			color = "yellow"
 		}
-		visLens[i] = len(e.label) + 2 + len(valTexts[i])
-		if c := i % cols; visLens[i] > colWidth[c] {
-			colWidth[c] = visLens[i]
+		return pterm.LightWhite(e.label+": ") + colorize(val, color),
+			len(e.label) + 2 + len(val)
+	}
+
+	// Spaltenbreite aus dem längsten Eintrag der linken Spalte statt fest
+	// vorgegeben: Werte wie "Originals: left exactly where they are (active)"
+	// sprengen jede feste Breite, und die rechte Spalte stünde dann je Zeile
+	// woanders.
+	const columnGap = 3
+	columnWidth := 0
+	for i := 0; i < len(primary); i += 2 {
+		if _, width := renderCell(primary[i]); width > columnWidth {
+			columnWidth = width
 		}
 	}
-	for i, e := range entries {
-		valColor := e.color
-		if e.active {
-			valColor = "yellow"
+	for i := 0; i < len(primary); i += 2 {
+		left, leftLen := renderCell(primary[i])
+		if i+1 >= len(primary) {
+			fmt.Printf("  %s\n", left)
+			break
 		}
-		cell := fmt.Sprintf("%s: %s", pterm.LightWhite(e.label), colorize(valTexts[i], valColor))
-		if i == len(entries)-1 || (i+1)%cols == 0 {
-			fmt.Printf("  %s\n", cell)
-		} else {
-			fmt.Printf("  %s%*s", cell, colWidth[i%cols]-visLens[i]+3, "")
+		right, _ := renderCell(primary[i+1])
+		fmt.Printf("  %s%*s%s\n", left, columnWidth-leftLen+columnGap, "", right)
+	}
+
+	// Umbruch nach sichtbarer Breite statt nach fester Anzahl: die Detailteile
+	// sind je nach Modus unterschiedlich lang (CPU- gegen NVENC-Regler), eine
+	// feste Spaltenzahl würde je nach Lauf ausfransen.
+	const detailLineWidth = 72
+	var detailLines []string
+	current := ""
+	for _, part := range details {
+		switch {
+		case current == "":
+			current = part
+		case len(current)+3+len(part) <= detailLineWidth:
+			current += " · " + part
+		default:
+			detailLines = append(detailLines, current)
+			current = part
 		}
+	}
+	if current != "" {
+		detailLines = append(detailLines, current)
 	}
 
 	fmt.Println()
-	fmt.Println(pterm.Gray("  Hint: To change any of these parameters, please edit 'NVENCForge_Config.ini'."))
+	for i, line := range detailLines {
+		prefix := "  " + pterm.Gray("Details:  ")
+		if i > 0 {
+			prefix = "            " // bündig unter dem ersten Detail-Eintrag
+		}
+		fmt.Println(prefix + pterm.Gray(line))
+	}
+
+	fmt.Println()
+	fmt.Println(pterm.Gray("  Every setting and what it does:  NVENCForge_Config.ini  ·  Options:  -help"))
 	fmt.Println()
 }
 
@@ -1391,6 +1494,17 @@ func main() {
 	setupConsoleCtrlHandler(cancel)
 	enableAnsiConsole()
 
+	// -help is answered here and nowhere later: initTools() below would first
+	// download ~80 MB of FFmpeg, and nobody asking for an option list expects a
+	// download. The GPU probe is skipped for the same reason — the option list
+	// is identical with or without a graphics card. syncHelpFile() has already
+	// run above, so the manual this text points to really is on disk.
+	if wantsHelp(os.Args[1:]) {
+		printConsoleHelp()
+		waitForEnter()
+		return
+	}
+
 	fmt.Println()
 	pterm.DefaultHeader.
 		WithFullWidth().
@@ -1399,41 +1513,29 @@ func main() {
 		Println("NVENCForge v" + appVersion + " — H265 NVENC Converter")
 	fmt.Println()
 
-	tipps := pterm.LightYellow("• NVENCForge.exe -10000 video.mp4 ") +
-		pterm.Gray("   >>  ") + "Set max bitrate to 10000k\n" +
-		pterm.LightYellow("• NVENCForge.exe -original <files>") +
-		pterm.Gray("   >>  ") + "Keep original resolution (no downscale)\n" +
-		pterm.LightYellow("• NVENCForge.exe -copyaudio <files>") +
-		pterm.Gray("  >>  ") + "Copy audio 1:1 (no AAC re-encode)\n" +
-		pterm.LightYellow("• NVENCForge.exe -av1 <files>      ") +
-		pterm.Gray("  >>  ") + "Encode AV1 instead of H.265 (RTX 40+)\n" +
-		pterm.LightYellow("• NVENCForge.exe -apple <files>   ") +
-		pterm.Gray("   >>  ") + "iOS-ready MP4 for iPhone (H.265/hvc1)\n" +
-		pterm.LightYellow("• NVENCForge.exe -cpu <files>     ") +
-		pterm.Gray("   >>  ") + "Encode on the CPU (no Nvidia card, slower)\n" +
-		pterm.LightYellow("• NVENCForge.exe -autocq <files>  ") +
-		pterm.Gray("   >>  ") + "Auto-pick CQ per file (VMAF target)\n" +
-		pterm.LightYellow("• NVENCForge.exe -noautocq <files>") +
-		pterm.Gray("   >>  ") + "Skip Auto-CQ for this run\n" +
-		pterm.LightYellow("• NVENCForge.exe -cq 28 <files>   ") +
-		pterm.Gray("   >>  ") + "Force fixed CQ for this run (no Auto-CQ)\n" +
-		pterm.LightYellow("• NVENCForge.exe -keep <files>    ") +
-		pterm.Gray("   >>  ") + "Keep originals (don't move to recycle bin)\n" +
-		pterm.LightYellow("• NVENCForge.exe -shutdown        ") +
-		pterm.Gray("   >>  ") + "Shut down PC when finished\n" +
-		pterm.LightYellow("• NVENCForge.exe -davinci <files> ") +
-		pterm.Gray("   >>  ") + "DaVinci Resolve workflow (Audio/Subs/Split/Merge)\n" +
-		pterm.LightYellow("• NVENCForge.exe -split <files>   ") +
-		pterm.Gray("   >>  ") + "Lossless split (1:1, no re-encode)\n" +
-		pterm.LightYellow("• NVENCForge.exe -join <files>    ") +
-		pterm.Gray("   >>  ") + "Lossless join back into one MKV\n\n" +
-		pterm.Gray("  (tips can be combined: -original -copyaudio -shutdown)")
+	// The startup box answers exactly one question: "what do I have to do?".
+	// For this tool the honest answer is "nothing at all", so that sentence
+	// comes first and stands alone. Listing all fourteen options here (as every
+	// build up to 1.8.0 did) made a program that needs no options whatsoever
+	// look like it demands studying a manual first — the single most common
+	// reason newcomers bounce off a command-line tool. The full list is one
+	// keystroke away via -help.
+	quickStart := pterm.LightWhite("Just drag video files or a folder onto NVENCForge.exe.") + "\n" +
+		pterm.Gray("Nothing else is needed — the best quality setting is measured") + "\n" +
+		pterm.Gray("automatically, separately for every single file.") + "\n\n" +
+		pterm.LightCyan("Most used options:") + "\n" +
+		pterm.LightYellow("  -original   ") + "keep the resolution (no downscale to 1080p)\n" +
+		pterm.LightYellow("  -copyaudio  ") + "leave the audio untouched\n" +
+		pterm.LightYellow("  -av1        ") + "AV1 instead of H.265 — smaller, needs RTX 40+\n\n" +
+		pterm.LightCyan("Other tools:  ") +
+		pterm.LightYellow("-davinci   -split   -join") + "\n\n" +
+		pterm.Gray("Every option explained:  ") + pterm.LightYellow("NVENCForge.exe -help")
 
 	pterm.DefaultBox.
-		WithTitle(pterm.LightCyan("  Quick-Start Tips  ")).
+		WithTitle(pterm.LightCyan("  Quick Start  ")).
 		WithTitleTopCenter().
 		WithBoxStyle(pterm.NewStyle(pterm.FgGray)).
-		Println(tipps)
+		Println(quickStart)
 	fmt.Println()
 
 	if err := initTools(); err != nil {

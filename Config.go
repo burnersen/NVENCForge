@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-
-	"github.com/pterm/pterm"
 )
 
 // ----------------------------------------------------------------------------
@@ -174,7 +172,12 @@ func loadOrCreateAppConfig() {
 
 	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 		if werr := writeDefaultAppConfig(path); werr == nil {
-			fmt.Println(pterm.Gray("  · Configuration created: " + filepath.Base(path)))
+			// A missing config means this is the very first start: the moment to
+			// explain the two files that just appeared out of nowhere, and to
+			// say plainly that nothing has to be configured. The bare
+			// "Configuration created" line this replaces left newcomers
+			// wondering what they were now supposed to fill in.
+			printFirstRunWelcome()
 		}
 		return
 	}
@@ -532,225 +535,230 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 }
 
 // writeDefaultAppConfig schreibt die komplette, kommentierte Standard-INI.
+// configLineEnding: die INI wird von Windows-Nutzern mit Notepad geöffnet, das
+// bei reinen LF-Umbrüchen früher alles in eine Zeile quetschte. CRLF ist hier
+// also kein Formalismus, sondern Lesbarkeit auf dem Zielsystem.
+const configLineEnding = "\r\n"
+
+// writeDefaultAppConfig legt die Konfigurationsdatei im Auslieferungszustand an.
+//
+// Aufbau in zwei Teilen: oben die Handvoll Werte, die Nutzer wirklich ändern
+// wollen, darunter die Experten-Regler. Vorher standen alle 28 Schlüssel
+// gleichrangig untereinander, was die Datei wie eine Aufgabenliste wirken ließ,
+// obwohl kein einziger Wert angefasst werden muss.
+//
+// Jeder Eintrag entsteht über configEntry, damit Schlüssel, Wert, erlaubter
+// Bereich und Erklärung im Quelltext beieinanderstehen. Die frühere Fassung war
+// eine einzige fmt.Sprintf-Vorlage mit 40 positionsgebundenen Platzhaltern und
+// einer separaten Argumentliste — ein eingeschobener Eintrag hätte dort alle
+// folgenden Werte lautlos in die falschen Schlüssel geschrieben, und weil die
+// Typen gleich sind, hätte weder der Compiler noch go vet etwas gemerkt.
 func writeDefaultAppConfig(path string) error {
 	d := defaultAppSettings()
-	content := fmt.Sprintf(`# NVENCForge Configuration
-# =====================================================================
-# This file controls the encoder parameters. Invalid values are reported
-# at startup and reset to their default right here in the file (only the
-# affected lines); all valid settings and comments stay untouched.
-# Lines starting with # are comments. Format:  key=value
+	var b strings.Builder
 
-# Constant Quality (CQ). Lower = better quality, larger file.
-# Allowed: 1 to 51.  Default: 26
-targetCQ=%d
+	line := func(text string) {
+		b.WriteString(text + configLineEnding)
+	}
+	heading := func(title string) {
+		line("")
+		line("# =====================================================================")
+		for _, part := range strings.Split(title, "\n") {
+			line("#  " + part)
+		}
+		line("# =====================================================================")
+		line("")
+	}
+	group := func(title string) {
+		line("# --- " + title + " ---")
+		line("")
+	}
+	// configEntry schreibt Erklärung, erlaubten Bereich und den Schlüssel selbst.
+	// Der erlaubte Bereich ist Pflichtangabe, damit keine Einstellung ohne die
+	// Frage "was darf ich hier eintragen?" beantwortet zurückbleibt.
+	configEntry := func(key string, value any, allowed, comment string) {
+		for _, part := range strings.Split(strings.TrimSpace(comment), "\n") {
+			line("# " + part)
+		}
+		text := fmt.Sprint(value)
+		line(fmt.Sprintf("# Allowed: %s   |   Default: %s", allowed, text))
+		line(key + "=" + text)
+		line("")
+	}
 
-# Maximum target bitrate (kbit/s) in standard mode.
-# Allowed: greater than 1000.  Default: 8000
-maxBitrate1080p=%d
+	line("# NVENCForge Configuration")
+	line("# =====================================================================")
+	line("# You do NOT have to change anything in here. Every value below is a")
+	line("# tested default - NVENCForge works out of the box exactly as it is.")
+	line("#")
+	line("# Format:  key=value      Lines starting with # are comments.")
+	line("# If a value is invalid, NVENCForge says so at startup and resets THAT")
+	line("# line to its default. Your other settings and comments stay untouched.")
 
-# Maximum target bitrate (kbit/s) in -original mode.
-# Allowed: greater than 1000.  Default: 22000
-maxBitrateOriginal=%d
+	heading("PART 1  -  the handful of settings people actually change")
 
-# Target resolution (short edge) in standard mode. Larger material is
-# downscaled. Allowed: 720, 1080, 1440, 2160.  Default: 1080
-maxResolution=%d
+	configEntry("maxResolution", d.maxResolution, "720, 1080, 1440, 2160",
+		`Videos larger than this are scaled down (short edge, in pixels).
+1080 is Full HD. Set 2160 to keep 4K material at 4K.
+The -original option ignores this for a single run.`)
 
-# NVENC encoder preset. p1=fastest, p7=best quality (slower).
-# Allowed: p1, p2, p3, p4, p5, p6, p7.  Default: p5
-nvencPreset=%s
+	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
+		`How much visible quality the automatic search aims for, on a scale
+where 100 is identical to the source. 96 is indistinguishable in
+normal viewing; 97 holds up even in a direct side-by-side
+comparison; below 94 you start to see it. Higher = bigger files.`)
 
-# Lookahead frames. On VRAM errors with older GPUs lower to 16 or 8.
-# Allowed: 0 to 32.  Default: 32
-nvencLookahead=%d
+	configEntry("audioKbpsPerChannel", d.audioKbpsPerChannel, "more than 32",
+		`Audio quality when a track has to be re-encoded to AAC, per channel.
+96 is roughly CD quality for stereo (2 x 96 = 192 kbit/s).
+Tracks that are already fine are copied untouched either way.`)
 
-# Number of B-frames. Older GPUs may support fewer.
-# Allowed: 0 to 4.  Default: 4
-bFrames=%d
+	configEntry("retireMode", d.retireMode, "folder, recyclebin",
+		`What happens to the original after a successful conversion.
+"folder" moves it into an "originals" subfolder next to the source.
+That is instant even for a 60 GB file, and Windows never touches it -
+your originals wait there until YOU delete them.
+"recyclebin" is the old behaviour and is NOT safer: Windows empties
+the recycle bin on its own when a drive runs low on space, which is
+how originals used to vanish unnoticed.
+The -keep option always wins and leaves the original where it is.`)
 
-# Sharpening after downscale (CAS). 0.0=off, 1.0=maximum.
-# Allowed: 0.0 to 1.0.  Default: 0.4
-casStrength=%s
+	configEntry("encoder", d.encoder, "nvidia, cpu",
+		`Which encoder to use. "nvidia" uses the graphics card (fast).
+"cpu" uses the processor instead - runs on any machine, but takes
+roughly 40 minutes per hour of 1080p video. The -cpu option switches
+a single run over. Without an Nvidia card, NVENCForge offers CPU
+mode by itself at startup.`)
 
-# AAC bitrate per audio channel (kbit/s) on re-encoding.
-# Allowed: greater than 32.  Default: 96
-audioKbpsPerChannel=%d
+	heading("PART 2  -  expert settings\nThese are measured, well-tested values. You can safely ignore\nthis entire section - it is here for people who want to tinker.")
 
-# Minimum/fallback audio bitrate (kbit/s) for AAC.
-# Allowed: 128 to 640.  Default: 128
-fallbackAudioBitrate=%d
+	group("Quality and bitrate")
 
-# Shut down the PC automatically when finished.
-# Allowed: true, false.  Default: false
-autoShutdown=%t
+	configEntry("targetCQ", d.targetCQ, "1 to 51",
+		`Fixed quality value for H.265, used only when the automatic search
+is off (-noautocq). Lower = better quality and bigger files.`)
 
-# Extra characters that survive file name cleaning (besides letters,
-# digits and dots). Spaces always become dots; multiple dots are always
-# collapsed. Windows-forbidden characters (\ / : * ? " < > |) are ignored.
-# Example: extraFilenameChars=-_'    Default: (empty)
-extraFilenameChars=%s
+	configEntry("maxBitrate1080p", d.maxBitrate1080p, "more than 1000",
+		`Upper bitrate limit in kbit/s for normal (downscaled) mode.
+A ceiling, not a target: most files stay well below it.`)
 
-# --- AV1 mode (-av1, opt-in; requires RTX 40 series or newer) ---
+	configEntry("maxBitrateOriginal", d.maxBitrateOriginal, "more than 1000",
+		`Upper bitrate limit in kbit/s when -original is used. Higher,
+because 4K material needs more bitrate than 1080p.`)
 
-# Constant Quality for AV1 (scale 1-63, NOT comparable to targetCQ!).
-# Fixed CQ for manual AV1 mode (Auto-CQ off / -noautocq). Measured 2026-07-06:
-# CQ 32 is about VMAF 94 - a lean setting, NOT equal to H.265 CQ 26 (which sits
-# ~2-3 VMAF points higher). With Auto-CQ on (the default) a per-file value is
-# measured, and an unmeasurable clip falls back to a built-in CQ near the target,
-# not to this value. Lower = better quality, larger file.  Default: %d
-av1TargetCQ=%d
+	configEntry("casStrength", d.casStrength, "0.0 to 1.0",
+		`Sharpening applied after downscaling. 0.4 is a light touch,
+1.0 is the maximum, 0.0 switches it off entirely.
+Switching it off also makes 4K conversions noticeably faster -
+it is the single most expensive filter step. The picture just
+gets a little softer.`)
 
-# Maximum AV1 target bitrate (kbit/s) in standard mode.
-# AV1 needs ~25-30%% less bitrate than H.265 for equal quality.
-# Allowed: greater than 1000.  Default: %d
-av1MaxBitrate1080p=%d
+	configEntry("fallbackAudioBitrate", d.fallbackAudioBitrate, "128 to 640",
+		`Lower limit in kbit/s for re-encoded AAC audio. Without this floor a
+mono or low-channel track would end up with far too little bitrate.`)
 
-# Maximum AV1 target bitrate (kbit/s) in -original mode.
-# Allowed: greater than 1000.  Default: %d
-av1MaxBitrateOriginal=%d
+	group("Automatic quality search (Auto-CQ)")
 
-# --- Auto-CQ mode (-autocq, on by default; H.265 and AV1) ---
+	configEntry("autoCQ", d.autoCQ, "true, false",
+		`Measure the best quality setting for every file. This is what
+makes NVENCForge more than a preset - leave it on.
+-noautocq switches it off for a single run.`)
 
-# Run Auto-CQ by default, as if -autocq were passed on every start.
-# -noautocq disables it for a single run. Works for H.265 and AV1 alike, each
-# on its own CQ scale. If Auto-CQ cannot run, H.265 falls back to targetCQ; AV1
-# falls back to a built-in CQ near the target (NOT av1TargetCQ, which is lean).
-# Allowed: true, false.  Default: %t
-autoCQ=%t
+	configEntry("autoCQTolerance", d.autoCQTolerance, "0 to 5",
+		`How far below the quality target the search may land when that
+saves a real amount of file size. Differences up to about 0.5 are
+invisible. 0 chases the target exactly and produces bigger files.`)
 
-# VMAF quality target for -autocq. Sample windows of each file (placed on
-# the source's bitrate profile, hardest scene always included) are encoded
-# at two anchor CQ values (per codec), measured with VMAF against the source,
-# and the CQ expected to hit this target is verified by one extra measurement
-# before the real encode. 97 stays visually transparent even in direct
-# comparison; 96 is indistinguishable in normal viewing at a noticeably
-# smaller file; lower = smaller files.
-# Allowed: 70 to 99.  Default: %s
-autoCQTargetVMAF=%s
+	configEntry("autoCQPlateauTolerance", d.autoCQPlateauTolerance, "0 to 10",
+		`Extra savings allowance for sources that were already heavily
+compressed (streaming rips, for example). Their quality tops out
+below the target no matter what, so chasing it only wastes space.
+Every candidate is verified by a real measurement, never estimated.
+0 restores the old, more cautious behaviour.`)
 
-# How far below autoCQTargetVMAF the Auto-CQ pick may land when that saves
-# CQ steps (smaller files). The search aims at (target - tolerance) and
-# accepts it as a hit; on pre-compressed sources whose quality tops out
-# below the target, the same margin applies under the reachable maximum,
-# and flat plateaus are additionally probed above CQ 30 (up to 34) for
-# extra savings backed by real measurements.
-# Differences up to ~0.5 VMAF are invisible; 0 always chases the target.
-# Allowed: 0 to 5.  Default: %s
-autoCQTolerance=%s
+	group("AV1 mode (-av1, needs an RTX 40 series card or newer)")
 
-# Extra savings budget for sources whose quality tops out BELOW the VMAF
-# target (heavily pre-compressed material, e.g. streaming rips): the target
-# is then unreachable anyway, and the pick may drop up to this many VMAF
-# points below the measured maximum when a real measurement confirms it —
-# on such sources the low CQ steps often ride the bitrate cap and waste
-# space for no visible gain. Every candidate CQ is verified by an actual
-# VMAF measurement, never estimated. The full budget only applies when the
-# measured curve is flat (the spread is then re-encode noise); a target
-# merely grazed on a steep curve spends at most autoCQTolerance, so real
-# visible quality is never traded this aggressively. Only active when the
-# target is proven unreachable AND autoCQTolerance is above 0; 0 restores
-# the old conservative behaviour.
-# Allowed: 0 to 10.  Default: %s
-autoCQPlateauTolerance=%s
+	configEntry("av1TargetCQ", d.av1TargetCQ, "1 to 63",
+		`Fixed quality value for AV1 when the automatic search is off.
+This is a DIFFERENT scale than targetCQ - the numbers are not
+comparable. 32 here is a lean setting, roughly VMAF 94.`)
 
-# --- CPU mode (-cpu; no Nvidia card required) ---
+	configEntry("av1MaxBitrate1080p", d.av1MaxBitrate1080p, "more than 1000",
+		`Bitrate ceiling for AV1 in normal mode. Lower than the H.265
+value on purpose: AV1 needs 25-30% less for the same quality.`)
 
-# Which encoder to use by default. "nvidia" encodes on the GPU (NVENC,
-# fastest). "cpu" encodes on the processor with libx265 (H.265) or
-# libsvtav1 (with -av1) - much slower, but it runs on ANY machine.
-# The -cpu flag switches a single run to the processor. If no Nvidia card
-# is found at startup, NVENCForge offers CPU mode instead of giving up.
-# Allowed: nvidia, cpu.  Default: %s
-encoder=%s
+	configEntry("av1MaxBitrateOriginal", d.av1MaxBitrateOriginal, "more than 1000",
+		`Bitrate ceiling for AV1 together with -original.`)
 
-# libx265 preset for CPU mode. Slower presets compress better.
-# Measured 2026-07-25 at equal file size: "medium" gains almost nothing
-# over "fast" (+0.35 VMAF for 15-40%% more time), "slow" gains +1.3 VMAF
-# but takes 3-4 times as long.
-# Allowed: ultrafast, superfast, veryfast, faster, fast, medium, slow,
-# slower, veryslow, placebo.  Default: %s
-cpuPreset=%s
+	group("CPU mode (-cpu)")
 
-# SVT-AV1 preset for CPU mode with -av1. 0=slowest/best, 13=fastest.
-# Measured 2026-07-25: preset 6 takes about as long as libx265 "fast" but
-# delivers better quality at the same file size; preset 8 is twice as fast
-# yet its quality tops out around VMAF 96.5 - uncomfortably close to the
-# default Auto-CQ target. Below 6 each step costs ~60%% more time for
-# roughly +0.6 VMAF.  Allowed: 0 to 13.  Default: %d
-cpuAV1Preset=%d
+	configEntry("cpuPreset", d.cpuPreset, "ultrafast ... fast, medium, slow ... placebo",
+		`Speed/quality trade-off for H.265 on the processor. Measured:
+"medium" gains almost nothing over "fast", while "slow" gains a
+little quality for three to four times the encoding time.`)
 
-# Fixed CRF for manual CPU mode (Auto-CQ off / -noautocq), H.265 scale.
-# NOT the same number as targetCQ: measured 2026-07-25, libx265 needs
-# roughly CQ-7 for the same quality (NVENC CQ 26 = x265 CRF ~19).
-# Lower = better quality, larger file.  Allowed: 1 to 51.  Default: %d
-cpuTargetCRF=%d
+	configEntry("cpuAV1Preset", d.cpuAV1Preset, "0 to 13",
+		`Same idea for AV1 on the processor. 0 is slowest/best,
+13 is fastest. 6 is the sweet spot; above 8 quality drops off.`)
 
-# Fixed CRF for manual CPU mode with -av1 (SVT-AV1 scale 1-63).
-# Allowed: 1 to 63.  Default: %d
-cpuAV1TargetCRF=%d
+	configEntry("cpuTargetCRF", d.cpuTargetCRF, "1 to 51",
+		`Fixed quality for H.265 on the processor when the automatic
+search is off. NOT the same number as targetCQ: the processor
+encoder needs roughly 7 steps lower for the same result.`)
 
-# How many CPU threads the encoder may use in CPU mode. 0 = all cores
-# (fastest, but the machine is barely usable while encoding). Set e.g. 8
-# on a 16-thread CPU to keep working comfortably alongside it.
-# Allowed: 0 to 256.  Default: %d
-cpuThreads=%d
+	configEntry("cpuAV1TargetCRF", d.cpuAV1TargetCRF, "1 to 63",
+		`Fixed quality for AV1 on the processor when the search is off.`)
 
-# Decode on the GPU (NVDEC) instead of the CPU. Measured about 20%% faster
-# on 4K sources, and the picture is bit-identical: HEVC/H.264 decoding is
-# defined exactly by the standard, so the GPU returns the very same pixels.
-# On any decoder error the file is retried on the CPU automatically.
-# Allowed: true, false.  Default: %t
-gpuDecode=%t
+	configEntry("cpuThreads", d.cpuThreads, "0 to 256",
+		`How many processor cores the encoder may use. 0 = all of them
+(fastest, but the machine is barely usable meanwhile). Set this to
+about half your cores if you want to keep working alongside it.`)
 
-# Safety limit for the option above: sources ABOVE this bitrate are always
-# decoded on the CPU. Extreme-bitrate HEVC has crashed the display driver
-# (taking Windows with it), which no fallback can catch — it has to be
-# avoided beforehand. The default is deliberately cautious; typical 4K
-# sources run at 10-30 Mbit/s, so it costs you nothing. Raise it only if
-# your files really are higher and your card handles them.
-# Allowed: 1 to 500.  Default: %d
-gpuDecodeMaxMbit=%d
+	group("Encoder internals (rarely worth touching)")
 
-# --- What happens to the original after a successful conversion ---
+	configEntry("nvencPreset", d.nvencPreset, "p1 to p7",
+		`Graphics card encoder preset. p1 is fastest, p7 is best quality
+and slower. p5 is the balanced middle ground.`)
 
-# "folder" moves it into an "originals" subfolder next to the source file.
-# That is on the same drive, so moving is instant even for a 60 GB file, and
-# Windows never touches it: your originals wait there until YOU delete them.
-# "recyclebin" is the old behaviour. It looks safer but is not - Windows
-# empties the recycle bin on its own (Storage Sense, and the SilentCleanup
-# task as soon as a drive runs low on space), which is how originals used to
-# disappear unnoticed. Downside of "folder": the disk space is only freed
-# when you empty that folder yourself.
-# The -keep flag always wins and leaves the original exactly where it is.
-# Allowed: folder, recyclebin.  Default: %s
-retireMode=%s
-`,
-		d.targetCQ, d.maxBitrate1080p, d.maxBitrateOriginal, d.maxResolution,
-		d.nvencPreset, d.nvencLookahead, d.bFrames,
-		strconv.FormatFloat(d.casStrength, 'f', -1, 64),
-		d.audioKbpsPerChannel, d.fallbackAudioBitrate,
-		d.autoShutdown, d.extraFilenameChars,
-		d.av1TargetCQ, d.av1TargetCQ,
-		d.av1MaxBitrate1080p, d.av1MaxBitrate1080p,
-		d.av1MaxBitrateOriginal, d.av1MaxBitrateOriginal,
-		d.autoCQ, d.autoCQ,
-		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
-		strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
-		d.encoder, d.encoder,
-		d.cpuPreset, d.cpuPreset,
-		d.cpuAV1Preset, d.cpuAV1Preset,
-		d.cpuTargetCRF, d.cpuTargetCRF,
-		d.cpuAV1TargetCRF, d.cpuAV1TargetCRF,
-		d.cpuThreads, d.cpuThreads,
-		d.gpuDecode, d.gpuDecode,
-		d.gpuDecodeMaxMbit, d.gpuDecodeMaxMbit,
-		d.retireMode, d.retireMode)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	configEntry("nvencLookahead", d.nvencLookahead, "0 to 32",
+		`How many frames ahead the encoder plans. More is better but
+needs graphics memory - lower this to 16 or 8 if an older card
+reports out-of-memory errors.`)
+
+	configEntry("bFrames", d.bFrames, "0 to 4",
+		`Number of B-frames (frames stored as the difference between
+their neighbours - they save a lot of space). Older cards may
+support fewer. Not used by AV1.`)
+
+	group("Speed")
+
+	configEntry("gpuDecode", d.gpuDecode, "true, false",
+		`Unpack the source video on the graphics card instead of the
+processor. About 20% faster on 4K sources, and the picture is
+bit-for-bit identical - unpacking is exactly defined by the codec
+standard, so there is nothing to lose here. Any decoder error
+falls back to the processor automatically.`)
+
+	configEntry("gpuDecodeMaxMbit", d.gpuDecodeMaxMbit, "1 to 500",
+		`Safety limit for the option above: sources above this bitrate
+are always unpacked on the processor. Extreme-bitrate video has
+been known to crash display drivers, and no fallback can catch
+that - it has to be avoided beforehand. Typical 4K sources run at
+10-30 Mbit/s, so the default costs you nothing.`)
+
+	group("Everything else")
+
+	configEntry("autoShutdown", d.autoShutdown, "true, false",
+		`Shut the PC down automatically when the whole batch is finished.
+The -shutdown option does the same for a single run.`)
+
+	configEntry("extraFilenameChars", d.extraFilenameChars, "any characters, or empty",
+		`Characters that survive file name cleaning besides letters, digits
+and dots. Spaces always become dots, multiple dots are collapsed,
+and characters Windows forbids are always removed.
+Example:  extraFilenameChars=-_'`)
+
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}
 	return nil

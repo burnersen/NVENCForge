@@ -34,13 +34,14 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 <br>
 
 - [⚡ 30 seconds, no manual](#-30-seconds-no-manual)
+- [🤔 Which of these is you?](#which-of-these-is-you)
 - [✨ What NVENCForge does](#-what-nvencforge-does)
 - [🚀 Usage](#-usage)
 - [🎚️ Auto-CQ — measured quality, per file](#auto-cq)
 - [🔮 AV1 mode](#-av1-mode-ready-for-the-future)
 - [🍎 Apple / iPhone MP4](#apple)
 - [💻 CPU mode — no NVIDIA card needed](#cpu-mode)
-- [🧰 DaVinci Resolve workflow](#-for-davinci-resolve-workflow--davinci)
+- [🧰 DaVinci Resolve — fix files Resolve won't read](#davinci)
 - [🪓 Lossless Split / Join](#-lossless-split--join--split---join)
 - [⚙️ Configuration](#configuration)
 - [💻 Requirements](#-requirements)
@@ -72,6 +73,20 @@ On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, n
 A reality check on these figures: the −96 % case is a best case, a short clip with an absurdly high source bitrate, and most of that saving comes from the source being wildly inefficient, not from magic. Typical, already-compressed material shrinks far less, and some files get skipped or remuxed entirely because re-encoding wouldn't help. That skip logic is a feature, not a shortcoming. The encoder is CQ-based (constant quality) in every mode: the size shrinks to whatever the chosen quality level needs. In the default mode (no flags) material above 1080p is also downscaled to 1080p.
 
 > **A word of honesty:** NVENCForge re-encodes, and re-encoding is lossy. It shines on bulky, already-compressed or inefficient files where the space saving is worth a quality hit you won't notice in normal playback. It is **not** an archival tool: keep untouched masters of anything irreplaceable. Originals are moved aside into an `originals` folder, never deleted — but treat that as a safety net, not a backup.
+
+---
+
+<a id="which-of-these-is-you"></a>
+
+## 🤔 Which of these is you?
+
+| The problem | The answer |
+|---|---|
+| **My videos are eating the whole disk.** | Drag them onto the EXE. Usually half the size or less, with the quality level **measured per file** instead of guessed. |
+| **DaVinci Resolve imports my video with no sound at all** — or the 5.1 track is missing, or it won't take the MKV in the first place. | **[`-davinci`](#davinci).** Resolve doesn't read the audio formats MKV files routinely carry, and MKV isn't a supported container either. This splits your file into a Resolve-friendly silent MP4 plus every audio track in a format Resolve actually accepts — and merges everything back when you're done editing. |
+| **I need the streams out and back in, bit for bit.** | **[`-split` / `-join`](#-lossless-split--join--split---join).** Pure 1:1 copy, no re-encode, no cleaning — a true lossless round-trip. |
+| **I don't own an Nvidia card.** | **[`-cpu`](#cpu-mode).** Slower, but it runs on any machine. The DaVinci, split and join tools never needed a GPU anyway. |
+| **I want it on my iPhone.** | **[`-apple`](#apple).** An MP4 that actually plays on iOS and imports into the Photos app. |
 
 ---
 
@@ -247,7 +262,15 @@ Rough throughput: about **40 minutes per hour of 1080p video** on a modern 8-cor
 
 ---
 
-## 🧰 For DaVinci Resolve Workflow (`-davinci`)
+<a id="davinci"></a>
+
+## 🧰 DaVinci Resolve: when Resolve won't read your file (`-davinci`)
+
+**Imported a video and got no sound? Your 5.1 track missing? Resolve refusing the MKV entirely?**
+
+Nothing is broken on your end. DaVinci Resolve — Studio included — does not read the audio formats that MKV files routinely carry: **AC3, E-AC3, DTS, TrueHD/MLP, FLAC, Opus and Vorbis**. MKV itself isn't an officially supported container on Windows either, and audio layouts beyond 5.1 or above 48 kHz are refused as well. The usual "fix" is to re-encode the entire film in some converter and hope the result imports.
+
+`-davinci` deals with the actual problem instead. It leaves your **picture untouched** (stream copy — no quality loss, no waiting on an encode) and only takes the audio and subtitles apart: every track that Resolve can't read is converted to AAC it can (≤ 5.1, ≤ 48 kHz), everything already compatible is copied as-is, and subtitles come out as cleaned `.srt`. When you're finished editing, one drag & drop merges your Resolve master back together with the original audio and subtitles.
 
 | You drop… | You get… |
 |---|---|

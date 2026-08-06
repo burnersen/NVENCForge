@@ -49,7 +49,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.9.0"
+const appVersion = "1.10.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -797,9 +797,17 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			cfg.cpu = true
 			continue
 		}
-		if strings.EqualFold(arg, "-apple") {
-			cfg.apple = true
-			pInfo.Println("Apple mode enabled: output as an iOS-ready MP4 (H.265/hvc1 + AAC + faststart).")
+		// -apple ist der alte Name aus 1.4.0 und bleibt gültig: er steckt in
+		// bestehenden Send-to-Verknüpfungen, die ein Wegfall stillschweigend
+		// unbrauchbar machen würde.
+		if strings.EqualFold(arg, "-mp4") || strings.EqualFold(arg, "-apple") {
+			cfg.mp4Mode = true
+			pInfo.Println("MP4 mode enabled: output as a widely playable MP4 (H.265/hvc1 + AAC + faststart).")
+			continue
+		}
+		if strings.EqualFold(arg, "-8bit") {
+			cfg.eightBit = true
+			pInfo.Println("8-bit mode enabled: encoding in 8 bit instead of 10 bit (for older devices).")
 			continue
 		}
 		if strings.EqualFold(arg, "-keep") {
@@ -866,13 +874,18 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		rest = append(rest, arg)
 	}
-	// -apple targets the iOS Photos app, which cannot decode AV1 at all, so the
-	// Apple output is always H.265 (hvc1). -av1 is overridden here, before the
-	// codec-dependent CQ range and bitrate caps below are resolved.
-	if cfg.apple && cfg.av1 {
+	// -mp4 exists for maximum reach, and AV1 works against exactly that: the iOS
+	// Photos app cannot decode it at all and many TVs and older phones can't
+	// either. So the MP4 output is always H.265 (hvc1). -av1 is overridden here,
+	// before the codec-dependent CQ range and bitrate caps below are resolved.
+	if cfg.mp4Mode && cfg.av1 {
 		cfg.av1 = false
-		pWarn.Println("-apple forces H.265: iOS cannot play AV1 — the -av1 flag is ignored for this run.")
+		pWarn.Println("-mp4 forces H.265: AV1 does not play on iPhones and many TVs — the -av1 flag is ignored for this run.")
 	}
+	// 8 Bit gilt für den ganzen Lauf. Gesetzt wird die Variable erst hier, weil
+	// alle Options-Bauer sie lesen und die Flags in beliebiger Reihenfolge
+	// stehen dürfen.
+	eightBitActive = cfg.eightBit
 	// Backend festlegen: -cpu schlägt die INI (encoder=cpu). Beides kann hinter
 	// -av1 stehen, deshalb erst hier — und deshalb wird der tatsächlich
 	// laufende Encoder auch erst jetzt gemeldet, genau einmal. Findet der
@@ -1139,9 +1152,15 @@ func printActiveSettings(cfg *AppConfig) {
 		cqVal = s.av1TargetCQ
 		bfVal = "n/a (AV1)"
 	}
-	// -apple keeps H.265 but repackages the result as an iOS-ready MP4 (hvc1).
-	if cfg != nil && cfg.apple {
-		videoCodec = "H.265 (Apple MP4)"
+	// -mp4 keeps H.265 but repackages the result as a widely playable MP4 (hvc1).
+	if cfg != nil && cfg.mp4Mode {
+		videoCodec = "H.265 (MP4)"
+		codecActive = true
+	}
+	// 8 Bit ist die Ausnahme und muss deshalb sichtbar sein — sonst wundert man
+	// sich später über Streifen in dunklen Verläufen.
+	if cfg != nil && cfg.eightBit {
+		videoCodec += ", 8-bit"
 		codecActive = true
 	}
 	// -cpu swaps the encoder itself: same codec, but libx265/libsvtav1 on their
@@ -1672,9 +1691,9 @@ func main() {
 			continue
 		}
 		res := processFile(ctx, cfg, f, i+1, len(files))
-		if cfg.apple {
-			// -apple: repackage the finished MKV output into an iOS-ready MP4.
-			remuxResultToAppleMP4(ctx, &res)
+		if cfg.mp4Mode {
+			// -mp4: repackage the finished MKV output into a compatible MP4.
+			remuxResultToMP4(ctx, cfg, &res)
 		}
 		results = append(results, res)
 	}

@@ -28,10 +28,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 ---
 
-<details>
-<summary><b>📑 Contents</b> — click to expand</summary>
-
-<br>
+**📑 Contents**
 
 - [⚡ 30 seconds, no manual](#-30-seconds-no-manual)
 - [🤔 Which of these is you?](#which-of-these-is-you)
@@ -39,7 +36,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🚀 Usage](#-usage)
 - [🎚️ Auto-CQ — measured quality, per file](#auto-cq)
 - [🔮 AV1 mode](#-av1-mode-ready-for-the-future)
-- [🍎 Apple / iPhone MP4](#apple)
+- [📱 MP4 that plays everywhere](#apple)
 - [💻 CPU mode — no NVIDIA card needed](#cpu-mode)
 - [🧰 DaVinci Resolve — fix files Resolve won't read](#davinci)
 - [🪓 Lossless Split / Join](#-lossless-split--join--split---join)
@@ -48,8 +45,6 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🔧 Under the hood — the safety nets and clever bits](#-under-the-hood--the-safety-nets-and-clever-bits)
 - [🔨 Building from source](#-building-from-source)
 - [📜 License](#-license) · [💬 Feedback](#-feedback--contributions) · [☕ Support](#-support)
-
-</details>
 
 ---
 
@@ -86,7 +81,8 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 | **DaVinci Resolve imports my video with no sound at all** — or the 5.1 track is missing, or it won't take the MKV in the first place. | **[`-davinci`](#davinci).** Resolve doesn't read the audio formats MKV files routinely carry, and MKV isn't a supported container either. This splits your file into a Resolve-friendly silent MP4 plus every audio track in a format Resolve actually accepts — and merges everything back when you're done editing. |
 | **I need the streams out and back in, bit for bit.** | **[`-split` / `-join`](#-lossless-split--join--split---join).** Pure 1:1 copy, no re-encode, no cleaning — a true lossless round-trip. |
 | **I don't own an Nvidia card.** | **[`-cpu`](#cpu-mode).** Slower, but it runs on any machine. The DaVinci, split and join tools never needed a GPU anyway. |
-| **I want it on my iPhone.** | **[`-apple`](#apple).** An MP4 that actually plays on iOS and imports into the Photos app. |
+| **I want it on my iPhone — or on a TV, a tablet, anywhere.** | **[`-mp4`](#apple).** An MP4 tagged the way players expect, so it actually plays: iOS Photos app, smart TVs, browsers. |
+| **My old TV shows a black screen for my files.** | **[`-8bit`](#apple).** Some older devices can't decode 10-bit video. This encodes in 8 bit, which they understand. |
 
 ---
 
@@ -94,7 +90,7 @@ A reality check on these figures: the −96 % case is a best case, a short clip 
 
 - 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
 - 🎚️ **Auto-CQ — the right quality level, measured per file** *(new)*. Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; details in [Auto-CQ](#auto-cq).
-- ⚡ **GPU decoding — same pixels, less waiting** *(new)*. 4K sources are decoded on the GPU (NVDEC) instead of the CPU: measured **~20% faster end-to-end**, and the output is **bit-identical** — verified by comparing frame hashes, not by eyeballing it. That is not a lucky coincidence: H.264/HEVC/AV1 define decoding exactly, so the GPU has to return the very same pixels. Sources above a configurable bitrate ceiling stay on the CPU on purpose, and any decoder hiccup silently falls back to it.
+- ⚡ **The picture stays on the graphics card** *(new)*. 4K sources are decoded **and downscaled** on the GPU (NVDEC + `scale_cuda`, Lanczos) instead of being shuttled through system memory. Decoding is **bit-identical** — verified by comparing frame hashes, not by eyeballing it; H.264/HEVC/AV1 define decoding exactly, so the GPU has to return the very same pixels. The downscale is measurably **better** than the CPU default it replaced: measured against the untouched 4K source, GPU Lanczos scored VMAF 97.62 where CPU bicubic reached 97.32. A 4K→1080p encode dropped from 35 s to 29 s with sharpening on, and to **13.9 s** with sharpening off (90 s of 4K test material). Sources above a configurable bitrate ceiling stay on the CPU on purpose, interlaced material keeps its CPU deinterlacer, and any decoder hiccup silently falls back.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected. The color tags (transfer, primaries, BT.2020, range) are copied straight from the source, never fabricated. In `-original` mode (no rescale) the static HDR10 mastering-display / MaxCLL metadata rides through as well. When downscaling to 1080p (the default mode) the output stays correctly HDR-tagged (PQ / BT.2020, not washed out), but the static mastering metadata may not survive every FFmpeg build. NVENCForge deliberately never synthesizes HDR metadata values, because a fabricated value is exactly what has broken HDR conversions in the past.
 - 🛡️ **Safe with your files.** Originals are moved into an **`originals` folder** only after the output is probed and validated — nothing is ever deleted, so you can check the result yourself and clear that folder when you're happy. Existing files are never overwritten (automatic numbered names). Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, stall watchdog (kills frozen FFmpeg after 5 min), bounded memory, multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down the whole batch.
@@ -142,7 +138,8 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
-| `-apple` | Write an **iOS-ready MP4** (H.265/`hvc1` + AAC + faststart) that plays on iPhone/iPad & imports into Photos; already-converted `.h265.mkv` files are just repackaged, no re-encode. See [Apple mode](#apple) |
+| `-mp4` | Write an **MP4 that plays almost everywhere** (H.265/`hvc1` + AAC + faststart) — iPhone/iPad & Photos app, smart TVs, browsers; already-converted `.h265.mkv` files are just repackaged, no re-encode. With several audio/subtitle tracks you get to pick. See [MP4 mode](#apple). *(`-apple` still works — it's the old name)* |
+| `-8bit` | Encode in **8 bit** instead of 10 bit, for older devices that reject the "Main 10" profile. Works with every mode. See [MP4 mode](#apple) |
 | `-cpu` | Encode on the **processor** instead of the GPU — **no NVIDIA card needed** (libx265, or SVT-AV1 together with `-av1`). Much slower, everything else identical. See [CPU mode](#cpu-mode) |
 | `-autocq` | Pick the CQ automatically per file via VMAF measurement — **enabled by default**, works for H.265 and AV1, see [Auto-CQ](#auto-cq). Set `autoCQ=false` in the config to turn it off |
 | `-noautocq` | Disable Auto-CQ for this run (overrides the `autoCQ=true` config default) |
@@ -170,7 +167,7 @@ This is my personal workflow: pure drag & drop, no command line. Everyone has th
    | `1 NVENCForge Convert 1080` | *(none, default mode)* |
    | `2 NVENCForge Original Copyaudio` | `-original -copyaudio` |
    | `3 NVENCForge AV1 Original` | `-av1 -original` |
-   | `4 NVENCForge iPhone` | `-apple` |
+   | `4 NVENCForge MP4` | `-mp4` |
    | `5 NVENCForge DaVinci` | `-davinci` |
 
 4. **Important:** clear the **"Start in"** field of every shortcut; it must be **empty**, otherwise "Send to" won't work correctly.
@@ -216,16 +213,25 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 
 <a id="apple"></a>
 
-## 🍎 Apple / iPhone: gallery-ready MP4
+## 📱 MP4: the file that plays everywhere
 
-`-apple` writes an **iOS-ready `.mp4`** instead of the usual `.mkv`, so the result plays on iPhone/iPad and imports straight into the Photos app. Two things normally trip up Apple, and `-apple` handles both automatically:
+`-mp4` writes an **`.mp4`** instead of the usual `.mkv` — the container almost every device opens: the iOS Photos app, smart TVs, tablets, browsers. Three things normally trip players up, and `-mp4` handles all of them automatically:
 
 - **The codec tag.** HEVC in MP4 must be tagged **`hvc1`** — Apple refuses the `hev1` tag FFmpeg writes by default. (It's also the tag DaVinci Resolve prefers, so nothing is lost.)
-- **Container & audio.** The iOS gallery won't accept MKV at all, and only plays **AAC** audio. `-apple` delivers MP4 with `+faststart` and re-encodes non-AAC tracks (AC3/DTS/…) to AAC where needed.
+- **Container & audio.** The iOS gallery won't accept MKV at all, and only plays **AAC** audio. `-mp4` delivers MP4 with `+faststart` — so playback starts immediately instead of after a seek to the end of the file — and re-encodes non-AAC tracks (AC3/DTS/…) to AAC where needed.
+- **Tracks.** MP4 carries several audio tracks just fine, but not every player lets you switch, and every extra track costs space. With more than one audio or subtitle track you are **asked which ones to keep** (no answer within 30 seconds keeps them all). Text subtitles go in as `mov_text`; picture subtitles from Blu-rays cannot be stored in MP4 at all and are reported instead of silently dropped.
 
-A fresh source is encoded to H.265 as usual and then packaged for Apple. A file you **already converted** (`.h265.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept. AV1 can't play on iOS, so `-apple` always uses H.265 (an existing `.av1.mkv` is skipped with a hint to re-run `-apple` on the original source).
+A fresh source is encoded to H.265 as usual and then packaged. A file you **already converted** (`.h265.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept. AV1 plays on neither iPhones nor most TVs, so `-mp4` always uses H.265 (an existing `.av1.mkv` is skipped with a hint to re-run `-mp4` on the original source).
 
-> 10-bit and HDR HEVC play fine on modern iPhones/iPads.
+> `-apple`, the flag's original name, still works — existing "Send to" shortcuts keep running.
+
+### When a device still refuses: `-8bit`
+
+NVENCForge encodes in **10 bit** by default. That costs nothing with H.265 and avoids the banding you otherwise see in dark gradients. Modern iPhones, iPads and TVs handle it without blinking.
+
+Some older hardware can't: TVs, beamers and Android phones from the 8-bit era show a black screen or reject the file outright. `-8bit` encodes in 8 bit (profile `main`) for exactly those cases. It works with every mode — H.265, AV1, `-cpu`, `-mp4`. Only use it when a device actually refuses to play; 10 bit is the better picture.
+
+> Repackaging an already-converted file can't change its bit depth — that needs a real conversion from the source.
 
 ---
 
@@ -329,7 +335,10 @@ One key decides what happens to the **original** once its conversion is done:
 |---|---|---|
 | `retireMode` | `folder` | `folder` moves the source into an `originals` subfolder next to it — same drive, so it's instant, and nothing is deleted: you check the result and empty that folder yourself. `recyclebin` uses the Windows recycle bin instead (with the checks described above). `-keep` always wins and leaves originals exactly where they are. |
 
-Want maximum speed and can live with a slightly softer picture? Set `casStrength=0`. That skips the sharpening pass after the downscale entirely — the single most expensive filter step, worth roughly another 25% on 4K conversions. Set it back to `0.4` any time.
+`casStrength` also decides how far the picture gets to stay on the graphics card, because there is no CUDA sharpening filter:
+
+- **`casStrength = 0.4`** (default): downscaled on the GPU, then pulled back into memory once so the CPU can sharpen it. Measured on 90 s of 4K material: **29 s instead of 35 s**, and the picture ends up slightly *closer* to the source than before, because Lanczos replaced the old bicubic downscale.
+- **`casStrength = 0`**: nothing has to come back — decode, downscale and encode all happen on the card. Same material: **13.9 s**, roughly two and a half times faster. The picture is softer without the sharpening pass (VMAF 94.7 against the 4K source, versus 97.3 with it), and Auto-CQ tends to pick a lower CQ, so files come out somewhat larger. Set it back to `0.4` any time.
 
 > Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. GPU decoding therefore switches itself on after an update, since `gpuDecode` defaults to `true` — the output stays bit-identical either way. To get the newer blocks written out with their comments, rename the INI and let NVENCForge create a fresh one.
 

@@ -34,6 +34,8 @@ type convJob struct {
 	outputPath    string
 	nvencOpts     []string
 	vfOpts        []string
+	vfOptsCPU     []string // Filterkette ohne Grafikkarte; nur gesetzt, wenn vfOpts eine ist
+	encodeOnCard  bool     // Bilder bleiben im Grafikspeicher → Encoder ohne -pix_fmt
 	hwaccelOpts   []string // Entpacken auf der Grafikkarte; leer = Prozessor
 	withSubs      bool
 	audioCopy     bool
@@ -81,6 +83,17 @@ func sourceTagArgs(sourceTag string) []string {
 // einfache Variable ohne Sperre.
 var gpuDecodeDisabled bool
 
+// gpuFramesStayOnCard gilt für die gerade laufende Datei: true, wenn die
+// Filterkette die Bilder im Grafikspeicher lässt (verkleinern auf der Karte,
+// kein Nachschärfen). Dann darf der Encoder KEIN -pix_fmt bekommen, sonst
+// bricht FFmpeg mit "Impossible to convert between the formats" ab — das
+// Bildformat bestimmt in diesem Fall scale_cuda selbst.
+// Gesetzt wird die Variable einmal je Datei in processFile, gelesen von den
+// Options-Bauern; wie bei cpuModeActive spart das eine Fallunterscheidung an
+// jeder Aufrufstelle. Der Ablauf ist sequenziell, daher genügt eine einfache
+// Variable ohne Sperre.
+var gpuFramesStayOnCard bool
+
 // gpuDecodeSafeCodecs listet die Codecs, die NVDEC auf allen unterstützten
 // Karten sicher beherrscht. Alles andere (exotische oder sehr alte Formate)
 // läuft weiter über den Prozessor — dort kostet der Entpack-Vorgang ohnehin
@@ -118,6 +131,24 @@ func gpuDecodeArgs(stats *VideoStats) []string {
 		return nil
 	}
 	return []string{"-hwaccel", "cuda"}
+}
+
+// fallBackToCPUDecode stellt einen Auftrag vollständig auf den Prozessor-Weg
+// um. Beim reinen Entpacken auf der Karte genügte es, "-hwaccel" wegzulassen;
+// wird auch VERKLEINERT, hängen zwei weitere Dinge daran: eine Kette mit
+// scale_cuda kann ohne Bilder im Grafikspeicher gar nicht laufen, und der
+// Encoder braucht sein Eingangsformat zurück, das bei der reinen
+// Grafikkarten-Kette bewusst fehlt.
+func (j convJob) fallBackToCPUDecode() convJob {
+	j.hwaccelOpts = nil
+	if len(j.vfOptsCPU) > 0 {
+		j.vfOpts = j.vfOptsCPU
+	}
+	if j.encodeOnCard {
+		j.nvencOpts = append(append([]string{}, j.nvencOpts...), "-pix_fmt", encodePixFmt())
+		j.encodeOnCard = false
+	}
+	return j
 }
 
 func (j convJob) buildConvertArgs() []string {
@@ -573,11 +604,11 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	if ext == ".mkv" {
 		for _, suf := range skipInputSuffixes {
 			if strings.HasSuffix(strings.ToLower(base), suf) {
-				// -apple repackages an already-converted file into an iOS-ready
+				// -mp4 repackages an already-converted file into a compatible
 				// MP4 instead of skipping it (lossless for H.265/H.264; an AV1
-				// file gets a hint inside convertedMKVToAppleMP4).
-				if cfg.apple {
-					return convertedMKVToAppleMP4(ctx, filePath)
+				// file gets a hint inside convertedMKVToMP4).
+				if cfg.mp4Mode {
+					return convertedMKVToMP4(ctx, cfg, filePath)
 				}
 				fmt.Println(pterm.Gray("  Skipped: already converted."))
 				fmt.Println()
@@ -799,6 +830,19 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	bitrateKbps := determineBitrateKbps(stats)
 	doScale := needsScaling(cfg, stats.Width, stats.Height)
 
+	// Einmal je Datei entscheiden, wo verkleinert wird — und zwar HIER, vor den
+	// Encoder-Optionen: bleibt das Bild im Grafikspeicher, darf der Encoder kein
+	// -pix_fmt bekommen (siehe gpuFramesStayOnCard).
+	doDeint := videoIsInterlaced(stats)
+	hwaccelOpts := gpuDecodeArgs(stats)
+	gpuScale := gpuScaleUsable(hwaccelOpts, doScale, doDeint)
+	gpuFramesStayOnCard = gpuScale && appSettings.casStrength <= 0
+	if gpuScale {
+		// Ohne dieses Ausgabeformat landen die entpackten Bilder sofort wieder
+		// im Arbeitsspeicher — scale_cuda bekäme dann gar nichts zu sehen.
+		hwaccelOpts = append(hwaccelOpts, "-hwaccel_output_format", "cuda")
+	}
+
 	// Source-derived bitrate cap (restored from 1.1.2, refined with the video
 	// expert's matrix): aim for 80% of the source video bitrate so the re-encode is
 	// guaranteed to shrink the file, never below the per-resolution floor, never
@@ -846,7 +890,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 
 	doConvert, doRemux := false, false
 	switch {
-	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" && !cfg.apple &&
+	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" && !cfg.mp4Mode &&
 		!doScale && bitrateKbps <= effCfg.maxBitrateKbps && allAudioSafeAAC(stats.AudioStreams):
 		newPath := filepath.Join(dir, base+outSuffix+ext)
 		if _, statErr := os.Stat(newPath); statErr == nil {
@@ -880,15 +924,22 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 
 	printDavinciAudioInfo(stats.AudioStreams, cfg.copyAudio)
 
-	var vfOpts []string
+	var vfOpts, vfOptsCPU []string
 	if doConvert {
-		doDeint := videoIsInterlaced(stats)
 		if doDeint {
 			pInfo.Printf("%s Interlaced source (%s) — deinterlacing with bwdif.\n",
 				pterm.LightMagenta("›"), stats.FieldOrder)
 		}
-		filterChain := buildVideoFilter(doScale, doDeint)
+		filterChain := buildVideoFilter(doScale, doDeint, gpuScale)
 		vfOpts = []string{"-vf", filterChain}
+		if gpuScale {
+			// Rückweg für den Fall, dass die Grafikkarte den Lauf abweist: eine
+			// Kette mit scale_cuda kann ohne Bilder im Grafikspeicher nicht
+			// laufen, der Rückfall muss sie also mit austauschen.
+			vfOptsCPU = []string{"-vf", buildVideoFilter(doScale, doDeint, false)}
+			pInfo.Printf("%s Scaling on the graphics card (Lanczos).\n",
+				pterm.LightMagenta("›"))
+		}
 
 		// -autocq: pick the CQ for THIS file via sampled VMAF measurements.
 		// Only real re-encodes get here with the flag set (remuxes skip encoding
@@ -909,6 +960,8 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		inputPath:    filePath,
 		nvencOpts:    nvencOpts,
 		vfOpts:       vfOpts,
+		vfOptsCPU:    vfOptsCPU,
+		encodeOnCard: doConvert && gpuFramesStayOnCard,
 		isTS:         ext == ".ts",
 		isMKV:        ext == ".mkv",
 		audioStreams: stats.AudioStreams,
@@ -918,7 +971,12 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// Nur ein echtes Umwandeln entpackt überhaupt Bilder; beim Remux werden die
 	// Spuren nur umkopiert, da gibt es nichts zu beschleunigen.
 	if doConvert {
-		baseJob.hwaccelOpts = gpuDecodeArgs(stats)
+		baseJob.hwaccelOpts = hwaccelOpts
+	} else {
+		// Ein Remux hat keine Filterkette — die Encoder-Optionen bleiben zwar
+		// gebaut, werden aber nie benutzt. Die Merkvariable trotzdem
+		// zurücksetzen, damit sie nicht in die nächste Datei hineinwirkt.
+		gpuFramesStayOnCard = false
 	}
 
 	var outputFile string
@@ -960,7 +1018,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			// gescheitert, nehmen auch alle folgenden Stufen gleich den
 			// Prozessor-Weg statt denselben Fehler noch einmal zu bezahlen.
 			if gpuDecodeDisabled {
-				job.hwaccelOpts = nil
+				job = job.fallBackToCPUDecode()
 			}
 			job.outputPath = outputFile
 			job.audioCopy = att.audioCopy
@@ -1217,134 +1275,6 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	return result
 }
 
-// writeAppleMP4 stream-copies the video of srcMKV into outMP4 with the recipe
-// Apple's players and the Photos app require: HEVC is re-tagged "hvc1" (they
-// reject the "hev1" fourcc FFmpeg picks by default; H.264 keeps its own avc1),
-// any non-AAC audio is transcoded to AAC (48 kHz, ≤5.1 — the DaVinci-safe rule)
-// and "+faststart" moves the moov atom to the front. Subtitles, attachments and
-// data/timecode tracks are dropped; a gallery clip needs none. Shared by the
-// post-conversion hook and the "already-converted MKV" path.
-func writeAppleMP4(ctx context.Context, srcMKV string, stats *VideoStats, outMP4 string) error {
-	args := []string{"-y", "-i", srcMKV, "-map", "0:V:0", "-map", "0:a?", "-c:v", "copy"}
-	if strings.EqualFold(stats.VideoCodec, "hevc") {
-		args = append(args, "-tag:v", "hvc1")
-	}
-	args = append(args, buildPerStreamAudioArgs(stats.AudioStreams, false, false)...)
-	args = append(args, "-sn", "-movflags", "+faststart", outMP4)
-
-	pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
-		Println("  >> Apple MP4 (iOS-ready: hvc1 + AAC, lossless video copy)")
-	return runFFmpeg(ctx, args, stats.DurationSec, 1, 1, getFileSizeMB(srcMKV))
-}
-
-// remuxResultToAppleMP4 repackages a finished conversion output (an .mkv we just
-// wrote into the "output" folder) into an iOS-ready .mp4 and removes the now
-// redundant .mkv. Only -apple runs reach here. On any error the .mkv is kept and
-// the result is left unchanged, so a failed remux never costs the conversion.
-func remuxResultToAppleMP4(ctx context.Context, res *ProcessResult) {
-	if !res.Success || res.IsPreview || res.OutputFile == "" {
-		return
-	}
-	src := res.OutputFile
-	// Only OUR freshly written output is remuxed: an .mkv living in the "output"
-	// folder. Some result paths report back an untouched original (e.g. an
-	// oversized encode was discarded) — that file must stay exactly as it is.
-	if !strings.EqualFold(filepath.Ext(src), ".mkv") ||
-		!strings.EqualFold(filepath.Base(filepath.Dir(src)), "output") {
-		return
-	}
-	stats, err := getVideoStats(ctx, src)
-	if err != nil {
-		pWarn.Printf("Apple MP4: cannot probe %s (%v) — MKV kept.\n", filepath.Base(src), err)
-		return
-	}
-	mp4Out, err := uniquePath(strings.TrimSuffix(src, filepath.Ext(src)) + ".mp4")
-	if err != nil {
-		pWarn.Printf("Apple MP4: no free output name (%v) — MKV kept.\n", err)
-		return
-	}
-	if err := writeAppleMP4(ctx, src, stats, mp4Out); err != nil {
-		_ = os.Remove(mp4Out)
-		if errors.Is(err, context.Canceled) {
-			return
-		}
-		pWarn.Printf("Apple MP4 creation failed (%v) — the MKV is kept: %s\n",
-			err, filepath.Base(src))
-		return
-	}
-	if tsErr := copyTimestamps(src, mp4Out); tsErr != nil {
-		pWarn.Printf("Apple MP4: could not transfer file timestamps: %v\n", tsErr)
-	}
-	// The MKV was only the intermediate container; -apple wants the MP4.
-	_ = os.Remove(src)
-	res.OutputFile = mp4Out
-	pOK.Printf("    ✓ %s\n", filepath.Base(mp4Out))
-}
-
-// convertedMKVToAppleMP4 handles an already-converted .mkv dropped straight onto
-// -apple: instead of skipping it as "already converted", an H.265/H.264 file is
-// repackaged losslessly into an iOS-ready <name>.mp4 in the output folder (no
-// second encode) and the original .mkv is KEPT — it is the user's finished
-// archive / DaVinci copy. AV1 cannot play on iOS and would need a real re-encode
-// from the untouched source (not available here), so it is skipped with a clear
-// hint. The startup header for this file was already printed by the caller.
-func convertedMKVToAppleMP4(ctx context.Context, filePath string) ProcessResult {
-	result := ProcessResult{InputFile: filePath}
-	dir := filepath.Dir(filePath)
-	base := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
-
-	stats, err := getVideoStats(ctx, filePath)
-	if err != nil {
-		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: FFprobe error: %v", err)
-		result.FailedAt = time.Now()
-		return result
-	}
-	if strings.EqualFold(stats.VideoCodec, "av1") {
-		pWarn.Println("  Skipped: AV1 can't play on iOS — re-run -apple on the ORIGINAL source for an iPhone file.")
-		fmt.Println()
-		result.Skipped = true
-		return result
-	}
-
-	outputDir := filepath.Join(dir, "output")
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: cannot create output folder: %v", err)
-		result.FailedAt = time.Now()
-		return result
-	}
-	if c := cleanFileBaseName(base); c != "" {
-		base = c
-	}
-	outMP4 := filepath.Join(outputDir, base+".mp4")
-	if _, statErr := os.Stat(outMP4); statErr == nil {
-		fmt.Println(pterm.Gray("  Skipped: Apple MP4 already exists."))
-		fmt.Println()
-		result.Skipped = true
-		return result
-	}
-
-	if err := writeAppleMP4(ctx, filePath, stats, outMP4); err != nil {
-		_ = os.Remove(outMP4)
-		if errors.Is(err, context.Canceled) {
-			result.Skipped = true
-			return result
-		}
-		result.ErrMsg = fmt.Sprintf("Converter.go: convertedMKVToAppleMP4: %v", err)
-		result.FailedAt = time.Now()
-		pWarn.Printf("  Apple MP4 creation failed: %v\n", err)
-		fmt.Println()
-		return result
-	}
-	if tsErr := copyTimestamps(filePath, outMP4); tsErr != nil {
-		pWarn.Printf("  Could not transfer file timestamps: %v\n", tsErr)
-	}
-	pOK.Printf("    ✓ %s\n", filepath.Base(outMP4))
-	fmt.Println()
-	result.OutputFile = outMP4
-	result.Success = true
-	return result
-}
-
 // ----------------------------------------------------------------------------
 // getVideoStats: FFprobe wrapper
 // ----------------------------------------------------------------------------
@@ -1542,8 +1472,8 @@ func runFFmpegWithCPUDecodeFallback(ctx context.Context, job convJob,
 	}
 	pWarn.Println("GPU decoding failed — repeating this file with CPU decoding.")
 	gpuDecodeDisabled = true
-	job.hwaccelOpts = nil
-	return runFFmpeg(ctx, buildArgs(job), durationSec, fileIdx, fileTotal, inputSizeMB)
+	gpuFramesStayOnCard = false
+	return runFFmpeg(ctx, buildArgs(job.fallBackToCPUDecode()), durationSec, fileIdx, fileTotal, inputSizeMB)
 }
 
 func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx, fileTotal int, inputSizeMB float64) error {
@@ -2022,12 +1952,148 @@ func needsScaling(cfg *AppConfig, w, h int) bool {
 	return max(w, h) > long || min(w, h) > short
 }
 
-func buildVideoFilter(doScale, deinterlace bool) string {
+// ----------------------------------------------------------------------------
+// Verkleinern auf der Grafikkarte (scale_cuda)
+// ----------------------------------------------------------------------------
+//
+// Warum das schneller ist: Wird auf der Karte entpackt (NVDEC) und dort auch
+// verkleinert, verlässt das Bild den Grafikspeicher nie — der Umweg über den
+// Arbeitsspeicher entfällt komplett. Gemessen am 2026-08-06 (4K→1080p, 90 s):
+//
+//	CPU-Bicubic + CAS 0.4 (der bisherige Weg) ....... 33,5 s   VMAF 97,32
+//	GPU-Lanczos + CAS (Bild kommt für CAS zurück) ... 28,1 s   VMAF 97,62
+//	GPU-Lanczos ohne CAS (Bild bleibt oben) ......... 13,4 s   VMAF 94,66
+//
+// (VMAF gegen das 4K-ORIGINAL gemessen, beide Seiten gleich hochgerechnet —
+// die Zahl bewertet also den Skalierer mit.) Lanczos statt des bisherigen
+// Bicubic ist dabei kein Zufall: Bicubic auf der Karte kam nur auf 90,40.
+//
+// Es gibt KEINEN CAS-Filter für die Grafikkarte (Filterliste geprüft), deshalb
+// entscheidet casStrength den Weg: mit Nachschärfen muss das Bild einmal
+// zurück in den Arbeitsspeicher, ohne bleibt es oben. Beide Wege sind
+// schneller als vorher.
+
+// gpuScaleUsable meldet, ob das Verkleinern dieser Datei auf der Grafikkarte
+// laufen kann. Voraussetzung ist, dass die Bilder überhaupt dort liegen (also
+// NVDEC das Entpacken übernimmt) und dass keine CPU-Filter davor müssen:
+// bwdif (Deinterlacing) rechnet auf dem Prozessor und bekäme keine Bilder.
+func gpuScaleUsable(hwaccelOpts []string, doScale, deinterlace bool) bool {
+	return len(hwaccelOpts) > 0 && doScale && !deinterlace
+}
+
+// gpuPixFmt ist das Bildformat IM Grafikspeicher. Dort gibt es nur die
+// verschränkten Formate: nv12 für 8 Bit, p010le für 10 Bit — ein planares
+// yuv420p kennt die Karte nicht.
+func gpuPixFmt() string {
+	if eightBitActive {
+		return "nv12"
+	}
+	return "p010le"
+}
+
+// buildGPUScaleChain baut den Teil der Filterkette, der auf der Karte läuft.
+// Endet die Kette hier, gehen die Bilder direkt in den Encoder; ist
+// Nachschärfen eingestellt, holt hwdownload sie in den Arbeitsspeicher zurück,
+// wo cas rechnen kann.
+func buildGPUScaleChain() string {
+	short := appSettings.maxResolution
+	long := short * 16 / 9
+	chain := fmt.Sprintf(
+		"scale_cuda='if(gte(iw,ih),%d,%d)':'if(gte(iw,ih),%d,%d)'"+
+			":force_original_aspect_ratio=decrease:force_divisible_by=2"+
+			":interp_algo=lanczos:format=%s",
+		long, short, short, long, gpuPixFmt())
+	if appSettings.casStrength > 0 {
+		chain += ",hwdownload,format=" + gpuPixFmt() +
+			",cas=strength=" + strconv.FormatFloat(appSettings.casStrength, 'f', -1, 64) +
+			",format=" + encodePixFmt()
+	}
+	return chain
+}
+
+// chainUsesGPU meldet, ob eine Filterkette auf der Grafikkarte rechnet. Nötig
+// an den Stellen, die eine solche Kette anders behandeln müssen — etwa beim
+// Rückfall auf den Prozessor, wo sie durch die CPU-Kette ersetzt werden muss.
+func chainUsesGPU(chain string) bool {
+	return strings.Contains(chain, "scale_cuda")
+}
+
+// chainEndsOnCard meldet, ob die Bilder am Ende der Kette noch im
+// Grafikspeicher liegen. Zwei Dinge hängen daran: der Encoder darf dann KEIN
+// -pix_fmt bekommen (FFmpeg würde einen CPU-Formatwandler einhängen, den es
+// für Bilder im Grafikspeicher nicht gibt — Fehlermeldung "Impossible to
+// convert between the formats"), und jeder nachfolgende CPU-Filter braucht
+// vorher ein hwdownload.
+func chainEndsOnCard(chain string) bool {
+	return chainUsesGPU(chain) && !strings.Contains(chain, "hwdownload")
+}
+
+// filterChainToCPU ergänzt eine auf der Karte endende Kette um den Rückweg in
+// den Arbeitsspeicher. Für alles, was danach ein CPU-Filter anfassen muss:
+// der VMAF-Vergleich und der verlustfreie Zwischenspeicher der Auto-CQ-Suche.
+func filterChainToCPU(chain string) string {
+	if !chainEndsOnCard(chain) {
+		return chain
+	}
+	return chain + ",hwdownload,format=" + gpuPixFmt()
+}
+
+// ----------------------------------------------------------------------------
+// Bittiefe: 10 Bit ist der Auslieferungszustand, -8bit die Ausnahme
+// ----------------------------------------------------------------------------
+//
+// Warum 10 Bit die Vorgabe bleibt: H.265 kostet dafür praktisch nichts und
+// vermeidet die Streifen, die in dunklen Verläufen sonst sichtbar werden (der
+// Encoder rechnet intern feiner). 8 Bit gibt es nur für Geräte, die das Profil
+// "Main 10" gar nicht dekodieren können — ältere Fernseher, Beamer, Handys.
+// Bei 8 Bit ist das Format für beide Encoder-Familien dasselbe.
+
+// encodePixFmt ist das Pixelformat für NVENC und für das Ende der Filterkette.
+func encodePixFmt() string {
+	if eightBitActive {
+		return "yuv420p"
+	}
+	return "p010le"
+}
+
+// cpuEncodePixFmt ist das Gegenstück für libx265/libsvtav1, die die
+// planare Schreibweise erwarten.
+func cpuEncodePixFmt() string {
+	if eightBitActive {
+		return "yuv420p"
+	}
+	return "yuv420p10le"
+}
+
+// hevcProfileName: "main10" trägt 10 Bit, "main" ist das 8-Bit-Profil, das
+// auch alte Geräte kennen. Gilt für hevc_nvenc und libx265 gleichermaßen.
+func hevcProfileName() string {
+	if eightBitActive {
+		return "main"
+	}
+	return "main10"
+}
+
+// encoderInputFormatArgs liefert das Eingangsformat für die NVENC-Encoder —
+// außer wenn die Bilder im Grafikspeicher bleiben: dann legt scale_cuda das
+// Format fest und ein zusätzliches -pix_fmt würde den Lauf abbrechen
+// (siehe gpuFramesStayOnCard).
+func encoderInputFormatArgs() []string {
+	if gpuFramesStayOnCard {
+		return nil
+	}
+	return []string{"-pix_fmt", encodePixFmt()}
+}
+
+func buildVideoFilter(doScale, deinterlace, gpuScale bool) string {
 	// bwdif before any scaling: deinterlacing needs the original field
 	// structure. send_frame keeps the source frame rate (25i → 25p).
 	pre := ""
 	if deinterlace {
 		pre = "bwdif=mode=send_frame,"
+	}
+	if doScale && gpuScale {
+		return pre + buildGPUScaleChain()
 	}
 	if doScale {
 		short := appSettings.maxResolution
@@ -2044,9 +2110,9 @@ func buildVideoFilter(doScale, deinterlace bool) string {
 			chain += ",cas=strength=" +
 				strconv.FormatFloat(appSettings.casStrength, 'f', -1, 64)
 		}
-		return pre + chain + ",format=p010le"
+		return pre + chain + ",format=" + encodePixFmt()
 	}
-	return pre + "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
+	return pre + "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=" + encodePixFmt()
 }
 
 // videoIsInterlaced reports whether the probed field order marks real
@@ -2072,12 +2138,13 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 	opts := []string{
 		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
 		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
-		"-profile:v", "main10", "-pix_fmt", "p010le",
+		"-profile:v", hevcProfileName(),
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1",
 		"-aq-strength", "8", "-bf", strconv.Itoa(appSettings.bFrames),
 	}
+	opts = append(opts, encoderInputFormatArgs()...)
 	// Temporal AQ + multipass need Turing (RTX 20) or newer. checkHardwareCapabilities
 	// clears nvencAdvancedAQ on older cards so the encode drops them instead of
 	// failing on every file.
@@ -2095,15 +2162,15 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 // own CQ scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
 // B-frame options (not exposed by av1_nvenc), AQ flags use hyphens.
 func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
-	return []string{
+	opts := []string{
 		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
 		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
-		"-pix_fmt", "p010le",
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-multipass", "qres", "-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1", "-temporal-aq", "1",
 		"-aq-strength", "8",
 	}
+	return append(opts, encoderInputFormatArgs()...)
 }
 
 // ----------------------------------------------------------------------------
@@ -2128,7 +2195,7 @@ func buildX265OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string 
 	opts := []string{
 		"-c:v", "libx265", "-crf", strconv.Itoa(crf),
 		"-maxrate", maxBitrate, "-bufsize", bufsize,
-		"-profile:v", "main10", "-pix_fmt", "yuv420p10le",
+		"-profile:v", hevcProfileName(), "-pix_fmt", cpuEncodePixFmt(),
 		"-preset", appSettings.cpuPreset, "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop),
 		"-x265-params", "log-level=error",
@@ -2150,7 +2217,7 @@ func buildSVTAV1OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []strin
 	opts := []string{
 		"-c:v", "libsvtav1", "-crf", strconv.Itoa(crf),
 		"-maxrate", maxBitrate, "-bufsize", bufsize,
-		"-pix_fmt", "yuv420p10le",
+		"-pix_fmt", cpuEncodePixFmt(),
 		"-preset", strconv.Itoa(appSettings.cpuAV1Preset), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop),
 	}

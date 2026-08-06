@@ -808,14 +808,9 @@ func writeVideoOnlyMP4(ctx context.Context, srcPath, mp4Out string, streams *ffp
 		"-map", "0:V:0",
 		"-c:v", "copy",
 		"-an", "-sn",
-		"-movflags", "+faststart",
 	}
-	for _, s := range streams.Streams {
-		if s.CodecType == "video" && s.CodecName == "hevc" {
-			args = append(args, "-tag:v", "hvc1")
-			break
-		}
-	}
+	// Eine Stelle für alle MP4s des Programms: siehe mp4MuxArgs in MP4.go.
+	args = append(args, mp4MuxArgs(primaryVideoCodec(streams))...)
 	args = append(args, mp4Out)
 
 	fmt.Println(pterm.Gray("  → Extracting video (stream copy, no re-encode)..."))
@@ -2031,13 +2026,8 @@ func writeNoSoundVideoLossless(ctx context.Context, srcPath string, streams *ffp
 		"-avoid_negative_ts", "make_zero",
 	}
 	if isMP4 {
-		args = append(args, "-movflags", "+faststart")
-		for _, s := range streams.Streams {
-			if s.CodecType == "video" && s.CodecName == "hevc" {
-				args = append(args, "-tag:v", "hvc1")
-				break
-			}
-		}
+		// Eine Stelle für alle MP4s des Programms: siehe mp4MuxArgs in MP4.go.
+		args = append(args, mp4MuxArgs(primaryVideoCodec(streams))...)
 	}
 	args = append(args, out)
 

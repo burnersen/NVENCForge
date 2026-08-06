@@ -87,18 +87,36 @@ CONVERSION OPTIONS
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
-  -apple         Write an iOS-ready ".mp4" (plays on iPhone/iPad
-                 and imports into the Photos app) instead of
-                 ".mkv": the H.265 video is re-tagged "hvc1" (Apple
-                 refuses the "hev1" tag FFmpeg sets by default),
-                 audio becomes AAC where needed and "+faststart" is
-                 added. A fresh source is encoded as usual and then
+  -mp4           Write a ".mp4" instead of ".mkv" - the container
+                 nearly every device can open: iPhone/iPad (imports
+                 into the Photos app), smart TVs, tablets, browsers.
+                 The H.265 video is re-tagged "hvc1" (Apple and
+                 DaVinci refuse the "hev1" tag FFmpeg sets by
+                 default), audio becomes AAC where needed and
+                 "+faststart" is added so playback starts at once.
+                 A fresh source is encoded as usual and then
                  repackaged; a file you ALREADY converted
                  (".h265.mkv") is only repackaged - no second
-                 encode - and the original .mkv is kept. AV1 cannot
-                 play on iOS, so -apple always uses H.265 (an
-                 existing ".av1.mkv" is skipped with a hint - re-run
-                 -apple on the original source).
+                 encode - and the original .mkv is kept.
+                 With more than one audio/subtitle track you are
+                 asked which ones to keep (no answer within 30 s
+                 keeps them all). Text subtitles go in as
+                 "mov_text"; picture subtitles from Blu-rays cannot
+                 be stored in MP4 at all and are reported.
+                 AV1 plays on neither iPhones nor most TVs, so -mp4
+                 always uses H.265 (an existing ".av1.mkv" is
+                 skipped with a hint - re-run -mp4 on the original
+                 source). (alias: -apple, the old name)
+  -8bit          Encode in 8 bit instead of 10 bit. Only needed for
+                 devices that cannot decode the "Main 10" profile -
+                 some older TVs, beamers and Android phones show a
+                 black screen or refuse the file. The picture may
+                 show slight banding in dark gradients, which is
+                 exactly what 10 bit avoids, so use this only when
+                 a device actually refuses to play. Works with
+                 every mode (H.265, AV1, -cpu, -mp4). Repackaging
+                 an already converted file cannot change its bit
+                 depth - that needs a real conversion.
   -cpu           Encode on the processor instead of the graphics
                  card - NO Nvidia card required (libx265, or
                  SVT-AV1 when combined with -av1). Everything else
@@ -384,7 +402,8 @@ func printConsoleHelp() {
 	option("-original, -orig", "keep the source resolution (no downscale to 1080p)")
 	option("-copyaudio, -ca", "copy all audio tracks 1:1 (no AAC re-encode)")
 	option("-av1", "encode AV1 instead of H.265 (needs an RTX 40 or newer)")
-	option("-apple", "write an iOS-ready .mp4 for iPhone/iPad instead of .mkv")
+	option("-mp4", "write a .mp4 that plays almost everywhere, instead of .mkv")
+	option("-8bit", "encode in 8 bit for older devices that reject 10 bit")
 	option("-cpu", "encode on the processor - no Nvidia card needed, slower")
 	option("-cq NN", "force a fixed quality (H.265 1-51, AV1 1-63; lower = better)")
 	option("-noautocq", "switch the automatic quality search off for this run")

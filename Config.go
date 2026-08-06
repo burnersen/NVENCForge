@@ -29,7 +29,8 @@ type AppConfig struct {
 	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
 	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc bzw. libsvtav1) statt H.265
 	cpu            bool     // -cpu: auf dem Prozessor encodieren (libx265/libsvtav1) statt auf der GPU
-	apple          bool     // -apple: Ausgabe als iOS-taugliche MP4 (H.265/hvc1 + AAC + faststart) statt MKV
+	mp4Mode        bool     // -mp4 (alt: -apple): Ausgabe als überall abspielbare MP4 (H.265/hvc1 + AAC + faststart) statt MKV
+	eightBit       bool     // -8bit: in 8 Bit encodieren statt in 10 Bit (für alte Geräte, die kein Main10 können)
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
 	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
@@ -156,6 +157,15 @@ const (
 // gefunden wurde. Die Options-Bauer lesen es, damit an den Aufrufstellen
 // keine zusätzliche Fallunterscheidung nötig ist.
 var cpuModeActive = false
+
+// eightBitActive gilt für den ganzen Lauf: gesetzt durch das Flag -8bit.
+// Ausgeliefert wird weiterhin 10 Bit — das vermeidet Streifen in dunklen
+// Verläufen und kostet bei H.265 nichts. 8 Bit ist ausschließlich eine
+// Kompatibilitätskrücke für Geräte, die das Profil "Main 10" nicht
+// dekodieren können (ältere Fernseher, Beamer, Android-Handys). Die
+// Options-Bauer lesen die Variable, damit an den Aufrufstellen keine
+// zusätzliche Fallunterscheidung nötig ist — genau wie bei cpuModeActive.
+var eightBitActive = false
 
 // loadOrCreateAppConfig legt die INI bei Fehlen an. Ungültige Werte werden
 // einzeln auf ihren Default zurückgesetzt – mit Warnung UND direkt in der INI

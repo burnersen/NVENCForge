@@ -1,0 +1,20 @@
+# Go sources are LF, always. gofmt normalises line endings to LF, so a CRLF
+# file is reported as "unformatted" no matter how well it is written — which
+# silently turns `gofmt -l` into a check that can never pass. Ten of the
+# nineteen sources had drifted to CRLF before this file existed.
+*.go     text eol=lf
+go.mod   text eol=lf
+go.sum   text eol=lf
+
+# Batch stays CRLF: cmd.exe is the one consumer that genuinely cares.
+*.bat    text eol=crlf
+
+# Documentation and config: normalise in the repository, check out native.
+*.md     text
+*.yml    text
+.gitignore text
+
+# Never touch binary content.
+*.png    binary
+*.zip    binary
+*.exe    binary

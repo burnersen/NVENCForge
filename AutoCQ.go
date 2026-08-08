@@ -817,14 +817,14 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		windows, placement = gw, "bitrate-guided"
 	}
 
-	// Reference cache: decode + filter the sample windows ONCE into a lossless
-	// temp file; every sample encode and VMAF measurement then reads that file
-	// instead of re-decoding (and re-scaling) the source per step — on 4K
-	// sources that repeated decode dominated the analysis time. The pixels are
-	// bit-identical, so the scores and the CQ pick stay exactly the same. Like
-	// the guided placement, the cache is an optimisation: any problem (estimate
-	// above the size cap, encode failure, full temp disk) silently keeps the
-	// direct-from-source path.
+	// Hier stand bis 1.10.0 ein Referenz-Cache, der die Fenster einmal
+	// verlustfrei zwischenspeicherte. Er ist raus und soll nicht zurück: an
+	// echten Dateien gemessen war er in JEDER Konstellation langsamer als der
+	// direkte Weg — 4K 0:26 mit gegen 0:14 ohne, 1080p60 1:33 gegen 0:57,
+	// selbst bei CPU-Decode 0:26 gegen 0:21, und das bei identischen Ankern
+	// und identischer CQ-Wahl. Seit NVDEC ist Entpacken billig; das
+	// verlustfreie Schreiben des Caches ist es nicht.
+	//
 	// Entpacken auf der Grafikkarte gilt auch für die Messläufe. Das ist
 	// bildgleich (siehe gpuDecodeArgs), die gemessenen VMAF-Werte und damit die
 	// CQ-Wahl bleiben also unverändert — nur die Analyse wird schneller.

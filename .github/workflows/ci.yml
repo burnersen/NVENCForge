@@ -1,0 +1,56 @@
+# Runs on Windows because it has to. Every source file carries
+# //go:build windows && amd64, so on a Linux runner Go finds no packages at
+# all - the steps below would then report success without having checked a
+# single line.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Embed.go embeds this archive, and it is deliberately not committed -
+      # build.bat regenerates it on every build. Without it, build, vet AND
+      # test all stop at "pattern embedded_source.zip: no matching files
+      # found", so it has to be packed before anything else runs. Same file
+      # list build.bat uses.
+      - name: Pack embedded sources
+        run: |
+          $inc = Get-ChildItem -File | Where-Object { @('.go','.mod','.sum','.md','.bat') -contains $_.Extension }
+          Compress-Archive -Path $inc.FullName -DestinationPath embedded_source.zip -Force
+
+      # gofmt -l prints the offenders and then exits 0, so on its own it can
+      # never fail a build. Turning its output into the verdict is the whole
+      # point of this step.
+      - name: gofmt
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            Write-Host "::error::These files are not gofmt-clean:"
+            $unformatted | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "All sources are gofmt-clean."
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: go build
+        run: go build ./...

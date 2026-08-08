@@ -283,3 +283,248 @@ func TestSplitNoSoundNameIsStable(t *testing.T) {
 		}
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Subtitle handling
+//
+// Pure text work, so everything here runs without FFmpeg. The parser is a
+// state machine with a blank-line lookahead, which is where subtitles with
+// empty lines inside a block get lost if it goes wrong.
+// ----------------------------------------------------------------------------
+
+func TestSRTNormalize(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"windows line endings", "a\r\nb", "a\nb"},
+		{"old mac line endings", "a\rb", "a\nb"},
+		{"byte order mark is dropped", "\xEF\xBB\xBF1", "1"},
+		{"bom only at the start", "a\xEF\xBB\xBFb", "a\xEF\xBB\xBFb"},
+		{"already clean", "a\nb", "a\nb"},
+	}
+	for _, c := range cases {
+		if got := srtNormalize(c.in); got != c.want {
+			t.Errorf("%s: srtNormalize(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestSRTTimeRoundTrip(t *testing.T) {
+	for _, ts := range []string{"00:00:00,000", "00:00:01,500", "01:23:45,678", "99:59:59,999"} {
+		if got := srtFormatTimeMS(srtParseTimeMS(ts)); got != ts {
+			t.Errorf("round trip of %q produced %q", ts, got)
+		}
+	}
+	// A dot instead of a comma is accepted on the way in and normalised on
+	// the way out - some tools write SRT that way.
+	if got := srtFormatTimeMS(srtParseTimeMS("00:00:02.250")); got != "00:00:02,250" {
+		t.Errorf("dotted timestamp became %q, want %q", got, "00:00:02,250")
+	}
+}
+
+func TestSRTTimestampPatternGuardsTheParser(t *testing.T) {
+	// srtParseTimeMS ignores whether Sscanf actually matched, so malformed
+	// input silently becomes 0 - a subtitle jumping to the start of the film
+	// with no error anywhere. That is only safe because every caller passes a
+	// capture group of srtTSRegex. This test holds the two halves together:
+	// loosen the pattern and this fails here, instead of in a subtitle file.
+	//
+	// Note the whole LINE is tested, not a bare timestamp: the pattern spans
+	// both stamps and the arrow, so a lone timestamp never matches it and
+	// would prove nothing.
+	for _, bad := range []string{
+		"1:2:3,4 --> 5:6:7,8",
+		"0:00:01,000 --> 0:00:02,000",
+		"00:00:01 --> 00:00:02",
+		"00:00:01.5 --> 00:00:02.5",
+		"00:00:01,00 --> 00:00:02,00",
+		"garbage --> nonsense",
+		"",
+	} {
+		if srtTSRegex.MatchString(bad) {
+			t.Errorf("pattern accepts %q - srtParseTimeMS would then take it unchecked", bad)
+		}
+	}
+
+	// The other half of the guarantee: whatever the pattern DOES accept has
+	// to survive srtParseTimeMS unchanged. This is what the ignored error
+	// code leans on.
+	for _, good := range []string{
+		"00:00:01,000 --> 00:00:02,000",
+		"01:23:45,678 --> 99:59:59,999",
+		"00:00:01.500 --> 00:00:02.500",
+	} {
+		m := srtTSRegex.FindStringSubmatch(good)
+		if m == nil {
+			t.Errorf("pattern rejects the valid line %q", good)
+			continue
+		}
+		for _, ts := range m[1:] {
+			want := strings.ReplaceAll(ts, ".", ",")
+			if got := srtFormatTimeMS(srtParseTimeMS(ts)); got != want {
+				t.Errorf("%q: capture %q came back as %q - malformed input is reaching the parser",
+					good, ts, got)
+			}
+		}
+	}
+
+	if got := srtParseTimeMS("garbage"); got != 0 {
+		t.Errorf("unparsable input now returns %d instead of 0 - the assumption above changed", got)
+	}
+}
+
+func TestSRTParse(t *testing.T) {
+	content := "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n" +
+		"2\n00:00:03,000 --> 00:00:04,500\nLine one\nLine two\n"
+
+	blocks, malformed := srtParse(content)
+	if malformed != 0 {
+		t.Errorf("clean input reported %d malformed blocks", malformed)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2", len(blocks))
+	}
+	if blocks[0].Text != "Hello" {
+		t.Errorf("first text = %q, want %q", blocks[0].Text, "Hello")
+	}
+	if blocks[1].Text != "Line one\nLine two" {
+		t.Errorf("multi-line text = %q", blocks[1].Text)
+	}
+	if blocks[1].StartMS != 3000 || blocks[1].EndMS != 4500 {
+		t.Errorf("second block times = %d..%d, want 3000..4500", blocks[1].StartMS, blocks[1].EndMS)
+	}
+	if blocks[0].Number != 1 || blocks[1].Number != 2 {
+		t.Errorf("numbers = %d,%d, want 1,2", blocks[0].Number, blocks[1].Number)
+	}
+}
+
+func TestSRTParseKeepsBlankLineInsideABlock(t *testing.T) {
+	// The blank line here belongs to the subtitle, not between blocks. Losing
+	// the lookahead would end the block early and drop "Line B".
+	content := "1\n00:00:01,000 --> 00:00:02,000\nLine A\n\nLine B\n\n" +
+		"2\n00:00:03,000 --> 00:00:04,000\nNext\n"
+
+	blocks, _ := srtParse(content)
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2", len(blocks))
+	}
+	if !strings.Contains(blocks[0].Text, "Line B") {
+		t.Errorf("text after the inner blank line was dropped: %q", blocks[0].Text)
+	}
+}
+
+func TestSRTParseCountsMissingNumbers(t *testing.T) {
+	// A block that starts straight with the timestamp is malformed but must
+	// still survive - and get a number of its own.
+	content := "00:00:01,000 --> 00:00:02,000\nNo number above me\n"
+
+	blocks, malformed := srtParse(content)
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	if malformed == 0 {
+		t.Error("missing block number was not counted as malformed")
+	}
+	if blocks[0].Number != 1 {
+		t.Errorf("block got number %d, want 1", blocks[0].Number)
+	}
+}
+
+func TestSRTFilter(t *testing.T) {
+	blocks := []srtBlock{
+		{Number: 1, Text: "<i>Italic</i> text"},
+		{Number: 2, Text: "{\an8}Positioned"},
+		{Number: 3, Text: "Ampersand &amp; entity"},
+		{Number: 4, Text: "   "},
+		{Number: 5, Text: "Subtitles by someone"},
+		{Number: 6, Text: "advert"},
+		{Number: 7, Text: "advert in a sentence"},
+		{Number: 8, Text: "Invisible\u200Bcharacter"},
+	}
+	phrases := []string{"subtitles by", "=advert"}
+
+	clean, removed := srtFilter(blocks, phrases)
+
+	want := []string{"Italic text", "Positioned", "Ampersand & entity",
+		"advert in a sentence", "Invisiblecharacter"}
+	if len(clean) != len(want) {
+		t.Fatalf("got %d blocks, want %d: %+v", len(clean), len(want), clean)
+	}
+	for i, w := range want {
+		if clean[i].Text != w {
+			t.Errorf("block %d text = %q, want %q", i, clean[i].Text, w)
+		}
+		// Survivors are renumbered from 1 without gaps, otherwise players
+		// stumble over the sequence.
+		if clean[i].Number != i+1 {
+			t.Errorf("block %d has number %d, want %d", i, clean[i].Number, i+1)
+		}
+	}
+	if removed != 3 {
+		t.Errorf("removed %d blocks, want 3 (empty, phrase match, exact match)", removed)
+	}
+}
+
+func TestSRTApplyMicroGaps(t *testing.T) {
+	blocks := []srtBlock{
+		{StartMS: 0, EndMS: 1000, Timestamp: "00:00:00,000 --> 00:00:01,000"},
+		{StartMS: 1000, EndMS: 2000, Timestamp: "00:00:01,000 --> 00:00:02,000"},
+		{StartMS: 3000, EndMS: 4000, Timestamp: "00:00:03,000 --> 00:00:04,000"},
+	}
+	srtApplyMicroGaps(blocks)
+
+	if blocks[1].StartMS != 1001 {
+		t.Errorf("touching block starts at %d, want 1001", blocks[1].StartMS)
+	}
+	// The printed timestamp has to move with the value, or the file says
+	// something different from the parsed data.
+	if blocks[1].Timestamp != "00:00:01,001 --> 00:00:02,000" {
+		t.Errorf("timestamp text was not updated: %q", blocks[1].Timestamp)
+	}
+	if blocks[2].StartMS != 3000 {
+		t.Errorf("block with a real gap was moved to %d", blocks[2].StartMS)
+	}
+	if blocks[0].StartMS != 0 {
+		t.Errorf("first block was moved to %d", blocks[0].StartMS)
+	}
+}
+
+func TestLoadOrCreateSRTConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SRTCleaner_config.txt")
+
+	phrases := loadOrCreateSRTConfig(path)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("config was not created: %v", err)
+	}
+	if len(phrases) == 0 {
+		t.Fatal("freshly created config yielded no phrases")
+	}
+	for _, p := range phrases {
+		if strings.HasPrefix(p, "#") {
+			t.Errorf("comment line leaked into the phrase list: %q", p)
+		}
+		if p != strings.ToLower(p) {
+			t.Errorf("phrase is not lower-cased: %q", p)
+		}
+		if strings.TrimSpace(p) == "" {
+			t.Error("blank line leaked into the phrase list")
+		}
+	}
+}
+
+func TestLoadOrCreateSRTConfigKeepsAnExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SRTCleaner_config.txt")
+	own := "# my own list\n\nOnlyThis\n"
+	if err := os.WriteFile(path, []byte(own), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	phrases := loadOrCreateSRTConfig(path)
+	if len(phrases) != 1 || phrases[0] != "onlythis" {
+		t.Errorf("existing config was not used as-is: %v", phrases)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != own {
+		t.Error("an existing config file must never be rewritten")
+	}
+}

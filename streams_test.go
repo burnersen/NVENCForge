@@ -528,3 +528,204 @@ func TestLoadOrCreateSRTConfigKeepsAnExistingFile(t *testing.T) {
 		t.Error("an existing config file must never be rewritten")
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Sorting the dropped files, and the small helpers around them
+// ----------------------------------------------------------------------------
+
+func TestCategorizeArgs(t *testing.T) {
+	args := []string{
+		`C:\v\Movie.mkv`, `C:\v\Clip.MP4`, `C:\v\Clip.m4v`, `C:\v\Clip.mov`,
+		`C:\v\Subs.srt`, `C:\v\Subs.sup`, `C:\v\Subs.ass`, `C:\v\Subs.ssa`, `C:\v\Subs.vtt`,
+		`C:\v\Track.ac3`, `C:\v\Track.flac`, `C:\v\Track.mka`,
+		`C:\v\Notes.txt`, `C:\v\Cover.jpg`,
+	}
+	mkvs, mp4s, audios, srts, others := categorizeArgs(args)
+
+	if len(mkvs) != 1 {
+		t.Errorf("mkvs = %v, want 1 entry", mkvs)
+	}
+	if len(mp4s) != 3 {
+		t.Errorf("mp4s = %v, want 3 entries (mp4/m4v/mov, upper case included)", mp4s)
+	}
+	if len(srts) != 5 {
+		t.Errorf("subtitles = %v, want 5 entries", srts)
+	}
+	if len(audios) != 3 {
+		t.Errorf("audios = %v, want 3 entries", audios)
+	}
+	if len(others) != 2 {
+		t.Errorf("others = %v, want 2 entries", others)
+	}
+}
+
+func TestCategorizeArgsPairsVobSub(t *testing.T) {
+	// A .sub belongs to its .idx and must not be handed over separately -
+	// FFmpeg picks it up through the .idx on its own. Without a matching
+	// .idx, though, it is a stray file and belongs in "others" rather than
+	// being silently swallowed. (The comment in the code calls this SUB-02.)
+	cases := []struct {
+		name      string
+		args      []string
+		wantSrts  int
+		wantOther int
+	}{
+		{"pair stays together", []string{`C:\v\S.idx`, `C:\v\S.sub`}, 1, 0},
+		{"orphaned sub is not swallowed", []string{`C:\v\S.sub`}, 0, 1},
+		{"pairing ignores case", []string{`C:\v\S.IDX`, `C:\v\S.SUB`}, 1, 0},
+		{"different stem does not pair", []string{`C:\v\A.idx`, `C:\v\B.sub`}, 1, 1},
+	}
+	for _, c := range cases {
+		_, _, _, srts, others := categorizeArgs(c.args)
+		if len(srts) != c.wantSrts {
+			t.Errorf("%s: subtitles = %v, want %d", c.name, srts, c.wantSrts)
+		}
+		if len(others) != c.wantOther {
+			t.Errorf("%s: others = %v, want %d", c.name, others, c.wantOther)
+		}
+	}
+}
+
+func TestLangHelpers(t *testing.T) {
+	langCases := []struct{ in, wantCode, wantName string }{
+		{"de", "ger", "German"},
+		{"deu", "ger", "German"},
+		{"ger", "ger", "German"},
+		{"EN", "eng", "English"},
+		{"  fr  ", "fra", "French"},
+		{"zzz", "und", ""},
+		{"", "und", ""},
+	}
+	for _, c := range langCases {
+		if got := normalizeLang(c.in); got != c.wantCode {
+			t.Errorf("normalizeLang(%q) = %q, want %q", c.in, got, c.wantCode)
+		}
+		if got := langDisplayName(c.in); got != c.wantName {
+			t.Errorf("langDisplayName(%q) = %q, want %q", c.in, got, c.wantName)
+		}
+	}
+}
+
+func TestParseSubTags(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		wantLang   string
+		wantForced bool
+		wantSDH    bool
+	}{
+		{"plain language", `C:\v\Movie.de.srt`, "ger", false, false},
+		{"three letter code", `C:\v\Movie.eng.srt`, "eng", false, false},
+		{"forced flag", `C:\v\Movie.de.forced.srt`, "ger", true, false},
+		{"sdh flag", `C:\v\Movie.en.sdh.srt`, "eng", false, true},
+		{"numbered track", `C:\v\Movie.de.2.srt`, "ger", false, false},
+		{"stereo suffix", `C:\v\Movie.de.stereo.m4a`, "ger", false, false},
+		{"no language at all", `C:\v\Movie.srt`, "und", false, false},
+		{"unknown language code", `C:\v\Movie.zz.srt`, "und", false, false},
+		{"long word is not a code", `C:\v\My.movie.srt`, "und", false, false},
+	}
+	for _, c := range cases {
+		lang, forced, sdh := parseSubTags(c.file)
+		if lang != c.wantLang {
+			t.Errorf("%s: lang = %q, want %q", c.name, lang, c.wantLang)
+		}
+		if forced != c.wantForced {
+			t.Errorf("%s: forced = %v, want %v", c.name, forced, c.wantForced)
+		}
+		if sdh != c.wantSDH {
+			t.Errorf("%s: sdh = %v, want %v", c.name, sdh, c.wantSDH)
+		}
+	}
+}
+
+func TestTailBufferKeepsOnlyTheTail(t *testing.T) {
+	tb := &tailBuffer{max: 10}
+
+	// The io.Writer contract matters here: exec.Cmd treats a short write as a
+	// failure and kills the pipe, so Write must always report the full length.
+	writes := []string{"abcde", "fghij", "klmno"}
+	for _, w := range writes {
+		n, err := tb.Write([]byte(w))
+		if n != len(w) || err != nil {
+			t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", w, n, err, len(w))
+		}
+	}
+	if got := tb.String(); got != "fghijklmno" {
+		t.Errorf("buffer = %q, want %q", got, "fghijklmno")
+	}
+	if len(tb.buf) > tb.max {
+		t.Errorf("buffer grew past its cap: %d bytes", len(tb.buf))
+	}
+
+	// A single write larger than the cap keeps its tail, not its head.
+	tb2 := &tailBuffer{max: 4}
+	if _, err := tb2.Write([]byte("0123456789")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := tb2.String(); got != "6789" {
+		t.Errorf("oversized write kept %q, want %q", got, "6789")
+	}
+}
+
+func TestLastErrorLine(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"single line", "boom", "boom"},
+		{"last non-empty wins", "first\nsecond\nthird", "third"},
+		{"trailing blanks are skipped", "real error\n\n   \n", "real error"},
+		{"empty input", "", ""},
+		{"only whitespace", "   \n\t\n", ""},
+		{"surrounding space is trimmed", "  padded  ", "padded"},
+	}
+	for _, c := range cases {
+		if got := lastErrorLine(c.in); got != c.want {
+			t.Errorf("%s: lastErrorLine(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+
+	long := strings.Repeat("x", 250)
+	got := lastErrorLine(long)
+	if len(got) != 203 || !strings.HasSuffix(got, "...") {
+		t.Errorf("overlong line = %d chars ending %q, want 203 chars ending in an ellipsis",
+			len(got), got[max(0, len(got)-3):])
+	}
+}
+
+func TestEstimateAudioTrackMB(t *testing.T) {
+	const dur = 3600.0 // one hour
+
+	// A reported bitrate always wins over the per-codec guess.
+	real := estimateAudioTrackMB(ffprobeStream{BitRate: "128000", CodecName: "truehd"}, dur)
+	if want := 128000.0 * dur / 8 / (1024 * 1024); real != want {
+		t.Errorf("reported bitrate ignored: got %.3f, want %.3f", real, want)
+	}
+
+	cases := []struct {
+		name  string
+		codec string
+		ch    int
+		wantK float64
+	}{
+		{"ac3", "ac3", 6, 384},
+		{"eac3", "eac3", 6, 256},
+		{"dts", "dts", 6, 1024},
+		{"truehd", "truehd", 8, 3000},
+		{"flac scales with channels", "flac", 2, 800},
+		{"pcm scales with channels", "pcm_s16le", 2, 1536},
+		{"unknown codec falls back", "brandnew", 6, 576},
+		{"missing channel count assumes stereo", "brandnew", 0, 192},
+	}
+	for _, c := range cases {
+		got := estimateAudioTrackMB(ffprobeStream{CodecName: c.codec, Channels: c.ch}, dur)
+		want := c.wantK * 1000 * dur / 8 / (1024 * 1024)
+		if got != want {
+			t.Errorf("%s: got %.3f MB, want %.3f MB", c.name, got, want)
+		}
+	}
+
+	// No duration means no estimate, not a negative or absurd number.
+	for _, d := range []float64{0, -1} {
+		if got := estimateAudioTrackMB(ffprobeStream{CodecName: "ac3", Channels: 6}, d); got != 0 {
+			t.Errorf("duration %v produced %.3f, want 0", d, got)
+		}
+	}
+}

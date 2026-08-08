@@ -75,6 +75,15 @@ const (
 	// analysis ran 22-32% faster. SHORTER windows are not safe — 6 s and 4 s
 	// windows shifted the pick by 2-4 CQ steps in the same series, so the
 	// window LENGTH must stay at 8 s.
+	//
+	// The 6 s below is the one number that series never covered: every file
+	// in it ran past four minutes, so all of them took the long path. A
+	// short source is judged on 2 x 6 s = 12 s of material — less than any
+	// layout that series tried, including the ones it rejected for moving
+	// the pick. So the 6 s is an inherited value, not a measured one.
+	// Settling it needs its own A/B on sources between 30 s and 4 minutes;
+	// until someone runs that, it stays, because raising it unmeasured
+	// would be the same mistake pointing the other way.
 	autoCQMinSourceSec   = 30.0
 	autoCQShortSourceSec = 240.0
 	autoCQWindowSec      = 8.0

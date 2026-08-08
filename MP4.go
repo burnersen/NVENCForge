@@ -1,3 +1,9 @@
+//go:build windows && amd64
+
+// NVENCForge — Required Notice: Copyright (c) 2026 burnersen — NVENCForge
+// Licensed under the PolyForm Noncommercial License 1.0.0 (non-commercial use only).
+// Full terms: LICENSE.md · https://polyformproject.org/licenses/noncommercial/1.0.0
+
 // MP4.go — alles, was das Programm in einen MP4-Container schreibt.
 //
 // Der Sinn dieser Datei ist die Sammelstelle mp4MuxArgs: JEDE MP4, die dieses

@@ -71,6 +71,8 @@ type AppSettings struct {
 	gpuDecode              bool
 	gpuDecodeMaxMbit       int
 	retireMode             string
+	leanCheckMode          string
+	leanCheckBPPF          float64
 }
 
 var appSettings = defaultAppSettings()
@@ -105,6 +107,8 @@ func defaultAppSettings() AppSettings {
 		gpuDecode:              true,
 		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
 		retireMode:             retireModeFolder,
+		leanCheckMode:          leanCheckSkip,
+		leanCheckBPPF:          defaultLeanCheckBPPF,
 	}
 }
 
@@ -150,6 +154,24 @@ const (
 
 	// originalsFolderName ist das Gegenstück zum Ausgabeordner "output".
 	originalsFolderName = "originals"
+)
+
+// Lean-Check: schneller Metadaten-Vorfilter vor Auto-CQ und Encode. Stark
+// vorkomprimierte Quellen (wenig Bits pro Pixel und Bild) bieten kaum
+// Sparpotenzial, ein Re-Encode kostet dort nur Analyse-/Encodezeit und
+// Qualität — solche Dateien werden stattdessen remuxt (Auslieferungszustand
+// "skip"). "log" meldet nur, was der Filter tun WÜRDE, und encodiert normal
+// weiter: damit lässt sich eine geänderte Schwelle gefahrlos ausprobieren.
+const (
+	leanCheckOff  = "off"
+	leanCheckLog  = "log"
+	leanCheckSkip = "skip"
+
+	// defaultLeanCheckBPPF ist die Skip-Schwelle in Bits pro Pixel und Bild,
+	// normalisiert auf H.264 bei 30 fps. Kalibriert 2026-08-15 an echten
+	// Dateien: magere Quelle 0,050 gegen gesunde Quellen ab 0,125 — die
+	// Schwelle 0,055 liegt mit großem Abstand dazwischen.
+	defaultLeanCheckBPPF = 0.055
 )
 
 // cpuModeActive gilt für den ganzen Lauf: gesetzt durch das Flag -cpu, den
@@ -250,6 +272,8 @@ func defaultConfigStrings() map[string]string {
 		"gpuDecode":              strconv.FormatBool(d.gpuDecode),
 		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
 		"retireMode":             d.retireMode,
+		"leanCheck":              d.leanCheckMode,
+		"leanCheckBPPF":          strconv.FormatFloat(d.leanCheckBPPF, 'f', -1, 64),
 	}
 }
 
@@ -467,6 +491,18 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "leanCheck":
+			if m := strings.ToLower(val); m == leanCheckOff || m == leanCheckLog || m == leanCheckSkip {
+				s.leanCheckMode = m
+			} else {
+				bad(key, val)
+			}
+		case "leanCheckBPPF":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0.01 && fv <= 0.15 {
+				s.leanCheckBPPF = fv
+			} else {
+				bad(key, val)
+			}
 		case "cpuPreset":
 			if p := strings.ToLower(val); validCPUPresets[p] {
 				s.cpuPreset = p
@@ -632,6 +668,24 @@ your originals wait there until YOU delete them.
 the recycle bin on its own when a drive runs low on space, which is
 how originals used to vanish unnoticed.
 The -keep option always wins and leaves the original where it is.`)
+
+	configEntry("leanCheck", d.leanCheckMode, "off, log, skip",
+		`Quick pre-check for sources that are already squeezed dry.
+A file with very few bits per pixel (e.g. 1080p H.264 at 3000 kbit/s)
+has almost nothing left to save - re-encoding it only costs time and
+quality. "skip" repackages such files right away and spares you the
+(slow) quality analysis. "log" only prints what WOULD be skipped and
+encodes normally - handy if you want to try a different threshold
+first. "off" disables the check. Files being scaled down to 1080p are
+never affected: there the saving comes from the resolution.`)
+
+	configEntry("leanCheckBPPF", strconv.FormatFloat(d.leanCheckBPPF, 'f', -1, 64),
+		"0.01 to 0.15",
+		`Threshold for leanCheck, in bits per pixel per frame (H.264
+equivalent at 30 fps). Files below it count as already lean.
+Higher = skips more files, lower = skips fewer. The default 0.055
+was calibrated on real files: lean sources measured ~0.050, healthy
+ones 0.125 and up.`)
 
 	configEntry("encoder", d.encoder, "nvidia, cpu",
 		`Which encoder to use. "nvidia" uses the graphics card (fast).

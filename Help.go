@@ -287,6 +287,21 @@ CONFIGURATION
                  gets slightly softer. Set it back to 0.4 (or any
                  value up to 1.0) if you prefer the sharper look.
 
+  One more key saves time on hopeless files:
+    "leanCheck"  spots sources that are already squeezed dry - think
+                 1080p H.264 at 3000 kbit/s. There is nothing left to
+                 save in such a file, so it is repackaged straight
+                 away instead of running the (slow) quality analysis
+                 and an encode that would only cost quality. The
+                 decision takes milliseconds and reads nothing but
+                 metadata: bits per pixel and frame, normalised for
+                 the source codec, its frame rate and its resolution.
+                 Set it to "log" to only print what WOULD be skipped,
+                 or to "off" to switch the check off. Files that get
+                 scaled down to 1080p are never skipped - there the
+                 saving comes from the resolution, not from the
+                 compression. The threshold itself is "leanCheckBPPF".
+
 OUTPUT & REQUIREMENTS
   Output folder:    output (next to the processed files)
   Originals go to:  originals (next to the processed files)

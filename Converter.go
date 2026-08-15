@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -858,6 +859,29 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// highly-compressed H.264 case the user hit as well as already-lean HEVC/AV1.
 	reEncodeWorthwhile := doScale || calcKbps < bitrateKbps
 
+	// Lean-Check: der Floor oben ist blind für Codec und Bildrate — 1080p-H.264
+	// mit 3000 kbps rutscht durch (Floor 1500), obwohl da nichts mehr zu holen
+	// ist. Der Check rechnet die Bits pro Pixel und Bild aus (normalisiert auf
+	// H.264/30 fps) und stuft Quellen unter der Schwelle als "mager" ein.
+	// Beim Runterskalieren greift er bewusst NICHT: dort kommt die Ersparnis
+	// aus der Auflösung, nicht aus der Kompression.
+	leanSkipReason := ""
+	if reEncodeWorthwhile && !doScale && appSettings.leanCheckMode != leanCheckOff {
+		if bppf, eligible := leanSourceBPPF(stats, bitrateKbps); eligible {
+			if threshold := leanCheckThreshold(stats.Height, cfg.av1); bppf < threshold {
+				if appSettings.leanCheckMode == leanCheckSkip {
+					reEncodeWorthwhile = false
+					leanSkipReason = fmt.Sprintf(
+						"%.3f bits per pixel per frame, threshold %.3f", bppf, threshold)
+				} else {
+					pInfo.Printf("%s Lean check (log mode): would remux this file "+
+						"(%.3f bits per pixel per frame < threshold %.3f) — encoding normally.\n",
+						pterm.LightMagenta("›"), bppf, threshold)
+				}
+			}
+		}
+	}
+
 	// -av1 swaps the target codec: encoder opts, output suffix, "already
 	// converted" detection and validation all follow targetCodec.
 	targetCodec, outSuffix, codecLabel := "hevc", ".h265", "H.265"
@@ -915,8 +939,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		// re-encode would only burn GPU time and lose quality (the post-encode
 		// safety net would discard it anyway). Remux instead — codec-agnostic, so
 		// this also covers highly-compressed H.264, exactly the case reported.
-		pInfo.Printf("%s Source already lean (%d kbps, target floor would be %d kbps) — remuxing instead of re-encoding.\n",
-			pterm.LightMagenta("›"), bitrateKbps, calcKbps)
+		if leanSkipReason != "" {
+			pInfo.Printf("%s Source already lean (%s) — remuxing instead of re-encoding.\n",
+				pterm.LightMagenta("›"), leanSkipReason)
+		} else {
+			pInfo.Printf("%s Source already lean (%d kbps, target floor would be %d kbps) — remuxing instead of re-encoding.\n",
+				pterm.LightMagenta("›"), bitrateKbps, calcKbps)
+		}
 		doRemux = true
 	default:
 		doConvert = true
@@ -1919,6 +1948,81 @@ func cappedTargetKbps(sourceKbps int64, outHeight int, ceiling int64) int64 {
 		target = ceiling
 	}
 	return target
+}
+
+// ----------------------------------------------------------------------------
+// Lean-Check: Metadaten-Vorfilter für ausgereizte Quellen (INI: leanCheck)
+// ----------------------------------------------------------------------------
+
+// leanFPSReference: die BPPF-Schwelle ist auf 30 fps geeicht; andere Bildraten
+// werden über die Wurzel-Dämpfung in leanSourceBPPF darauf bezogen.
+const leanFPSReference = 30.0
+
+// codecEfficiencyFactor übersetzt die Bitrate eines Quell-Codecs in ein
+// H.264-Äquivalent, damit EINE Schwelle für alle Codecs reicht: ein HEVC-Bit
+// trägt etwa das 1,5-Fache eines H.264-Bits, ein MPEG-2-Bit nur gut die
+// Hälfte. false heißt: dieser Codec wird NIE als mager eingestuft — das
+// deckt Zwischenformate (ProRes, DNxHR, FFV1, …) und Unbekanntes ab; im
+// Zweifel wird encodiert, der Filter spart nur Zeit und darf nichts kosten.
+func codecEfficiencyFactor(codec string) (float64, bool) {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "mpeg1video":
+		return 0.4, true
+	case "mpeg2video":
+		return 0.6, true
+	case "vc1", "wmv3":
+		return 0.7, true
+	case "mpeg4", "msmpeg4v2", "msmpeg4v3":
+		return 0.8, true
+	case "h264":
+		return 1.0, true
+	case "hevc", "vp9":
+		return 1.5, true
+	case "av1":
+		return 1.9, true
+	case "vvc", "h266":
+		return 2.0, true
+	default:
+		return 0, false
+	}
+}
+
+// leanSourceBPPF liefert die Bits pro Pixel und Bild der Quelle, normalisiert
+// auf H.264 bei 30 fps. Die Bildrate geht gedämpft ein (Wurzel statt linear):
+// 60-fps-Material braucht real nur das ~1,2- bis 1,5-Fache der 30-fps-Bitrate,
+// weil aufeinanderfolgende Bilder sich stärker ähneln — linear gerechnet würde
+// der Filter 60-fps-Dateien viel zu aggressiv aussortieren.
+// false = nicht bewertbar (Codec ohne Faktor oder unbrauchbare Metadaten).
+func leanSourceBPPF(stats *VideoStats, videoKbps int64) (float64, bool) {
+	factor, eligible := codecEfficiencyFactor(stats.VideoCodec)
+	if !eligible || stats.Width <= 0 || stats.Height <= 0 ||
+		stats.FPSNum <= 0 || stats.FPSDen <= 0 || videoKbps <= 0 {
+		return 0, false
+	}
+	fps := float64(stats.FPSNum) / float64(stats.FPSDen)
+	dampedFPS := math.Sqrt(leanFPSReference * fps)
+	pixelsPerFrame := float64(stats.Width) * float64(stats.Height)
+	return float64(videoKbps) * 1000 * factor / (pixelsPerFrame * dampedFPS), true
+}
+
+// leanCheckThreshold ist die wirksame Skip-Schwelle für diese Datei. Höhere
+// Auflösungen brauchen pro Pixel etwas weniger Bits für denselben Eindruck,
+// deshalb sinkt die Schwelle stufenweise (Tabelle statt Potenzformel — die
+// Stufen decken sich mit bitrateFloorKbps und sind einzeln nachmessbar).
+// AV1 als Ziel holt auch aus magereren Quellen noch etwas heraus, darum wird
+// dort seltener geskippt.
+func leanCheckThreshold(height int, av1Target bool) float64 {
+	threshold := appSettings.leanCheckBPPF
+	switch {
+	case height > 1440:
+		threshold *= 0.8
+	case height > 1080:
+		threshold *= 0.9
+	}
+	if av1Target {
+		threshold *= 0.85
+	}
+	return threshold
 }
 
 // remuxSuffix maps a (passed-through) source video codec to the output-name

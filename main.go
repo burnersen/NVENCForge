@@ -91,6 +91,25 @@ var videoExtensions = map[string]bool{
 var skipSuffixes = []string{".h265", ".h264", ".remux", ".av1"}
 var skipInputSuffixes = []string{".h265", ".h264", ".remux", ".preview", ".av1"}
 
+// partSuffix marks the still-growing output: every encode and remux writes to
+// "<name><codec>.part.mkv" and is renamed to the final name only after
+// validateOutput passed. A clean Ctrl+C turns the part file into ".preview.mkv",
+// so anything still carrying this marker survived a HARD kill (power loss, task
+// manager, crash) and is a torn fragment — never a source file.
+const partSuffix = ".part"
+
+// isInterruptedFragment reports whether a collected file is one of our own torn
+// part files. Without this check the fragment would pass as an ordinary .mkv
+// input and be re-encoded in full: pure wasted runtime plus a nonsense output
+// named "<name>.h265.part.h265.mkv".
+func isInterruptedFragment(path string) bool {
+	if !strings.EqualFold(filepath.Ext(path), ".mkv") {
+		return false
+	}
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return strings.HasSuffix(strings.ToLower(base), partSuffix)
+}
+
 // sourceTagKey is the global container metadata key NVENCForge writes into every
 // output it produces (see sourceTagArgs). It records the exact source file name
 // so the "already converted" skip check can tell a genuine resume apart from a
@@ -1050,12 +1069,93 @@ func formatDuration(seconds float64) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-func getFileSizeMB(path string) float64 {
-	i, e := os.Stat(path)
-	if e != nil {
+func fileSizeBytes(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
 		return 0
 	}
-	return float64(i.Size()) / 1048576
+	return info.Size()
+}
+
+func getFileSizeMB(path string) float64 {
+	return float64(fileSizeBytes(path)) / 1048576
+}
+
+// ----------------------------------------------------------------------------
+// Batch progress: overall bar and remaining time for the WHOLE run
+// ----------------------------------------------------------------------------
+
+// batchETAMinShare is the fraction of the batch that must be done before a
+// remaining time is shown. Below that the extrapolation is guesswork: the very
+// first percent of the first file would predict the whole night.
+const batchETAMinShare = 0.02
+
+// batchTracker weighs the overall progress by INPUT BYTES instead of file
+// count. A two-hour film and an eight-minute episode are one file each, but not
+// one unit of work — counting files made the overall bar jump. Bytes are not a
+// perfect measure of encoding effort either (a remux is far cheaper than a
+// re-encode of the same size), but they are known up front for every file and
+// far closer to the truth than the file count.
+//
+// Because the estimate divides the elapsed WALL CLOCK by the finished share,
+// everything that happens between the encodes is included automatically — above
+// all the Auto-CQ analysis, which takes minutes and produces no encoder
+// progress at all.
+type batchTracker struct {
+	start      time.Time
+	totalBytes int64 // sum over every input file of the run
+	doneBytes  int64 // files completely dealt with
+	curBytes   int64 // the file currently being worked on
+}
+
+var batch batchTracker
+
+// share returns the finished fraction of the batch (0..1). filePct is the
+// progress inside the current file in percent. It returns 0 when no sizes are
+// known, which tells the caller to fall back to counting files.
+func (b *batchTracker) share(filePct float64) float64 {
+	if b.totalBytes <= 0 {
+		return 0
+	}
+	if filePct < 0 {
+		filePct = 0
+	}
+	if filePct > 100 {
+		filePct = 100
+	}
+	done := float64(b.doneBytes) + float64(b.curBytes)*filePct/100
+	share := done / float64(b.totalBytes)
+	if share < 0 {
+		return 0
+	}
+	if share > 1 {
+		return 1
+	}
+	return share
+}
+
+// remaining estimates the seconds left for the whole batch. The second return
+// value is false while the estimate would still be meaningless.
+func (b *batchTracker) remaining(filePct float64) (float64, bool) {
+	share := b.share(filePct)
+	if share < batchETAMinShare {
+		return 0, false
+	}
+	elapsed := time.Since(b.start).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	return elapsed/share - elapsed, true
+}
+
+// totalInputBytes sums the sizes of all collected files. Unreadable entries
+// count as 0 — they simply do not contribute to the weighting.
+func totalInputBytes(files []string) int64 {
+	var sum int64
+	for _, f := range files {
+		sum += fileSizeBytes(f)
+	}
+	return sum
 }
 
 // FIX LEAK-04: explicit f.Close() per iteration (no defer inside loop).
@@ -1684,17 +1784,24 @@ func main() {
 	pInfo.Printf("Processing %s %s...\n",
 		pterm.LightCyan(fmt.Sprintf("%d", len(files))), dateiStr)
 
+	batch = batchTracker{start: batchStart, totalBytes: totalInputBytes(files)}
+
 	results := make([]ProcessResult, 0, len(files))
 	for i, f := range files {
 		if ctx.Err() != nil {
 			results = append(results, ProcessResult{InputFile: f, Skipped: true})
 			continue
 		}
+		batch.curBytes = fileSizeBytes(f)
 		res := processFile(ctx, cfg, f, i+1, len(files))
 		if cfg.mp4Mode {
 			// -mp4: repackage the finished MKV output into a compatible MP4.
 			remuxResultToMP4(ctx, cfg, &res)
 		}
+		// Book the file as done AFTER the optional MP4 step, so its bytes stay
+		// in curBytes while that repackaging still reports progress.
+		batch.doneBytes += batch.curBytes
+		batch.curBytes = 0
 		results = append(results, res)
 	}
 

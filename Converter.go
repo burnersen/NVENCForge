@@ -601,6 +601,18 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	pterm.NewStyle(pterm.FgLightWhite).Printf("%s%s\n", base, ext)
 	result := ProcessResult{InputFile: filePath}
 
+	// A leftover part file is a torn half of an earlier run, not a source.
+	// Encoding it would burn the full runtime on a broken file, so it is
+	// reported and left untouched — deleting someone's data on a guess is not
+	// this program's job.
+	if isInterruptedFragment(filePath) {
+		fmt.Println(pterm.Gray(
+			"  Skipped: leftover fragment of an interrupted run (delete it, or run the original again)."))
+		fmt.Println()
+		result.Skipped = true
+		return result
+	}
+
 	if ext == ".mkv" {
 		for _, suf := range skipInputSuffixes {
 			if strings.HasSuffix(strings.ToLower(base), suf) {
@@ -1476,6 +1488,49 @@ func runFFmpegWithCPUDecodeFallback(ctx context.Context, job convJob,
 	return runFFmpeg(ctx, buildArgs(job.fallBackToCPUDecode()), durationSec, fileIdx, fileTotal, inputSizeMB)
 }
 
+// overallBarLen is the width of the batch bar. It is deliberately shorter than
+// the per-file bar so the two lines cannot be confused at a glance — and short
+// enough that the whole line (bar, percentage, counter, remaining time) stays
+// below 80 characters even with a three-part time like "1:23:45". A line that
+// wraps would leave leftovers behind, because pterm's area redraws by lines.
+const overallBarLen = 24
+
+// overallProgressLine renders the batch line below the per-file progress: bar,
+// percentage, file counter and the time left for the WHOLE run. filePct is the
+// progress inside the current file.
+//
+// Without readable file sizes it falls back to the old file-count weighting, so
+// the line never disappears — it only becomes less precise.
+func overallProgressLine(filePct float64, fileIdx, fileTotal int) string {
+	share := batch.share(filePct)
+	if batch.totalBytes <= 0 {
+		share = (float64(fileIdx-1) + filePct/100) / float64(max(fileTotal, 1))
+	}
+	if share > 1 {
+		share = 1
+	}
+
+	filled := int(share * float64(overallBarLen))
+	if filled > overallBarLen {
+		filled = overallBarLen
+	}
+
+	remainingText := "-:--"
+	if secs, ok := batch.remaining(filePct); ok {
+		remainingText = formatDuration(secs)
+	}
+
+	return fmt.Sprintf("  %s [%s%s]  %s  %s  %s %s",
+		pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).Sprint(fmt.Sprintf("%-10s", "Overall")),
+		pterm.LightMagenta(strings.Repeat("█", filled)),
+		pterm.Gray(strings.Repeat("░", overallBarLen-filled)),
+		pterm.NewStyle(pterm.FgLightWhite, pterm.Bold).
+			Sprint(fmt.Sprintf("%5.1f%%", share*100)),
+		pterm.Gray(fmt.Sprintf("(%d/%d)", fileIdx, fileTotal)),
+		pterm.Cyan("Remaining"),
+		pterm.LightYellow(remainingText))
+}
+
 func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx, fileTotal int, inputSizeMB float64) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -1550,10 +1605,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 		}
 	}()
 
-	const (
-		barLen  = 48
-		oBarLen = 30
-	)
+	const barLen = 48
 
 	startTime := time.Now()
 	progressStarted := false
@@ -1571,11 +1623,6 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 	cyanLabel := func(s string, width int) string {
 		return pterm.Cyan(fmt.Sprintf("%-*s", width, s))
 	}
-	magentaLbl := func(s string, width int) string {
-		return pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
-			Sprint(fmt.Sprintf("%-*s", width, s))
-	}
-
 	fields := make(map[string]string, 16)
 
 	scanner := bufio.NewScanner(stdout)
@@ -1677,15 +1724,6 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 		}
 		lastRender = time.Now()
 
-		overallPct := (float64(fileIdx-1) + pct/100) /
-			float64(max(fileTotal, 1)) * 100
-		oFilled := int(overallPct / 100 * float64(oBarLen))
-		if oFilled > oBarLen {
-			oFilled = oBarLen
-		}
-		oBarFilled := strings.Repeat("█", oFilled)
-		oBarEmpty := strings.Repeat("░", oBarLen-oFilled)
-
 		l1 := fmt.Sprintf("  [%s%s]  %s",
 			pterm.LightGreen(barFilled), pterm.Gray(barEmpty),
 			pterm.NewStyle(pterm.FgLightWhite, pterm.Bold).
@@ -1734,12 +1772,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 
 		var l5 string
 		if fileTotal > 1 {
-			l5 = fmt.Sprintf("  %s [%s%s]  %s  %s",
-				magentaLbl("Overall", 10),
-				pterm.LightMagenta(oBarFilled), pterm.Gray(oBarEmpty),
-				pterm.NewStyle(pterm.FgLightWhite, pterm.Bold).
-					Sprint(fmt.Sprintf("%5.1f%%", overallPct)),
-				pterm.Gray(fmt.Sprintf("(%d/%d)", fileIdx, fileTotal)))
+			l5 = overallProgressLine(pct, fileIdx, fileTotal)
 		}
 
 		lastL2, lastL3, lastL4 = l2, l3, l4
@@ -1793,20 +1826,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 
 		parts := []string{finalL1, lastL2, lastL3, lastL4}
 		if fileTotal > 1 {
-			overallPct := float64(fileIdx) / float64(fileTotal) * 100
-			oFilled := int(overallPct / 100 * float64(oBarLen))
-			if oFilled > oBarLen {
-				oFilled = oBarLen
-			}
-			oBarFilled := strings.Repeat("█", oFilled)
-			oBarEmpty := strings.Repeat("░", oBarLen-oFilled)
-			finalL5 := fmt.Sprintf("  %s [%s%s]  %s  %s",
-				magentaLbl("Overall", 10),
-				pterm.LightMagenta(oBarFilled), pterm.Gray(oBarEmpty),
-				pterm.NewStyle(pterm.FgLightWhite, pterm.Bold).
-					Sprint(fmt.Sprintf("%5.1f%%", overallPct)),
-				pterm.Gray(fmt.Sprintf("(%d/%d)", fileIdx, fileTotal)))
-			parts = append(parts, finalL5)
+			parts = append(parts, overallProgressLine(100, fileIdx, fileTotal))
 		}
 		progressArea.Update(strings.Join(parts, "\n"))
 	}

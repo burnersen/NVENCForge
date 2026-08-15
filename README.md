@@ -470,7 +470,7 @@ The [Auto-CQ section above](#auto-cq) covers *what* it does; here's *how* it sta
 <details>
 <summary><b>🪟 Windows-native craftsmanship (the deep nerdy bits)</b></summary>
 
-- **Live progress you can trust.** A per-file *and* an overall batch bar, with ETA, encode speed, fps, bitrate, frame count — and a continuously-smoothed *projected* output size that already tells you "≈ −60 %" long before the file is done. The cursor is hidden and line-wrap disabled during the render so nothing smears.
+- **Live progress you can trust.** A per-file *and* an overall batch bar, with ETA, encode speed, fps, bitrate, frame count — and a continuously-smoothed *projected* output size that already tells you "≈ −60 %" long before the file is done. The batch bar is weighted by file size rather than file count (a two-hour film is not one "file" of work like an eight-minute episode) and shows the time left for the **whole run** — the Auto-CQ analysis included, because the estimate is taken from the wall clock. The cursor is hidden and line-wrap disabled during the render so nothing smears.
 - **Stays out of your way.** Every heavy FFmpeg job — the encodes and the Auto-CQ analysis — runs at **idle priority**, so a big batch doesn't make the rest of your PC sluggish, and none of the FFmpeg/FFprobe calls pop up a console window.
 - **Real long-path support.** Paths over the classic 260-character limit — and UNC network paths — are handled with the `\\?\` prefix, correctly round-tripped both ways.
 - **Colours on old terminals.** ANSI/virtual-terminal mode is switched on explicitly, so the coloured UI works even in the plain classic console.

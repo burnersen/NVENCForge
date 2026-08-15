@@ -320,7 +320,7 @@ Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; inval
 
 **You don't have to touch it at all.** The file is split in two: **PART 1** holds the handful of settings people actually change (`maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder`), **PART 2** the expert settings, already set to measured values. Every entry explains what it does and which values are allowed. The full list:
 
-CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), the lean-source pre-check (`leanCheck`, `leanCheckBPPF`), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
+CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
 
 Two keys steer **speed** rather than quality:
 
@@ -328,13 +328,6 @@ Two keys steer **speed** rather than quality:
 |---|---|---|
 | `gpuDecode` | `true` | Decode on the GPU (NVDEC) instead of the CPU. The picture is bit-identical, so this costs nothing in quality. A decoder error automatically retries the file on the CPU. |
 | `gpuDecodeMaxMbit` | `50` | Sources above this bitrate always decode on the CPU. Extreme-bitrate HEVC has been known to crash display drivers, and no fallback can catch that — it has to be avoided beforehand. Typical 4K sources run at 10–30 Mbit/s, so the cautious default costs nothing. Raise it only if your files really are higher. |
-
-Two keys keep NVENCForge from wasting time on files that have nothing left to give:
-
-| Key | Default | What it does |
-|---|---|---|
-| `leanCheck` | `skip` | Spots sources that are already squeezed dry — 1080p H.264 at 3000 kbit/s, say — and repackages them straight away instead of running the quality analysis plus an encode that could only cost quality. The decision takes milliseconds and reads nothing but metadata: bits per pixel and frame, normalised for the source codec, its frame rate and its resolution. `log` only prints what *would* be skipped and encodes as usual; `off` disables the check. Files being scaled down to 1080p are never skipped — there the saving comes from the resolution, not from the compression. |
-| `leanCheckBPPF` | `0.055` | The threshold, in bits per pixel per frame (H.264 equivalent at 30 fps). Higher skips more files, lower skips fewer. Calibrated against real sources: lean files measured around 0.05, healthy ones 0.125 and up. |
 
 One key decides what happens to the **original** once its conversion is done:
 

@@ -195,7 +195,7 @@ func TestCPUSampleEncodesMatchRealEncode(t *testing.T) {
 		}{{false, "-c:v libx265"}, {true, "-c:v libsvtav1"}} {
 			real := strings.Join(activeVideoOptsBuilder(c.av1)(20, "8000k", "16000k", 120), " ")
 			sample := strings.Join(buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-				20, "8000k", "16000k", 120, "sample.mkv",
+				30000, 1001, 20, "8000k", "16000k", 120, "sample.mkv",
 				activeAutoCQScale(c.av1).buildOpts), " ")
 			if !strings.Contains(sample, real) {
 				t.Errorf("sample encode does not carry the real options\nreal:   %s\nsample: %s", real, sample)

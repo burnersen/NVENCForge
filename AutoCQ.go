@@ -47,12 +47,16 @@ import (
 // saturation slope, encoder) live in autoCQScale; av1_nvenc uses a wider CQ
 // scale (1-63), so its anchors and clamps differ from H.265.
 //
-// The two documented VMAF measurement pitfalls are handled here:
+// The three documented VMAF measurement pitfalls are handled here:
 //   1. A decoded segment keeps the source's start offset, which shifts the
 //      frame pairing → setpts=PTS-STARTPTS re-bases every window before use.
 //   2. Matroska rounds PTS to milliseconds and libvmaf pairs by timestamp,
 //      which makes the comparison jump by one frame → both VMAF inputs get
 //      settb=AVTB,setpts=N*fpsDen/fpsNum/TB (frame-number-based timestamps).
+//   3. Gaps in the source timeline (missing frames) are filled in by the
+//      sample encode through -fps_mode cfr but not on the reference side,
+//      which pairs unrelated frames from the first gap on → both sides run
+//      through fps= as well (autoCQWindowPrep, measured details there).
 // ----------------------------------------------------------------------------
 
 const (
@@ -63,6 +67,14 @@ const (
 	// single hard scene inside an otherwise calm film still counts as signal.
 	autoCQEdgeMarginPct    = 0.05
 	autoCQFlatProfileRatio = 1.25
+
+	// Reporting thresholds for gaps in the source timeline. Below one second
+	// of missing material a hiccup is not worth a line; above a quarter of all
+	// frames it is not the timeline that has holes but the declared frame rate
+	// that is wrong (some containers report twice the real rate), and the
+	// notice would mislead. The repair itself runs either way.
+	autoCQGapNoticeMinSec   = 1.0
+	autoCQGapNoticeMaxShare = 0.25
 
 	// Hard timeout for the packet-size demux (no decode — normally seconds).
 	autoCQProfileTimeout = 2 * time.Minute
@@ -475,9 +487,11 @@ type bitrateBucket struct {
 
 // probeSourceBitrateBuckets demuxes the video stream once (packet sizes
 // only, NO decode — seconds even on multi-GB files) and sums the packet
-// sizes into windowLen-sized buckets.
+// sizes into windowLen-sized buckets. It also returns how many video packets
+// that demux saw: the same pass answers "does this source have gaps in its
+// timeline" for free (autoCQGapNotice), so no second probe is needed.
 func probeSourceBitrateBuckets(ctx context.Context, filePath string,
-	durationSec, windowLen float64) ([]bitrateBucket, error) {
+	durationSec, windowLen float64) ([]bitrateBucket, int, error) {
 
 	runCtx, cancel := context.WithTimeout(ctx, autoCQProfileTimeout)
 	defer cancel()
@@ -490,27 +504,52 @@ func probeSourceBitrateBuckets(ctx context.Context, filePath string,
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, 0, ctx.Err()
 		}
-		return nil, fmt.Errorf("AutoCQ.go: probeSourceBitrateBuckets: %w", err)
+		return nil, 0, fmt.Errorf("AutoCQ.go: probeSourceBitrateBuckets: %w", err)
 	}
-	buckets := bucketsFromPacketCSV(string(out), durationSec, windowLen)
+	buckets, packets := bucketsFromPacketCSV(string(out), durationSec, windowLen)
 	if len(buckets) == 0 {
-		return nil, errors.New("AutoCQ.go: probeSourceBitrateBuckets: no usable packet data")
+		return nil, 0, errors.New("AutoCQ.go: probeSourceBitrateBuckets: no usable packet data")
 	}
-	return buckets, nil
+	return buckets, packets, nil
+}
+
+// autoCQGapNotice reports how much material is missing from the source
+// timeline, or "" when there is nothing worth reporting. It compares the
+// frames the source should hold (duration × frame rate) with the video packets
+// actually found. Counting is deliberate: packets arrive in decode order and
+// their timestamps jump around B-frames, so measuring distances between
+// neighbours would flag perfectly healthy files.
+func autoCQGapNotice(videoPackets int, durationSec float64, fpsNum, fpsDen int) string {
+	if videoPackets <= 0 || durationSec <= 0 || fpsNum <= 0 || fpsDen <= 0 {
+		return ""
+	}
+	fps := float64(fpsNum) / float64(fpsDen)
+	expected := durationSec * fps
+	missing := expected - float64(videoPackets)
+	if missing < autoCQGapNoticeMinSec*fps || missing > expected*autoCQGapNoticeMaxShare {
+		return ""
+	}
+	return fmt.Sprintf(
+		"  · note: the source timeline is missing about %s of frames — samples on both sides were aligned to %.4g fps so the measurement compares matching frames",
+		formatDuration(missing/fps), fps)
 }
 
 // bucketsFromPacketCSV turns ffprobe "pts_time,size" CSV lines into full
-// windowLen-sized buckets. Lines without a parsable timestamp or size
-// (e.g. "N/A") are skipped; the partial tail bucket is dropped so its
-// deflated average cannot skew the placement.
-func bucketsFromPacketCSV(csv string, durationSec, windowLen float64) []bitrateBucket {
+// windowLen-sized buckets and additionally returns how many usable video
+// packets the CSV held (the frame count the gap notice compares against).
+// Lines without a parsable timestamp or size (e.g. "N/A") are skipped; the
+// partial tail bucket is dropped so its deflated average cannot skew the
+// placement. Packets beyond the last full bucket still count as frames — they
+// exist in the file even though their bucket is not used for placement.
+func bucketsFromPacketCSV(csv string, durationSec, windowLen float64) ([]bitrateBucket, int) {
 	if windowLen <= 0 || durationSec < windowLen {
-		return nil
+		return nil, 0
 	}
 	n := int(durationSec / windowLen)
 	sums := make([]int64, n)
+	packets := 0
 	for _, line := range strings.Split(csv, "\n") {
 		fields := strings.Split(strings.TrimSpace(line), ",")
 		if len(fields) < 2 {
@@ -524,6 +563,7 @@ func bucketsFromPacketCSV(csv string, durationSec, windowLen float64) []bitrateB
 		if err != nil || size <= 0 {
 			continue
 		}
+		packets++
 		if idx := int(pts / windowLen); idx < n {
 			sums[idx] += size
 		}
@@ -535,7 +575,7 @@ func bucketsFromPacketCSV(csv string, durationSec, windowLen float64) []bitrateB
 			kbps:     float64(b) * 8 / 1000 / windowLen,
 		})
 	}
-	return buckets
+	return buckets, packets
 }
 
 // autoCQGuidedWindows picks the sample windows from the bucket profile:
@@ -630,14 +670,16 @@ func autoCQWindowInputs(sourcePath string, windows [][2]float64, hwaccel []strin
 }
 
 func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, hwaccel []string,
-	filterChain string, cq int, maxBitrate, bufsize string, gop int, sampleName string,
+	filterChain string, fpsNum, fpsDen int, cq int, maxBitrate, bufsize string, gop int,
+	sampleName string,
 	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string) []string {
 
 	args := []string{"-y"}
 	args = append(args, autoCQWindowInputs(sourcePath, windows, hwaccel)...)
+	prep := autoCQWindowPrep(fpsNum, fpsDen)
 	var fg strings.Builder
 	for i := range windows {
-		fmt.Fprintf(&fg, "[%d:V:0]setpts=PTS-STARTPTS[w%d];", i, i)
+		fmt.Fprintf(&fg, "[%d:V:0]%s[w%d];", i, prep, i)
 	}
 	for i := range windows {
 		fmt.Fprintf(&fg, "[w%d]", i)
@@ -653,6 +695,31 @@ func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, hwaccel []st
 // every consumer so all analysis inputs use identical timing.
 func autoCQNormPTS(fpsNum, fpsDen int) string {
 	return fmt.Sprintf("settb=AVTB,setpts=N*%d/%d/TB", fpsDen, fpsNum)
+}
+
+// autoCQWindowPrep returns the filters every sample window runs through. It is
+// shared by the sample encode and the VMAF reference side on purpose: only if
+// both build their windows identically can libvmaf pair matching frames.
+//
+// setpts=PTS-STARTPTS re-bases the cut window to zero (pitfall 1).
+// fps= closes gaps in the source timeline (pitfall 3): where frames are
+// missing, the encoder fills them in by itself through "-fps_mode cfr" while
+// the reference side keeps the holes — from the first gap on, libvmaf then
+// compares frames that do not belong together. Measured on a real file: 240
+// against 96 frames in one 8-second window, VMAF 6.9 instead of 96.2. And
+// because concat chains the windows, a hole in the first window shifts all
+// later ones too, so the score collapses instead of dropping partially.
+// Aligning only the reference side is NOT enough (measured 21.4): fps= and
+// "-fps_mode cfr" do not pick the same frames. With both sides aligned the
+// encoder has nothing left to correct.
+// For constant-frame-rate sources the filter is provably inert — the encoded
+// bitstream hashes identically and the VMAF score is unchanged to the last
+// digit, so every calibrated anchor stays valid.
+func autoCQWindowPrep(fpsNum, fpsDen int) string {
+	if fpsNum <= 0 || fpsDen <= 0 {
+		return "setpts=PTS-STARTPTS"
+	}
+	return fmt.Sprintf("setpts=PTS-STARTPTS,fps=%d/%d", fpsNum, fpsDen)
 }
 
 // autoCQVMAFThreads returns the libvmaf worker thread count (all cores).
@@ -679,10 +746,11 @@ func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, hwaccel []stri
 	args = append(args, "-i", sampleName)
 
 	normPTS := autoCQNormPTS(fpsNum, fpsDen)
+	prep := autoCQWindowPrep(fpsNum, fpsDen)
 	n := len(windows)
 	var fg strings.Builder
 	for i := 0; i < n; i++ {
-		fmt.Fprintf(&fg, "[%d:V:0]setpts=PTS-STARTPTS[w%d];", i, i)
+		fmt.Fprintf(&fg, "[%d:V:0]%s[w%d];", i, prep, i)
 	}
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(&fg, "[w%d]", i)
@@ -816,14 +884,20 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// placement is an optimisation, never a reason to fail the analysis.
 	placement := "fixed positions"
 	var profileErr error
-	if buckets, perr := probeSourceBitrateBuckets(ctx, filePath, stats.DurationSec, windows[0][1]); perr != nil {
+	gapNote := ""
+	if buckets, videoPackets, perr := probeSourceBitrateBuckets(ctx, filePath, stats.DurationSec, windows[0][1]); perr != nil {
 		if ctx.Err() != nil {
 			_ = spinner.Stop()
 			return 0, false
 		}
 		profileErr = perr
-	} else if gw := autoCQGuidedWindows(buckets, stats.DurationSec, len(windows), windows[0][1]); gw != nil {
-		windows, placement = gw, "bitrate-guided"
+	} else {
+		if gw := autoCQGuidedWindows(buckets, stats.DurationSec, len(windows), windows[0][1]); gw != nil {
+			windows, placement = gw, "bitrate-guided"
+		}
+		// Same demux, no extra cost: say so when the source has holes, otherwise
+		// such a file just behaves differently for no visible reason.
+		gapNote = autoCQGapNotice(videoPackets, stats.DurationSec, stats.FPSNum, stats.FPSDen)
 	}
 
 	// Hier stand bis 1.10.0 ein Referenz-Cache, der die Fenster einmal
@@ -885,6 +959,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		logName := fmt.Sprintf("vmaf_cq%d.json", cq)
 		buildEnc := func(hw []string, chain string) []string {
 			return buildAutoCQEncodeArgs(filePath, windows, hw, chain,
+				stats.FPSNum, stats.FPSDen,
 				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
 		}
 		buildVMAF := func(hw []string, chain string) []string {
@@ -1105,6 +1180,9 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		formatDuration(time.Since(analysisStart).Seconds()))))
 	if len(plateauProbes) > 0 {
 		fmt.Println(pterm.Gray("  · plateau probes: " + strings.Join(plateauProbes, ", ")))
+	}
+	if gapNote != "" {
+		fmt.Println(pterm.Gray(gapNote))
 	}
 	// An unreachable target on a cap-limited source says something about the
 	// configured ceiling, not about the material. Without this line the plateau

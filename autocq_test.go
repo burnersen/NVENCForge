@@ -106,7 +106,7 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 
 	enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30, "8000k", "16000k", 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
+		30000, 1001, 30, "8000k", "16000k", 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
 	encStr := strings.Join(enc, " ")
 	if got := strings.Count(encStr, "-ss "); got != len(windows) {
 		t.Errorf("encode args: %d -ss occurrences, want %d", got, len(windows))
@@ -127,7 +127,7 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	// AV1 samples must run through av1_nvenc at the requested CQ (same builder,
 	// different encoder profile) — the whole point of the per-codec buildOpts.
 	av1enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		32, "6000k", "12000k", 120, "sample_cq32.mkv", buildAV1OptsWithCQ)
+		30000, 1001, 32, "6000k", "12000k", 120, "sample_cq32.mkv", buildAV1OptsWithCQ)
 	av1Str := strings.Join(av1enc, " ")
 	for _, want := range []string{"-c:v av1_nvenc", "-cq 32", "-maxrate 6000k"} {
 		if !strings.Contains(av1Str, want) {
@@ -169,9 +169,14 @@ func TestBucketsFromPacketCSV(t *testing.T) {
 		"17.000000,8000\n" +
 		"18.000000,0\n" +
 		"24.500000,9999\n"
-	got := bucketsFromPacketCSV(csv, 25, 8)
+	got, packets := bucketsFromPacketCSV(csv, 25, 8)
 	if len(got) != 3 {
 		t.Fatalf("got %d buckets, want 3 (%v)", len(got), got)
+	}
+	// The 24.5 s packet sits in the dropped tail bucket but is still a frame
+	// of the file — the gap notice must not mistake it for a hole.
+	if packets != 5 {
+		t.Errorf("counted %d usable packets, want 5", packets)
 	}
 	wantKbps := []float64{2, 4, 8} // bytes*8/1000/8s
 	for i, b := range got {
@@ -183,11 +188,69 @@ func TestBucketsFromPacketCSV(t *testing.T) {
 		}
 	}
 
-	if bucketsFromPacketCSV(csv, 25, 0) != nil {
+	if b, _ := bucketsFromPacketCSV(csv, 25, 0); b != nil {
 		t.Error("windowLen 0 must yield nil")
 	}
-	if bucketsFromPacketCSV(csv, 5, 8) != nil {
+	if b, _ := bucketsFromPacketCSV(csv, 5, 8); b != nil {
 		t.Error("source shorter than one window must yield nil")
+	}
+}
+
+// TestAutoCQWindowPrep locks down pitfall 3: both measurement sides must build
+// their windows with the same filters, otherwise libvmaf pairs frames that do
+// not belong together (measured 6.9 instead of 96.2 on a source with gaps).
+func TestAutoCQWindowPrep(t *testing.T) {
+	const want = "setpts=PTS-STARTPTS,fps=30000/1001"
+	if got := autoCQWindowPrep(30000, 1001); got != want {
+		t.Errorf("autoCQWindowPrep = %q, want %q", got, want)
+	}
+	// Unknown frame rate must not produce a broken "fps=0/0" filter.
+	for _, c := range [][2]int{{0, 1001}, {30000, 0}, {-30, 1}} {
+		if got := autoCQWindowPrep(c[0], c[1]); got != "setpts=PTS-STARTPTS" {
+			t.Errorf("autoCQWindowPrep(%d, %d) = %q, want the plain rebase", c[0], c[1], got)
+		}
+	}
+
+	windows := [][2]float64{{36, 8}, {84, 8}}
+	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
+	enc := strings.Join(buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
+		30000, 1001, 30, "8000k", "16000k", 120, "s.mkv", buildNVENCOptsWithCQ), " ")
+	vmaf := strings.Join(buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, nil, chain,
+		30000, 1001, "s.mkv", "v.json"), " ")
+	for i, args := range map[string]string{"encode": enc, "vmaf": vmaf} {
+		if got := strings.Count(args, want); got != len(windows) {
+			t.Errorf("%s args prepare %d windows with %q, want %d\n%s", i, got, want, len(windows), args)
+		}
+	}
+}
+
+func TestAutoCQGapNotice(t *testing.T) {
+	// 29.97 fps over 3168 s ≈ 94 938 frames; the real file held 93 909.
+	if got := autoCQGapNotice(93909, 3168.66, 30000, 1001); got == "" {
+		t.Error("a source missing ~1000 frames must be reported")
+	}
+	// A healthy source stays quiet, and so does a single dropped frame.
+	for _, c := range []struct {
+		name    string
+		packets int
+	}{{"complete", 2997}, {"one frame short", 2996}} {
+		if got := autoCQGapNotice(c.packets, 100, 30000, 1001); got != "" {
+			t.Errorf("%s source must stay quiet, got %q", c.name, got)
+		}
+	}
+	// Half the frames missing means the declared rate is wrong, not the
+	// timeline — reporting "50 s missing" there would mislead.
+	if got := autoCQGapNotice(1500, 100, 30000, 1001); got != "" {
+		t.Errorf("implausible shortfall must stay quiet, got %q", got)
+	}
+	// Unusable inputs must never panic or report.
+	for _, c := range [][2]int{{0, 1001}, {30000, 0}} {
+		if got := autoCQGapNotice(100, 100, c[0], c[1]); got != "" {
+			t.Errorf("frame rate %d/%d must stay quiet, got %q", c[0], c[1], got)
+		}
+	}
+	if got := autoCQGapNotice(0, 100, 30000, 1001); got != "" {
+		t.Errorf("no packets must stay quiet, got %q", got)
 	}
 }
 

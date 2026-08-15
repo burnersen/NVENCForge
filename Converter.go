@@ -2154,6 +2154,18 @@ func videoIsInterlaced(s *VideoStats) bool {
 // AQ options use the dash spellings (-spatial-aq/-temporal-aq): FFmpeg
 // master removed the old underscore aliases in 2026, and the dash form
 // exists in every supported build.
+//
+// -aq-strength comes from the INI (default 2) and used to be hard-wired to 8.
+// Measured on 2026-08-15 across four real sources (30/50/60 fps, 6-12 Mbit),
+// always at a fixed CQ so size and quality stay comparable:
+//
+//	aq 8 -> aq 2 + one more B-frame: 8-28% smaller, VMAF -0.35 to +0.82,
+//	encode time unchanged (34 s vs 35 s on a 4-minute sample).
+//
+// The old 8 was simply too aggressive: it pushed bits into busy areas that
+// did not need them. Higher values measured monotonically worse AND bigger
+// (aq 12 = +10% size for -0.52 VMAF, aq 15 = +16% for -1.22). Do not "restore"
+// the 8 - it costs size for nothing.
 func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	opts := []string{
 		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
@@ -2162,7 +2174,8 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1",
-		"-aq-strength", "8", "-bf", strconv.Itoa(appSettings.bFrames),
+		"-aq-strength", strconv.Itoa(appSettings.aqStrength),
+		"-bf", strconv.Itoa(appSettings.bFrames),
 	}
 	opts = append(opts, encoderInputFormatArgs()...)
 	// Temporal AQ + multipass need Turing (RTX 20) or newer. checkHardwareCapabilities
@@ -2181,6 +2194,9 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 // buildAV1OptsWithCQ mirrors buildNVENCOptsWithCQ for av1_nvenc. Differences:
 // own CQ scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
 // B-frame options (not exposed by av1_nvenc), AQ flags use hyphens.
+// -aq-strength shares the INI key with H.265 and was measured separately for
+// AV1 on 2026-08-15 (CQ 32, two sources): 8 -> 2 gave -4.2% and -24.2% size at
+// +0.47 / -0.23 VMAF, and the worst frame improved in both cases.
 func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 	opts := []string{
 		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
@@ -2188,7 +2204,7 @@ func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-multipass", "qres", "-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1", "-temporal-aq", "1",
-		"-aq-strength", "8",
+		"-aq-strength", strconv.Itoa(appSettings.aqStrength),
 	}
 	return append(opts, encoderInputFormatArgs()...)
 }

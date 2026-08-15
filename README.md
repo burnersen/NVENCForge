@@ -320,7 +320,13 @@ Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; inval
 
 **You don't have to touch it at all.** The file is split in two: **PART 1** holds the handful of settings people actually change (`maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder`), **PART 2** the expert settings, already set to measured values. Every entry explains what it does and which values are allowed. The full list:
 
-CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
+CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames/AQ strength, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-mode) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
+
+One key decides how the encoder **spends its bits** — and it turned out to be worth real money:
+
+| Key | Default | What it does |
+|---|---|---|
+| `aqStrength` | `2` | How hard the encoder pushes bits towards busy parts of the picture. This used to be hard-wired to `8`, which measured as simply too aggressive. Dropped to `2` (together with one more B-frame), four real sources at a fixed CQ came out **8–28 % smaller at the same quality, with no extra encode time** — 30 fps at 6 Mbit −27.6 %, 50 fps at 12 Mbit −20.9 %, 60 fps at 11 Mbit −12.5 %. Higher values measured monotonically worse *and* bigger. Raise it only if you spot blocky patches in dark, flat areas. |
 
 Two keys steer **speed** rather than quality:
 

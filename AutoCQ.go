@@ -1188,10 +1188,17 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// configured ceiling, not about the material. Without this line the plateau
 	// message reads as "the source is exhausted" while the real limit is a
 	// setting the user can change.
+	//
+	// The second half used to promise "a higher cap buys quality at the price of
+	// size". A measurement over three high-bitrate 50/60 fps sources (2026-08-15,
+	// caps 8000/11000/12000) disproved that: the cap only holds back the high CQ
+	// steps, and Auto-CQ never picks those — at the step it does pick, raising
+	// the cap bought 0.04 VMAF for up to 4 % more size. Saying otherwise sends
+	// the reader chasing a setting that cannot help.
 	if plateauLevel > 0 {
 		if sourceKbps, capLimited := autoCQCapLimitsQuality(stats, maxBitrate); capLimited {
 			fmt.Println(pterm.Gray(fmt.Sprintf(
-				"  · note: this ceiling comes from the %s bitrate cap, not from the source (source runs at %.1f Mbit/s) — a higher cap buys quality at the price of size",
+				"  · note: the %s bitrate cap sets this ceiling, not the source (source runs at %.1f Mbit/s) — raising it was measured to add size, not quality",
 				maxBitrate, float64(sourceKbps)/1000)))
 		}
 	}

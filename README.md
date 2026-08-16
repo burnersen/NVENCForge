@@ -326,7 +326,7 @@ One key decides how the encoder **spends its bits** — and it turned out to be 
 
 | Key | Default | What it does |
 |---|---|---|
-| `aqStrength` | `2` | How hard the encoder pushes bits towards busy parts of the picture. This used to be hard-wired to `8`, which measured as simply too aggressive. Dropped to `2` (together with one more B-frame), four real sources at a fixed CQ came out **8–28 % smaller at the same quality, with no extra encode time** — 30 fps at 6 Mbit −27.6 %, 50 fps at 12 Mbit −20.9 %, 60 fps at 11 Mbit −12.5 %. Higher values measured monotonically worse *and* bigger. Raise it only if you spot blocky patches in dark, flat areas. |
+| `aqStrength` | `2` | How hard the encoder pushes bits towards busy parts of the picture. This used to be hard-wired to `8`, which measured as simply too aggressive. Dropped to `2` (together with one more B-frame), four real sources at a fixed CQ came out **8–28 % smaller at the same quality, with no extra encode time** *(measured 15 Aug 2026)* — 30 fps at 6 Mbit −27.6 %, 50 fps at 12 Mbit −20.9 %, 60 fps at 11 Mbit −12.5 %. Higher values measured monotonically worse *and* bigger. Raise it only if you spot blocky patches in dark, flat areas. |
 
 Two keys steer **speed** rather than quality:
 
@@ -343,7 +343,7 @@ One key decides what happens to the **original** once its conversion is done:
 
 `casStrength` also decides how far the picture gets to stay on the graphics card, because there is no CUDA sharpening filter:
 
-- **`casStrength = 0.4`** (default): downscaled on the GPU, then pulled back into memory once so the CPU can sharpen it. Measured on 90 s of 4K material: **29 s instead of 35 s**, and the picture ends up slightly *closer* to the source than before, because Lanczos replaced the old bicubic downscale.
+- **`casStrength = 0.4`** (default): downscaled on the GPU, then pulled back into memory once so the CPU can sharpen it. Measured 6 Aug 2026 on 90 s of 4K material: **29 s instead of 35 s**, and the picture ends up slightly *closer* to the source than before, because Lanczos replaced the old bicubic downscale.
 - **`casStrength = 0`**: nothing has to come back — decode, downscale and encode all happen on the card. Same material: **13.9 s**, roughly two and a half times faster. The picture is softer without the sharpening pass (VMAF 94.7 against the 4K source, versus 97.3 with it), and Auto-CQ tends to pick a lower CQ, so files come out somewhat larger. Set it back to `0.4` any time.
 
 > Upgrading from an older version? Your existing INI keeps working — unknown keys are ignored and missing ones fall back to their defaults. GPU decoding therefore switches itself on after an update, since `gpuDecode` defaults to `true` — the output stays bit-identical either way. To get the newer blocks written out with their comments, rename the INI and let NVENCForge create a fresh one.
@@ -353,14 +353,14 @@ One key decides what happens to the **original** once its conversion is done:
 ## 💻 Requirements
 
 - Windows 10/11 x64
-- For GPU encoding: NVIDIA GPU with NVENC (Maxwell or newer); **RTX 40+ for AV1**
+- For GPU encoding: an NVIDIA GPU whose NVENC can encode **10-bit HEVC** (Pascal / GTX 10 series and newer certainly can); **RTX 40+ for AV1**. Older cards aren't turned away — the startup check measures what yours actually supports and quietly runs with the best settings it accepts
 - **No NVIDIA card? [`-cpu`](#cpu-mode) encodes on the processor instead** — slower, but it runs anywhere
 - The `-davinci`, `-split` and `-join` modes run on **any** hardware (no GPU needed)
 - FFmpeg: downloaded automatically on first run (or drop your own `ffmpeg.exe`/`ffprobe.exe` next to the EXE)
 
-> **Why NVENC by default?** Hardware encoding trades a little compression efficiency for a huge speed gain and leaves your CPU free — for batch-crushing a large library that tradeoff is the whole point. Measured on real footage, NVENC `p5` and libx265 `fast` land at the *same* quality per byte, and NVENC does it four times faster; only a slow x265 encode pulls meaningfully ahead (+1 VMAF for triple the time). If you want that, `-cpu` with `cpuPreset=slow` gives it to you.
+> **Why NVENC by default?** Hardware encoding trades a little compression efficiency for a huge speed gain and leaves your CPU free — for batch-crushing a large library that tradeoff is the whole point. Measured 25 Jul 2026 on real footage, NVENC `p5` and libx265 `fast` land at the *same* quality per byte, and NVENC does it four times faster; only a slow x265 encode pulls meaningfully ahead (+1 VMAF for triple the time). If you want that, `-cpu` with `cpuPreset=slow` gives it to you.
 
-> **Why CPU decoding?** Decoding runs deliberately on the CPU and only encoding on the GPU: extreme-bitrate HEVC sources (400 Mbit/s+) can crash GPU drivers (TDR) when hardware-decoded. NVENCForge chooses stability over decode speed, verified on real files.
+> **Why is there a decoding limit?** Decoding runs on the graphics card by default (`gpuDecode`), which is bit-identical to CPU decoding and noticeably faster. Only sources above `gpuDecodeMaxMbit` (50 Mbit/s) go to the CPU on purpose: hardware-decoding extreme-bitrate HEVC can crash the display driver (a TDR reset), and no fallback can catch that after the fact. Should a decoder error still happen, the file is retried on the CPU automatically.
 
 ---
 
@@ -428,7 +428,7 @@ Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that �
 - **True 10-bit pipeline.** Everything runs in 10-bit (`p010le`, HEVC Main-10), so banding in skies and gradients doesn't get worse.
 - **Automatic deinterlacing.** TV-style interlaced sources are detected from their field order and deinterlaced with `bwdif` *before* any scaling (keeping the original frame rate), so old recordings come out clean.
 - **Careful downscaling.** The 1080p downscale preserves aspect ratio, forces even dimensions (odd ones break encoders), and follows up with a light contrast-adaptive sharpen (CAS) to counter the softness scaling introduces. Even in no-scale mode dimensions are evened out.
-- **Encoder tuned for quality-per-bit.** VBR + CQ, `tune hq`, spatial **and** temporal adaptive quantisation, multi-pass, look-ahead, B-frames with a pyramid reference, constant frame rate, and a keyframe interval sized to ~4 seconds of video — the whole reason the quality hit stays small at hardware-encode speed.
+- **Encoder tuned for quality-per-bit.** VBR + CQ, `tune hq`, spatial **and** temporal adaptive quantisation, multi-pass, look-ahead, B-frames with a pyramid reference (as many as your card allows — measured at startup), constant frame rate, and a keyframe interval sized to ~4 seconds of video — the whole reason the quality hit stays small at hardware-encode speed.
 
 </details>
 
@@ -449,8 +449,8 @@ The [Auto-CQ section above](#auto-cq) covers *what* it does; here's *how* it sta
 <details>
 <summary><b>🚦 It won't fall over — robustness during a batch</b></summary>
 
-- **A GPU check that matches reality.** At startup NVENCForge does a dummy encode with the *exact* flags the real encode uses — not a lighter test — so a card that would fail later is caught now. Older pre-Turing cards (Pascal/Volta) are retried once in a degraded mode and then run *without* the advanced features instead of failing on every single file; AV1 gets its own separate probe.
-- **CPU decoding on purpose.** Decoding stays on the CPU because hardware-decoding extreme-bitrate HEVC (400 Mbit/s+) can crash the GPU driver (a TDR reset). Stability beats decode speed — verified on real files.
+- **A GPU check that matches reality — and finds your card's real limits.** At startup NVENCForge does a dummy encode with the *exact* flags the real encode uses — not a lighter test — so a card that would fail later is caught now. If your card takes them, that is the entire check: one probe, nothing else runs. If it refuses, NVENCForge asks the card what it *can* do rather than switching everything off at once: the B-frame count is counted down until one is accepted, `b_ref_mode` and Temporal AQ are probed as capabilities of their own (a card missing one keeps the other), and a card short on memory is offered a smaller look-ahead window instead of being declared unusable. Every fallback is reported on screen together with the config line that makes it permanent. There is deliberately **no built-in table of GPU models** — such a list would be guesswork for every card nobody could test, and it would age with each new generation. AV1 gets its own separate probe.
+- **GPU decoding, with a deliberate ceiling.** Decoding runs on the graphics card (NVDEC) — bit-identical to the CPU path, just faster. Above `gpuDecodeMaxMbit` (50 Mbit/s by default) it falls back to the CPU on purpose: hardware-decoding extreme-bitrate HEVC can crash the display driver (a TDR reset), and nothing can catch that afterwards. A decoder error retries the file on the CPU by itself.
 - **Multi-stage fallback cascade.** If one stream in a file is broken, NVENCForge walks down a ladder (keep subtitles → drop subtitles → re-encode audio to AAC → video-only), and the FFmpeg error text steers it straight to the rung that can actually fix the problem instead of retrying dead ends. One bad stream doesn't sink the batch.
 - **Stall watchdog.** A frozen FFmpeg is detected and stopped after 5 minutes of silence so the batch moves on — no hanging forever on one stuck file. (Auto-CQ steps and probes each carry their own hard timeouts too.)
 - **Parallel-safe by design.** Start the same command in two terminals and they split the work automatically. Each file is locked with a small JSON lock that records the process, machine and start time; a lock whose owner process has died is reclaimed (checked by real process ID *and* image name, so a recycled PID can't fool it), while a lock owned by *another machine* on a shared drive is never stolen.

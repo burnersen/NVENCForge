@@ -741,14 +741,16 @@ and slower. p5 is the balanced middle ground.`)
 
 	configEntry("nvencLookahead", d.nvencLookahead, "0 to 32",
 		`How many frames ahead the encoder plans. More is better but
-needs graphics memory - lower this to 16 or 8 if an older card
-reports out-of-memory errors.`)
+needs graphics memory. You do not have to tune this: if your card
+cannot hold the window, the startup check retries with 16, then 8,
+and tells you which value it settled on.`)
 
 	configEntry("bFrames", d.bFrames, "0 to 5",
 		`Number of B-frames (frames stored as the difference between
-their neighbours - they save a lot of space). Older cards may
-support fewer; the startup check lowers this by itself if the card
-refuses. Not used by AV1.`)
+their neighbours - they save a lot of space). 5 is the maximum any
+current NVIDIA card accepts. Older cards may support fewer or none:
+the startup check counts down and keeps the highest number your card
+takes, so you do not have to know its limit. Not used by AV1.`)
 
 	configEntry("aqStrength", d.aqStrength, "1 to 15",
 		`How strongly the encoder shifts bits towards busy parts of the

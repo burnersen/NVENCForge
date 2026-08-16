@@ -551,34 +551,58 @@ func initTools() error {
 // failing on every single file.
 var nvencAdvancedAQ = true
 
+// nvencBFrameRefMode is true while the GPU accepts -b_ref_mode (using B-frames
+// as reference frames). This is a capability of its own: a card can encode
+// B-frames and still reject it, so it is probed separately instead of riding
+// along with bFrames — otherwise one missing feature would cost us both.
+var nvencBFrameRefMode = true
+
 // cpuFallbackPromptTimeout ist die Bedenkzeit bei der Rückfrage "ohne
 // Nvidia-Karte auf dem Prozessor weitermachen?". Läuft sie ab, wird
 // weitergemacht — ein unbeaufsichtigter Stapellauf soll nicht an einer
 // Frage hängen bleiben, vor der niemand sitzt.
 const cpuFallbackPromptTimeout = 15 * time.Second
 
+// nvencProbe is one trial encode's worth of settings. It exists so the probe
+// calls stay readable — the alternative is four loose arguments at every call
+// site, where nobody can tell "true, false" apart.
+type nvencProbe struct {
+	bFrames    int
+	advancedAQ bool
+	bRefMode   bool
+	lookahead  int
+}
+
 // checkHardwareCapabilities probes with the SAME flags the real encode uses, so a
-// card that passes here cannot fail later on every file. HEVC B-frames AND Temporal
-// AQ/multipass share the Turing+ gate; older cards (Maxwell-2/Pascal/Volta) are
-// retried once fully degraded and then run without those features instead of
-// refusing to start. Maxwell-1 / no-NVENC cards fail the 10-bit probe outright.
+// card that passes here cannot fail later on every file.
+//
+// The normal case costs exactly ONE probe: if the configured settings run, we are
+// done and nothing below executes. Only a rejection sends us into
+// probeNVENCFeatures, which asks the card what it really supports.
+//
+// Deliberately measured instead of read off a GPU model list: a list would be
+// guesswork for every card that cannot be tested here, and it would age with
+// each new generation. The card itself always knows the truth.
 func checkHardwareCapabilities() error {
 	pInfo.Println("Checking GPU capabilities (NVENC HEVC 10-bit)...")
 
-	tryEncode := func(bf int, advancedAQ bool) (string, error) {
+	tryEncode := func(p nvencProbe) (string, error) {
 		args := []string{
 			"-v", "error", "-f", "lavfi",
 			"-i", "color=c=black:s=1920x1080:d=1",
 			"-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
 			"-preset", appSettings.nvencPreset, "-tune", "hq",
-			"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead),
+			"-rc-lookahead", strconv.Itoa(p.lookahead),
 			"-spatial-aq", "1",
 		}
-		if advancedAQ {
+		if p.advancedAQ {
 			args = append(args, "-multipass", "qres", "-temporal-aq", "1")
 		}
-		if bf > 0 {
-			args = append(args, "-bf", strconv.Itoa(bf), "-b_ref_mode", "2")
+		if p.bFrames > 0 {
+			args = append(args, "-bf", strconv.Itoa(p.bFrames))
+			if p.bRefMode {
+				args = append(args, "-b_ref_mode", "2")
+			}
 		}
 		args = append(args, "-f", "null", "-")
 		dummy := exec.Command(ffmpegPath, args...)
@@ -587,22 +611,15 @@ func checkHardwareCapabilities() error {
 		return strings.TrimSpace(string(out)), err
 	}
 
-	if out, err := tryEncode(appSettings.bFrames, true); err != nil {
-		// HEVC B-frames and Temporal AQ share the same Turing+ gate, so a single
-		// fully-degraded retry (no B-frames, no Temporal AQ/multipass) decides it:
-		// succeeds → pre-Turing card (Pascal/Volta), keep encoding without those
-		// features; fails → genuine rejection (Maxwell-1, no 10-bit, no NVENC).
-		if _, retryErr := tryEncode(0, false); retryErr == nil {
-			if appSettings.bFrames > 0 {
-				appSettings.bFrames = 0
-				pWarn.Println("GPU does not support HEVC B-frames — continuing without B-frames.")
-				pWarn.Println("Set 'bFrames=0' in NVENCForge_Config.ini to make this permanent.")
-			}
-			nvencAdvancedAQ = false
-			pWarn.Println("GPU does not support Temporal AQ / multipass (needs RTX 20 series or newer) — continuing without them.")
-		} else {
-			return fmt.Errorf("main.go: checkHardwareCapabilities: NVENC dummy encode failed: %v | %s",
-				err, out)
+	configured := nvencProbe{
+		bFrames:    appSettings.bFrames,
+		advancedAQ: true,
+		bRefMode:   appSettings.bFrames > 0,
+		lookahead:  appSettings.nvencLookahead,
+	}
+	if _, err := tryEncode(configured); err != nil {
+		if err := probeNVENCFeatures(tryEncode); err != nil {
+			return err
 		}
 	}
 
@@ -631,6 +648,98 @@ func checkHardwareCapabilities() error {
 		pOK.Printf("GPU ready: %s\n", pterm.LightCyan(name))
 	} else {
 		pOK.Println("GPU ready (NVENC HEVC 10-bit).")
+	}
+	return nil
+}
+
+// probeNVENCFeatures asks the card what it actually supports, one feature at a
+// time. It runs ONLY after the configured settings were rejected, so a healthy
+// card never pays for it.
+//
+// The old code jumped straight from "everything on" to "no B-frames, no Temporal
+// AQ". That was too coarse: a card that merely allows FEWER B-frames lost both
+// features for nothing — and B-frames are one of the biggest size savers there is.
+//
+// Order matters. Every step builds on what already worked, so no probe can fail
+// for a reason that was ruled out earlier.
+func probeNVENCFeatures(tryEncode func(nvencProbe) (string, error)) error {
+	pWarn.Println("This GPU rejected the configured settings — probing what it supports...")
+
+	// 1. Bare baseline: no B-frames, no advanced AQ. The lookahead window stays
+	// in because it costs graphics memory, so a small card can fail on that
+	// alone. Shrink it before declaring the card unusable.
+	base := nvencProbe{lookahead: appSettings.nvencLookahead}
+	out, err := tryEncode(base)
+	if err != nil {
+		for _, smaller := range []int{16, 8, 0} {
+			if smaller >= appSettings.nvencLookahead {
+				continue
+			}
+			base.lookahead = smaller
+			if out, err = tryEncode(base); err == nil {
+				pWarn.Printf("GPU could not handle a %d-frame lookahead — continuing with %d.\n",
+					appSettings.nvencLookahead, smaller)
+				pWarn.Printf("Set 'nvencLookahead=%d' in NVENCForge_Config.ini to make this permanent.\n", smaller)
+				appSettings.nvencLookahead = smaller
+				break
+			}
+		}
+	}
+	if err != nil {
+		// Nothing left to degrade: Maxwell-1, no NVENC, or no 10-bit support.
+		return fmt.Errorf("main.go: probeNVENCFeatures: NVENC dummy encode failed: %v | %s",
+			err, out)
+	}
+
+	// 2. Temporal AQ + multipass (Turing / RTX 20 series and newer).
+	withAQ := base
+	withAQ.advancedAQ = true
+	if _, aqErr := tryEncode(withAQ); aqErr == nil {
+		nvencAdvancedAQ = true
+	} else {
+		nvencAdvancedAQ = false
+		pWarn.Println("GPU does not support Temporal AQ / multipass (needs RTX 20 series or newer) — continuing without them.")
+	}
+
+	// 3. Highest B-frame count this card accepts, counting down from the INI
+	// value. First success wins, so every card ends up with its own maximum
+	// instead of falling all the way to zero.
+	wanted := appSettings.bFrames
+	supported := 0
+	probe := base
+	probe.advancedAQ = nvencAdvancedAQ
+	for n := wanted; n >= 1; n-- {
+		probe.bFrames = n
+		if _, bfErr := tryEncode(probe); bfErr == nil {
+			supported = n
+			break
+		}
+	}
+	appSettings.bFrames = supported
+
+	// 4. B-frames as reference frames — only meaningful once B-frames work.
+	nvencBFrameRefMode = false
+	if supported > 0 {
+		probe.bFrames = supported
+		probe.bRefMode = true
+		if _, refErr := tryEncode(probe); refErr == nil {
+			nvencBFrameRefMode = true
+		} else {
+			pWarn.Println("GPU does not support B-frame reference mode — continuing without it.")
+		}
+	}
+
+	// The B-frame verdict comes last so it is not buried between the probes.
+	switch {
+	case wanted == 0:
+		// The user switched B-frames off themselves — nothing to report.
+	case supported == 0:
+		pWarn.Println("GPU does not support HEVC B-frames — continuing without B-frames.")
+		pWarn.Println("Set 'bFrames=0' in NVENCForge_Config.ini to make this permanent.")
+	case supported < wanted:
+		pWarn.Printf("GPU supports at most %d B-frames, not %d — continuing with %d.\n",
+			supported, wanted, supported)
+		pWarn.Printf("Set 'bFrames=%d' in NVENCForge_Config.ini to make this permanent.\n", supported)
 	}
 	return nil
 }

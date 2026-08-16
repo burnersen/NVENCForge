@@ -2273,8 +2273,10 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 	if nvencAdvancedAQ {
 		opts = append(opts, "-multipass", "qres", "-temporal-aq", "1")
 	}
-	// b_ref_mode needs B-frames; older GPUs (no B-frame support) reject it.
-	if appSettings.bFrames > 0 {
+	// b_ref_mode needs B-frames, and it is a separate GPU capability on top of
+	// them: checkHardwareCapabilities clears nvencBFrameRefMode for cards that
+	// encode B-frames but reject this mode, so we keep the B-frames either way.
+	if appSettings.bFrames > 0 && nvencBFrameRefMode {
 		opts = append(opts, "-b_ref_mode", "2")
 	}
 	return opts

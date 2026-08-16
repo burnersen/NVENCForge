@@ -638,35 +638,6 @@ func TestParseSubTags(t *testing.T) {
 	}
 }
 
-func TestTailBufferKeepsOnlyTheTail(t *testing.T) {
-	tb := &tailBuffer{max: 10}
-
-	// The io.Writer contract matters here: exec.Cmd treats a short write as a
-	// failure and kills the pipe, so Write must always report the full length.
-	writes := []string{"abcde", "fghij", "klmno"}
-	for _, w := range writes {
-		n, err := tb.Write([]byte(w))
-		if n != len(w) || err != nil {
-			t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", w, n, err, len(w))
-		}
-	}
-	if got := tb.String(); got != "fghijklmno" {
-		t.Errorf("buffer = %q, want %q", got, "fghijklmno")
-	}
-	if len(tb.buf) > tb.max {
-		t.Errorf("buffer grew past its cap: %d bytes", len(tb.buf))
-	}
-
-	// A single write larger than the cap keeps its tail, not its head.
-	tb2 := &tailBuffer{max: 4}
-	if _, err := tb2.Write([]byte("0123456789")); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := tb2.String(); got != "6789" {
-		t.Errorf("oversized write kept %q, want %q", got, "6789")
-	}
-}
-
 func TestLastErrorLine(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"single line", "boom", "boom"},

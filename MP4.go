@@ -265,7 +265,8 @@ func writeCompatMP4(ctx context.Context, srcMKV string, stats *VideoStats, sel m
 
 	pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
 		Println("  >> MP4 (hvc1 + AAC + faststart, lossless video copy)")
-	return runFFmpeg(ctx, args, stats.DurationSec, 1, 1, getFileSizeMB(srcMKV))
+	// Reines Umpacken — ein Größenvergleich meldete hier "+0 MB larger".
+	return runFFmpeg(ctx, args, stats.DurationSec, 1, 1, 0)
 }
 
 // remuxResultToMP4 repackages a finished conversion output (an .mkv we just

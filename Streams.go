@@ -171,75 +171,146 @@ func printDavinciAudioInfo(infos []AudioStreamInfo, pureCopy bool) {
 // FFmpeg/FFprobe wrappers (no progress display)
 // ----------------------------------------------------------------------------
 
-func runFFmpegSub(ctx context.Context, args []string) error {
+// toolFilesHandled zählt die Quelldateien, die die Werkzeug-Modi (-davinci,
+// -split, -join) angefasst haben. Diese Modi verzweigen über viele kleine
+// Funktionen; ein Zähler an der EINEN Stelle, an der jede Datei angekündigt
+// wird, ist deutlich weniger invasiv, als Rückgabewerte durch die ganze Kette
+// zu fädeln — und es läuft hier ohnehin strikt eine Datei nach der anderen.
+var toolFilesHandled int
+
+// announceToolFile kündigt eine Quelldatei an und zählt sie zugleich mit.
+// Übersprungene Dateien laufen bewusst NICHT hierüber.
+func announceToolFile(format string, args ...any) {
+	toolFilesHandled++
+	pInfo.Printf(format, args...)
+}
+
+// printToolSummary schließt die Werkzeug-Modi mit derselben Übersicht ab, die
+// der Konvertierungsmodus längst hat. Vorher endeten sie wortlos nach der
+// letzten ✓-Zeile — ob überhaupt etwas fertig wurde und wie lange es gedauert
+// hat, stand nirgends.
+func printToolSummary(ctx context.Context) {
+	// Nach einem Bedienfehler (falsche Dateikombination) wurde nichts angefasst.
+	// Eine Übersicht aus lauter Nullen wäre dann nur Lärm hinter der Hilfe.
+	if toolFilesHandled == 0 && ctx.Err() == nil {
+		return
+	}
+	fmt.Println()
+	pterm.DefaultHeader.
+		WithFullWidth().
+		WithBackgroundStyle(pterm.NewStyle(pterm.BgDarkGray)).
+		WithTextStyle(pterm.NewStyle(pterm.FgLightWhite, pterm.Bold)).
+		Println("Summary")
+	fmt.Println()
+
 	if ctx.Err() != nil {
-		return ctx.Err()
+		pterm.NewStyle(pterm.FgLightYellow, pterm.Bold).
+			Println("  Stopped by you (Ctrl+C) — unfinished files were removed, sources untouched.")
+		fmt.Println()
 	}
+	// Breite vor der Farbe setzen — sonst zählen die ANSI-Zeichen mit.
+	const labelWidth = 14
+	fmt.Printf("  %s %s\n",
+		pterm.LightWhite(fmt.Sprintf("%-*s", labelWidth, "Files handled:")),
+		pterm.LightCyan(strconv.Itoa(toolFilesHandled)))
+	fmt.Printf("  %s %s\n",
+		pterm.LightWhite(fmt.Sprintf("%-*s", labelWidth, "Elapsed time:")),
+		pterm.LightCyan(formatDuration(time.Since(batch.start).Seconds())))
+	fmt.Println()
+}
 
-	args = append([]string{"-v", "warning", "-nostats"}, args...)
-	runCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, ffmpegPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP |
-			winCREATE_NO_WINDOW | winIDLE_PRIORITY_CLASS,
+// plainError macht aus einer internen Fehlerkette den Satz, der den Anwender
+// wirklich weiterbringt. Die Ketten sind für die Fehlersuche gebaut
+// ("Streams.go: writeVideoOnlyMP4: Converter.go: runFFmpeg: exit status 1 |
+// Last output: <FFmpeg-Meldung>") — auf dem Bildschirm zählt davon nur der
+// letzte Teil, die eigentliche Ursache. Der vollständige Wortlaut bleibt im
+// error_report.txt und unter -debug unverändert erhalten.
+func plainError(err error) string {
+	if err == nil {
+		return ""
 	}
-	// Bounded buffer: FFmpeg can emit warnings endlessly on badly damaged
-	// input; an unbounded buffer would exhaust memory, while only the last
-	// line is ever reported (see lastErrorLine).
-	stderr := &tailBuffer{max: 64 * 1024}
-	cmd.Stderr = stderr
+	msg := strings.TrimSpace(err.Error())
 
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("Streams.go: runFFmpegSub (StdinPipe): %w", err)
-	}
-	defer stdin.Close()
-
-	cmd.Cancel = func() error {
-		_, werr := stdin.Write([]byte("q\n"))
-		return werr
-	}
-	cmd.WaitDelay = 10 * time.Second
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	// FFmpeg hängt seine eigene Meldung hinter diesen Trenner — das ist die
+	// aussagekräftigste Stelle der ganzen Kette.
+	if _, after, found := strings.Cut(msg, "| Last output: "); found {
+		if t := strings.TrimSpace(after); t != "" {
+			return t
 		}
-		msg := lastErrorLine(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("Streams.go: runFFmpegSub: %w – %s", err, msg)
+	}
+	if _, after, found := strings.Cut(msg, " – "); found {
+		if t := strings.TrimSpace(after); t != "" {
+			return t
 		}
-		return fmt.Errorf("Streams.go: runFFmpegSub: %w", err)
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+
+	// Sonst den Vorspann "…Datei.go: funktion: " abtragen. Gesucht wird das
+	// LETZTE ".go: ", damit auch verschachtelte Ketten sauber aufgehen.
+	if idx := strings.LastIndex(msg, ".go: "); idx >= 0 {
+		rest := msg[idx+len(".go: "):]
+		if _, after, found := strings.Cut(rest, ": "); found && strings.TrimSpace(after) != "" {
+			rest = after
+		}
+		msg = strings.TrimSpace(rest)
 	}
-	return nil
+	return msg
 }
 
-// tailBuffer is an io.Writer that keeps only the last max bytes written,
-// so stderr collection stays at a fixed memory cap no matter how much
-// output the process produces.
-type tailBuffer struct {
-	buf []byte
-	max int
+// printSourceFacts zeigt zur Quelldatei dieselben Eckdaten wie der
+// Konvertierungsmodus. In den Werkzeug-Modi stand bisher nur der Dateiname —
+// ob man die richtige Datei erwischt hat, sah man erst an den Spurenlisten.
+func printSourceFacts(path string, streams *ffprobeOutput) {
+	if streams == nil {
+		return
+	}
+	var video *ffprobeStream
+	audioTracks, subTracks := 0, 0
+	for i := range streams.Streams {
+		s := &streams.Streams[i]
+		switch s.CodecType {
+		case "video":
+			if video == nil && s.Disposition.AttachedPic == 0 {
+				video = s
+			}
+		case "audio":
+			audioTracks++
+		case "subtitle":
+			subTracks++
+		}
+	}
+
+	var parts []string
+	if video != nil {
+		parts = append(parts, pterm.LightGreen(strings.ToUpper(video.CodecName)))
+		if video.Width > 0 && video.Height > 0 {
+			parts = append(parts, pterm.Cyan(fmt.Sprintf("%dx%d", video.Width, video.Height)))
+		}
+	}
+	parts = append(parts,
+		pterm.LightBlue(fmt.Sprintf("%d audio", audioTracks)),
+		pterm.LightBlue(fmt.Sprintf("%d subs", subTracks)))
+
+	durationSec := probeDurationSec(streams)
+	if durationSec > 0 {
+		parts = append(parts, pterm.Yellow(formatDuration(durationSec)))
+	}
+	if sizeMB := getFileSizeMB(path); sizeMB > 0 {
+		parts = append(parts, pterm.LightWhite(fmt.Sprintf("%.0f MB", sizeMB)))
+	}
+	fmt.Printf("  %s\n", strings.Join(parts, " · "))
 }
 
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if n >= t.max {
-		t.buf = append(t.buf[:0], p[n-t.max:]...)
-		return n, nil
+// probeDurationSec liest die Gesamtlaufzeit aus einer bereits vorliegenden
+// ffprobe-Ausgabe. 0 heißt "unbekannt"; die Fortschrittsanzeige kommt dann ohne
+// Prozentwert aus. Spart einen zweiten Probe-Aufruf an Stellen, die die Daten
+// ohnehin schon in der Hand haben.
+func probeDurationSec(streams *ffprobeOutput) float64 {
+	if streams == nil {
+		return 0
 	}
-	if drop := len(t.buf) + n - t.max; drop > 0 {
-		t.buf = append(t.buf[:0], t.buf[drop:]...)
-	}
-	t.buf = append(t.buf, p...)
-	return n, nil
+	d, _ := strconv.ParseFloat(streams.Format.Duration, 64)
+	return d
 }
-
-func (t *tailBuffer) String() string { return string(t.buf) }
 
 func lastErrorLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
@@ -623,14 +694,14 @@ func runBatchSplit(ctx context.Context) {
 	if err != nil {
 		exe, exeErr := os.Executable()
 		if exeErr != nil {
-			pErr.Printf("Cannot determine working directory: %v\n", err)
+			pErr.Printf("Cannot determine working directory: %s\n", plainError(err))
 			return
 		}
 		dir = filepath.Dir(exe)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		pErr.Printf("Cannot read directory %s: %v\n", dir, err)
+		pErr.Printf("Cannot read directory %s: %s\n", dir, plainError(err))
 		return
 	}
 	var files []string
@@ -729,18 +800,20 @@ func runDemuxFromMKV(ctx context.Context, files []string) {
 // extracted, stereo mixes stay opt-in-only and are never created.
 func processOneMKV(ctx context.Context, mkvPath string, askTracks bool) {
 	abs, _ := filepath.Abs(mkvPath)
-	pInfo.Printf("» %s\n", filepath.Base(abs))
+	announceToolFile("» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
-		pErr.Printf("  File not found: %v\n", err)
+		pErr.Printf("  File not found: %s\n", plainError(err))
 		return
 	}
 
 	streams, err := probeStreams(ctx, abs)
 	if err != nil {
-		pErr.Printf("  Probe failed: %v\n", err)
+		pErr.Printf("  Probe failed: %s\n", plainError(err))
 		return
 	}
+
+	printSourceFacts(abs, streams)
 
 	var audioInfos []AudioStreamInfo
 	for _, s := range streams.Streams {
@@ -774,7 +847,7 @@ func processOneMKV(ctx context.Context, mkvPath string, askTracks bool) {
 		return
 	}
 	if muxErr != nil {
-		pErr.Printf("  MP4 creation failed: %v\n", muxErr)
+		pErr.Printf("  MP4 creation failed: %s\n", plainError(muxErr))
 	}
 	if ctx.Err() != nil {
 		fmt.Println(pterm.Gray("  Aborted."))
@@ -817,7 +890,10 @@ func writeVideoOnlyMP4(ctx context.Context, srcPath, mp4Out string, streams *ffp
 	// Progress display: remuxing a multi-GB movie takes a while — without it
 	// the program looks frozen.
 	durationSec, _ := strconv.ParseFloat(streams.Format.Duration, 64)
-	if err := runFFmpeg(ctx, args, durationSec, 1, 1, getFileSizeMB(srcPath)); err != nil {
+	// Kein Größenvergleich beim 1:1-Kopieren: die Zeile "28 MB → ~28 MB
+	// (+0 MB larger)" behauptet einen Fehlschlag, wo gar nichts eingespart
+	// werden soll. 0 zeigt stattdessen nur die entstehende Größe.
+	if err := runFFmpeg(ctx, args, durationSec, 1, 1, 0); err != nil {
 		_ = os.Remove(mp4Out)
 		return fmt.Errorf("Streams.go: writeVideoOnlyMP4: %w", err)
 	}
@@ -871,18 +947,20 @@ func runExtractFromMP4(ctx context.Context, files []string) {
 
 func processOneMP4(ctx context.Context, mp4Path string) {
 	abs, _ := filepath.Abs(mp4Path)
-	pInfo.Printf("» %s\n", filepath.Base(abs))
+	announceToolFile("» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
-		pErr.Printf("  File not found: %v\n", err)
+		pErr.Printf("  File not found: %s\n", plainError(err))
 		return
 	}
 
 	streams, err := probeStreams(ctx, abs)
 	if err != nil {
-		pErr.Printf("  Probe failed: %v\n", err)
+		pErr.Printf("  Probe failed: %s\n", plainError(err))
 		return
 	}
+
+	printSourceFacts(abs, streams)
 
 	var audioInfos []AudioStreamInfo
 	for _, s := range streams.Streams {
@@ -912,7 +990,7 @@ func processOneMP4(ctx context.Context, mp4Path string) {
 		return
 	}
 	if muxErr != nil {
-		pErr.Printf("  Video-only MP4 creation failed: %v\n", muxErr)
+		pErr.Printf("  Video-only MP4 creation failed: %s\n", plainError(muxErr))
 	}
 	if ctx.Err() != nil {
 		fmt.Println(pterm.Gray("  Aborted."))
@@ -970,7 +1048,7 @@ func runStereoDownmix(ctx context.Context, srcPath, base, suffix string, i, tota
 	if p, uerr := uniquePath(stPath); uerr == nil {
 		stPath = p
 	} else {
-		pWarn.Printf("    × Stereo mix skipped: %v\n", uerr)
+		pWarn.Printf("    × Stereo mix skipped: %s\n", plainError(uerr))
 		return
 	}
 	_, stBr := aacEncodeParams(2)
@@ -992,7 +1070,7 @@ func runStereoDownmix(ctx context.Context, srcPath, base, suffix string, i, tota
 		estimateAudioTrackMB(s, durationSec)); err != nil {
 		_ = os.Remove(stPath)
 		if !errors.Is(err, context.Canceled) {
-			pErr.Printf("    × %s: %v\n", filepath.Base(stPath), err)
+			pErr.Printf("    × %s: %s\n", filepath.Base(stPath), plainError(err))
 		}
 		return
 	}
@@ -1097,7 +1175,7 @@ func extractAudios(ctx context.Context, mkvPath string, streams *ffprobeOutput, 
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{
@@ -1127,7 +1205,7 @@ func extractAudios(ctx context.Context, mkvPath string, streams *ffprobeOutput, 
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{
@@ -1155,11 +1233,15 @@ func extractAudios(ctx context.Context, mkvPath string, streams *ffprobeOutput, 
 			ffErr = runFFmpeg(ctx, ffargs, durationSec, i+1, len(audioStreams),
 				estimateAudioTrackMB(s, durationSec))
 		} else {
-			ffErr = runFFmpegSub(ctx, ffargs)
+			// Auch das reine Kopieren liest die ganze Datei durch: eine TrueHD-Spur
+			// aus einem 8-GB-Film braucht dafür spürbar Zeit. Ohne Anzeige sah das
+			// aus wie ein Hänger. Eingangsgröße 0 = kein Größenvergleich, beim
+			// 1:1-Kopieren gibt es nichts einzusparen.
+			ffErr = runFFmpeg(ctx, ffargs, durationSec, i+1, len(audioStreams), 0)
 		}
 
 		if ffErr != nil {
-			pErr.Printf("    × %s: %v\n", filepath.Base(outPath), ffErr)
+			pErr.Printf("    × %s: %s\n", filepath.Base(outPath), plainError(ffErr))
 			_ = os.Remove(outPath)
 			continue
 		}
@@ -1245,7 +1327,7 @@ func extractSubs(ctx context.Context, mkvPath string, streams *ffprobeOutput, se
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{
@@ -1258,7 +1340,7 @@ func extractSubs(ctx context.Context, mkvPath string, streams *ffprobeOutput, se
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{
@@ -1272,7 +1354,7 @@ func extractSubs(ctx context.Context, mkvPath string, streams *ffprobeOutput, se
 			if p, uerr := uniqueVobSubPath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{
@@ -1285,8 +1367,11 @@ func extractSubs(ctx context.Context, mkvPath string, streams *ffprobeOutput, se
 			continue
 		}
 
-		if err := runFFmpegSub(ctx, ffargs); err != nil {
-			pErr.Printf("    × %s: %v\n", filepath.Base(outPath), err)
+		// Bild-Untertitel (PGS/VobSub) können zig Megabyte groß sein und FFmpeg
+		// muss dafür die ganze Datei durchlaufen — also mit Anzeige.
+		if err := runFFmpeg(ctx, ffargs, probeDurationSec(streams),
+			i+1, len(subStreams), 0); err != nil {
+			pErr.Printf("    × %s: %s\n", filepath.Base(outPath), plainError(err))
 			_ = os.Remove(outPath)
 			if strings.HasSuffix(outPath, ".idx") {
 				// FIX LOGIC-01: only delete the companion .sub for this stem.
@@ -1332,22 +1417,22 @@ func parseSubTags(file string) (lang string, isForced bool, isSDH bool) {
 
 func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
 	abs, _ := filepath.Abs(videoPath)
-	pInfo.Printf("» %s + %d Audio + %d SRT\n",
+	announceToolFile("» %s + %d Audio + %d SRT\n",
 		filepath.Base(abs), len(audioPaths), len(srtPaths))
 
 	if _, err := os.Stat(abs); err != nil {
-		pErr.Printf("  File not found: %v\n", err)
+		pErr.Printf("  File not found: %s\n", plainError(err))
 		return
 	}
 	for _, a := range audioPaths {
 		if _, err := os.Stat(a); err != nil {
-			pErr.Printf("  Audio file not found: %v\n", err)
+			pErr.Printf("  Audio file not found: %s\n", plainError(err))
 			return
 		}
 	}
 	for _, srt := range srtPaths {
 		if _, err := os.Stat(srt); err != nil {
-			pErr.Printf("  SRT file not found: %v\n", err)
+			pErr.Printf("  SRT file not found: %s\n", plainError(err))
 			return
 		}
 	}
@@ -1361,9 +1446,11 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 
 	streams, err := probeStreams(ctx, abs)
 	if err != nil {
-		pErr.Printf("  Probe failed: %v\n", err)
+		pErr.Printf("  Probe failed: %s\n", plainError(err))
 		return
 	}
+
+	printSourceFacts(abs, streams)
 
 	// Dropped audio files REPLACE the audio of the base video; without dropped
 	// audio the base keeps its own sound (a subtitle-only merge used to produce
@@ -1451,7 +1538,7 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 			sel := fmt.Sprintf(":a:%d", i)
 			ainfo, probeErr := probeStreams(ctx, audAbs)
 			if probeErr != nil {
-				pErr.Printf("  Audio probe failed (%s): %v\n", filepath.Base(a), probeErr)
+				pErr.Printf("  Audio probe failed (%s): %s\n", filepath.Base(a), plainError(probeErr))
 				return
 			}
 			var ast *ffprobeStream
@@ -1675,7 +1762,7 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 
 		if err2 := runFFmpeg(ctx, fallbackArgs, durationSec, 1, 1, 0); err2 != nil {
 			_ = os.Remove(outPath)
-			pErr.Printf("  Merge failed even without subs: %v\n", err2)
+			pErr.Printf("  Merge failed even without subs: %s\n", plainError(err2))
 			return
 		}
 		pOK.Printf("    ✓ %s %s\n",
@@ -1684,7 +1771,7 @@ func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []stri
 		return
 	}
 
-	pErr.Printf("  Merge failed: %v\n", err)
+	pErr.Printf("  Merge failed: %s\n", plainError(err))
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1783,7 +1870,7 @@ func runSplitMode(ctx context.Context, args []string) {
 		if err != nil {
 			exe, exeErr := os.Executable()
 			if exeErr != nil {
-				pErr.Printf("Cannot determine working directory: %v\n", err)
+				pErr.Printf("Cannot determine working directory: %s\n", plainError(err))
 				return
 			}
 			dir = filepath.Dir(exe)
@@ -1849,7 +1936,7 @@ func runSplitMode(ctx context.Context, args []string) {
 func runBatchSplitLossless(ctx context.Context, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		pErr.Printf("Cannot read directory %s: %v\n", dir, err)
+		pErr.Printf("Cannot read directory %s: %s\n", dir, plainError(err))
 		return
 	}
 	var files []string
@@ -1921,18 +2008,20 @@ func runBatchSplitLossless(ctx context.Context, dir string) {
 // raw subtitles. askTracks=false (batch) extracts everything without asking.
 func processOneVideoLossless(ctx context.Context, srcPath string, askTracks bool) {
 	abs, _ := filepath.Abs(srcPath)
-	pInfo.Printf("» %s\n", filepath.Base(abs))
+	announceToolFile("» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
-		pErr.Printf("  File not found: %v\n", err)
+		pErr.Printf("  File not found: %s\n", plainError(err))
 		return
 	}
 
 	streams, err := probeStreams(ctx, abs)
 	if err != nil {
-		pErr.Printf("  Probe failed: %v\n", err)
+		pErr.Printf("  Probe failed: %s\n", plainError(err))
 		return
 	}
+
+	printSourceFacts(abs, streams)
 
 	printLosslessTrackInfo(streams)
 	var audioSel, subSel map[int]bool
@@ -1947,7 +2036,7 @@ func processOneVideoLossless(ctx context.Context, srcPath string, askTracks bool
 		return
 	}
 	if vidErr != nil {
-		pErr.Printf("  Silent video creation failed: %v\n", vidErr)
+		pErr.Printf("  Silent video creation failed: %s\n", plainError(vidErr))
 	}
 	if ctx.Err() != nil {
 		fmt.Println(pterm.Gray("  Aborted."))
@@ -2033,7 +2122,10 @@ func writeNoSoundVideoLossless(ctx context.Context, srcPath string, streams *ffp
 
 	fmt.Println(pterm.Gray("  → Extracting video (stream copy, no re-encode)..."))
 	durationSec, _ := strconv.ParseFloat(streams.Format.Duration, 64)
-	if err := runFFmpeg(ctx, args, durationSec, 1, 1, getFileSizeMB(srcPath)); err != nil {
+	// Kein Größenvergleich beim 1:1-Kopieren: die Zeile "28 MB → ~28 MB
+	// (+0 MB larger)" behauptet einen Fehlschlag, wo gar nichts eingespart
+	// werden soll. 0 zeigt stattdessen nur die entstehende Größe.
+	if err := runFFmpeg(ctx, args, durationSec, 1, 1, 0); err != nil {
 		_ = os.Remove(out)
 		return fmt.Errorf("Streams.go: writeNoSoundVideoLossless: %w", err)
 	}
@@ -2099,7 +2191,7 @@ func extractAudiosLossless(ctx context.Context, srcPath string, streams *ffprobe
 		if p, uerr := uniquePath(outPath); uerr == nil {
 			outPath = p
 		} else {
-			pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+			pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 			continue
 		}
 
@@ -2124,9 +2216,12 @@ func extractAudiosLossless(ctx context.Context, srcPath string, streams *ffprobe
 			pterm.LightBlue(fmt.Sprintf("(%s %s, 1:1)", strings.ToUpper(s.CodecName), layout)),
 		)
 
-		if err := runFFmpegSub(ctx, ffargs); err != nil {
+		// Auch beim 1:1-Kopieren liest FFmpeg die ganze Quelldatei durch — ohne
+		// Anzeige stand das Fenster hier bei großen Filmen minutenlang still.
+		if err := runFFmpeg(ctx, ffargs, probeDurationSec(streams),
+			i+1, len(audioStreams), 0); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				pErr.Printf("    × %s: %v\n", filepath.Base(outPath), err)
+				pErr.Printf("    × %s: %s\n", filepath.Base(outPath), plainError(err))
 			}
 			_ = os.Remove(outPath)
 			continue
@@ -2205,7 +2300,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
@@ -2214,7 +2309,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
@@ -2224,7 +2319,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "srt", outPath}
@@ -2234,7 +2329,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
@@ -2243,7 +2338,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniquePath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
@@ -2252,7 +2347,7 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 			if p, uerr := uniqueVobSubPath(outPath); uerr == nil {
 				outPath = p
 			} else {
-				pWarn.Printf("    × Track %d skipped: %v\n", i+1, uerr)
+				pWarn.Printf("    × Track %d skipped: %s\n", i+1, plainError(uerr))
 				continue
 			}
 			ffargs = []string{"-y", "-i", srcPath, "-map", fmt.Sprintf("0:s:%d", i), "-c:s", "copy", outPath}
@@ -2268,9 +2363,12 @@ func extractSubsLossless(ctx context.Context, srcPath string, streams *ffprobeOu
 				pterm.LightYellow(note))
 		}
 
-		if err := runFFmpegSub(ctx, ffargs); err != nil {
+		// Wie im DaVinci-Zweig: Bild-Untertitel sind groß genug, dass die
+		// Extraktion sichtbar dauern kann.
+		if err := runFFmpeg(ctx, ffargs, probeDurationSec(streams),
+			i+1, len(subStreams), 0); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				pErr.Printf("    × %s: %v\n", filepath.Base(outPath), err)
+				pErr.Printf("    × %s: %s\n", filepath.Base(outPath), plainError(err))
 			}
 			_ = os.Remove(outPath)
 			if strings.HasSuffix(outPath, ".idx") {
@@ -2334,31 +2432,33 @@ func runJoinMode(ctx context.Context, args []string) {
 // source is never touched.
 func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
 	abs, _ := filepath.Abs(videoPath)
-	pInfo.Printf("» %s + %d Audio + %d Sub\n",
+	announceToolFile("» %s + %d Audio + %d Sub\n",
 		filepath.Base(abs), len(audioPaths), len(srtPaths))
 
 	if _, err := os.Stat(abs); err != nil {
-		pErr.Printf("  File not found: %v\n", err)
+		pErr.Printf("  File not found: %s\n", plainError(err))
 		return
 	}
 	for _, a := range audioPaths {
 		if _, err := os.Stat(a); err != nil {
-			pErr.Printf("  Audio file not found: %v\n", err)
+			pErr.Printf("  Audio file not found: %s\n", plainError(err))
 			return
 		}
 	}
 	for _, srt := range srtPaths {
 		if _, err := os.Stat(srt); err != nil {
-			pErr.Printf("  Subtitle file not found: %v\n", err)
+			pErr.Printf("  Subtitle file not found: %s\n", plainError(err))
 			return
 		}
 	}
 
 	streams, err := probeStreams(ctx, abs)
 	if err != nil {
-		pErr.Printf("  Probe failed: %v\n", err)
+		pErr.Printf("  Probe failed: %s\n", plainError(err))
 		return
 	}
+
+	printSourceFacts(abs, streams)
 
 	// Confirm there IS a video track to build from, and note whether the base
 	// carries audio of its own: dropped audio files replace it, but without
@@ -2528,7 +2628,7 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 		pWarn.Println("  Join with subtitles failed, trying without subtitles...")
 		if err2 := runFFmpeg(ctx, buildArgs(false), durationSec, 1, 1, 0); err2 != nil {
 			_ = os.Remove(outPath)
-			pErr.Printf("  Join failed even without subtitles: %v\n", err2)
+			pErr.Printf("  Join failed even without subtitles: %s\n", plainError(err2))
 			return
 		}
 		pOK.Printf("    ✓ %s %s\n", filepath.Base(outPath),
@@ -2536,7 +2636,7 @@ func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths
 		return
 	}
 
-	pErr.Printf("  Join failed: %v\n", err)
+	pErr.Printf("  Join failed: %s\n", plainError(err))
 }
 
 // showUsageSplitJoin explains the lossless -split / -join modes.

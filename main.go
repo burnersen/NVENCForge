@@ -40,6 +40,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -302,11 +303,13 @@ type VideoStats struct {
 type ProcessResult struct {
 	InputFile  string
 	OutputFile string
+	InputMB    float64 // Größe der Quelldatei, Bezugswert für die Ersparnis in Prozent
 	SavedMB    float64
 	Success    bool
 	Skipped    bool
 	IsPreview  bool
-	NoAudio    bool // video-only fallback used: output has no sound, original kept
+	PreviewPct float64 // bei IsPreview: wie weit der Encode gekommen war (0-100)
+	NoAudio    bool    // video-only fallback used: output has no sound, original kept
 	ErrMsg     string
 	FailedAt   time.Time
 }
@@ -346,11 +349,20 @@ var (
 		Style: pterm.NewStyle(pterm.BgRed, pterm.FgLightWhite, pterm.Bold),
 	})
 	// pFatal is never silenced by -debug. Reserved for run-blocking startup
-	// errors the user must see (missing GPU, FFmpeg setup) — unlike pErr, which
-	// reports per-operation failures and is suppressed without -debug.
+	// errors the user must see (missing GPU, FFmpeg setup). Kept as its own name
+	// because the call sites read differently: pFatal ends the run, pErr does not.
 	pFatal = pterm.Error.WithPrefix(pterm.Prefix{
 		Text:  " ERROR ",
 		Style: pterm.NewStyle(pterm.BgRed, pterm.FgWhite, pterm.Bold),
+	})
+	// pDetail carries the internal reason BEHIND an error (FFmpeg exit codes,
+	// probe output, Go error chains) and is the only printer -debug silences.
+	// Everything a user can act on — "conversion failed", "please drop only one
+	// video file" — belongs on pErr and must stay visible: a failure that shows
+	// nothing at all is indistinguishable from a file that was silently skipped.
+	pDetail = pterm.Error.WithPrefix(pterm.Prefix{
+		Text:  " DETAIL ",
+		Style: pterm.NewStyle(pterm.BgDarkGray, pterm.FgLightWhite),
 	})
 )
 
@@ -359,8 +371,9 @@ var (
 // ----------------------------------------------------------------------------
 
 // debugMode is set once at the start of main() and read-only afterwards. When
-// false, all pErr output is routed to io.Discard so end users never see internal
-// failure reasons. Intentionally undocumented (absent from help and tips).
+// false, all pDetail output is routed to io.Discard so end users never see
+// internal failure reasons. Intentionally undocumented (absent from help and
+// tips).
 var debugMode bool
 
 // davinciMode is true when the process runs in -davinci mode (the DaVinci
@@ -396,6 +409,34 @@ func consumeDebugFlag() bool {
 // Signal handling
 // ----------------------------------------------------------------------------
 
+// progressAreaActive meldet, dass gerade eine mehrzeilige Fortschrittsanzeige
+// gezeichnet wird. Der Abbruch-Handler läuft in einer eigenen Goroutine, deshalb
+// atomar.
+var progressAreaActive atomic.Bool
+
+// abortNoticePending merkt sich, dass die Abbruch-Meldung noch aussteht, weil
+// sie beim Drücken von Strg+C die laufende Anzeige zerschossen hätte.
+var abortNoticePending atomic.Bool
+
+// printAbortNotice gibt die Meldung zum ersten Strg+C aus. Der Wortlaut hängt
+// vom Modus ab: die Werkzeug-Modi werfen unfertige Dateien weg, die
+// Konvertierung rettet den bisherigen Teil als Vorschau.
+func printAbortNotice() {
+	if davinciMode || splitMode || joinMode {
+		pAbort.Println("Ctrl+C detected. Aborting — unfinished files will be removed...")
+		return
+	}
+	pAbort.Println("Ctrl+C detected. Finishing current task cleanly (partial file will be kept)...")
+}
+
+// flushAbortNotice holt eine zurückgestellte Abbruch-Meldung nach. Aufzurufen,
+// sobald die Fortschrittsanzeige geschlossen ist.
+func flushAbortNotice() {
+	if abortNoticePending.Swap(false) {
+		printAbortNotice()
+	}
+}
+
 // setupSignalContext returns the root context and its cancel function.
 //   - First Ctrl+C: ctx is cancelled → runFFmpeg sends FFmpeg "q" (preview is
 //     cleanly finalized).
@@ -408,11 +449,17 @@ func setupSignalContext() (context.Context, context.CancelFunc) {
 	go func() {
 		<-sigChan
 		cancel()
-		fmt.Println()
-		if davinciMode || splitMode || joinMode {
-			pAbort.Println("Ctrl+C detected. Aborting — unfinished files will be removed...")
+		// Solange die mehrzeilige Fortschrittsanzeige läuft, darf hier NICHTS
+		// gedruckt werden: sie zeichnet sich, indem sie den Cursor um die Höhe
+		// ihres letzten Inhalts zurücksetzt, und jede Fremdausgabe verschiebt
+		// diese Rechnung. Genau daran blieb nach Strg+C ein halber Balkenblock
+		// stehen — und diese Meldung selbst wurde vom nächsten Neuzeichnen
+		// wieder überschrieben. runFFmpeg holt sie nach, sobald die Anzeige zu ist.
+		if progressAreaActive.Load() {
+			abortNoticePending.Store(true)
 		} else {
-			pAbort.Println("Ctrl+C detected. Finishing current task cleanly (preview will be saved)...")
+			fmt.Println()
+			printAbortNotice()
 		}
 
 		<-sigChan
@@ -483,7 +530,7 @@ func initTools() error {
 	fp, errF := exec.LookPath("ffmpeg.exe")
 	pp, errP := exec.LookPath("ffprobe.exe")
 	if errF == nil && errP == nil {
-		pWarn.Printf("Download failed: %v\n", dlErr)
+		pWarn.Printf("Download failed: %s\n", plainError(dlErr))
 		pWarn.Println("Using the FFmpeg found in your PATH instead. It works, but its build is")
 		pWarn.Println("unknown — quality measurements can differ from the tested one. To fix")
 		pWarn.Println("this, put ffmpeg.exe and ffprobe.exe next to NVENCForge.exe.")
@@ -576,7 +623,35 @@ func checkHardwareCapabilities() error {
 	if !hasCAS {
 		return errors.New("main.go: checkHardwareCapabilities: CAS filter missing in FFmpeg build")
 	}
+
+	// Antwort auf die eigene Frage: bisher stand hier nur "Checking GPU
+	// capabilities..." und danach nie ein Ergebnis. Welche Karte rechnet, ist
+	// außerdem die erste Rückfrage, wenn ein Lauf ungewohnt langsam war.
+	if name := nvidiaCardName(); name != "" {
+		pOK.Printf("GPU ready: %s\n", pterm.LightCyan(name))
+	} else {
+		pOK.Println("GPU ready (NVENC HEVC 10-bit).")
+	}
 	return nil
+}
+
+// nvidiaCardName fragt den Kartennamen beim Treiber ab. Rein kosmetisch: fehlt
+// nvidia-smi oder antwortet es nicht rechtzeitig, bleibt die Angabe leer und
+// der Lauf geht unverändert weiter. Das Zeitlimit ist bewusst knapp — für eine
+// Namenszeile darf der Start nicht spürbar warten.
+func nvidiaCardName() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "nvidia-smi",
+		"--query-gpu=name", "--format=csv,noheader")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	name, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	return strings.TrimSpace(name)
 }
 
 // checkAV1Capability probes a 10-bit av1_nvenc dummy encode. AV1 encoding
@@ -953,7 +1028,10 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	case cfg.autoCQ && sawAutoCQFlag:
 		pInfo.Printf("Auto-CQ mode enabled: CQ per file via sampled VMAF measurement (%s).\n", autoCQCodec)
 	case cfg.autoCQ:
-		pInfo.Printf("Auto-CQ mode enabled via configuration: CQ per file via sampled VMAF measurement (%s).\n", autoCQCodec)
+		// Der Konfigurations-Fall bekommt KEINE eigene Zeile mehr: die
+		// Einstellungs-Box direkt darunter sagt dasselbe ("Quality: measured per
+		// file" samt Zielwert). Nur die per Flag erzwungene Abweichung vom
+		// Konfigurierten ist eine Meldung wert.
 	case sawNoAutoCQ && (sawAutoCQFlag || appSettings.autoCQ):
 		pInfo.Println("Auto-CQ disabled for this run (-noautocq) — using the configured CQ.")
 	}
@@ -1185,16 +1263,16 @@ func writeErrorLog(cfg *AppConfig, results []ProcessResult) {
 		logPath := filepath.Join(dir, "error_report.txt")
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
-			pWarn.Printf("Could not write error log: %v\n", err)
+			pWarn.Printf("Could not write error log: %s\n", plainError(err))
 			continue
 		}
 		if _, err := f.WriteString(header); err != nil {
-			pWarn.Printf("Error log: writing header failed: %v\n", err)
+			pWarn.Printf("Error log: writing header failed: %s\n", plainError(err))
 			_ = f.Close()
 			continue
 		}
 		if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
-			pWarn.Printf("Error log: writing entries failed: %v\n", err)
+			pWarn.Printf("Error log: writing entries failed: %s\n", plainError(err))
 		}
 		_ = f.Close()
 	}
@@ -1344,14 +1422,40 @@ func printActiveSettings(cfg *AppConfig) {
 			entry{"Auto-shutdown", "PC turns off when finished", "yellow", true})
 	}
 
-	// Die encoder-eigenen Regler unterscheiden sich je Backend: NVENC-Preset,
-	// Lookahead und B-Frames haben im CPU-Modus keinerlei Wirkung, dort zählen
-	// stattdessen das x265-/SVT-Preset und die Thread-Grenze.
-	encoderDetails := []string{
-		"NVENC preset " + s.nvencPreset,
-		fmt.Sprintf("lookahead %d fr", s.nvencLookahead),
-		"B-frames " + bfVal,
+	// Die Regler dahinter — als ausgerichtete Tabelle statt als eine mit "·"
+	// verkettete Fließzeile. Grund ist die Fehlersuche: man muss einen EINZELNEN
+	// Wert wiederfinden können, und einen Fließtext liest man dafür Wort für
+	// Wort ab. Die Zweiteilung bleibt bestehen — oben steht, was mit dem Video
+	// passiert, hier unten, womit. Die Beschriftungen sind bewusst nah an den
+	// INI-Schlüsseln gehalten ("AQ strength" → aqStrength), damit der Weg von
+	// der Anzeige zur Stellschraube kurz ist.
+	// Zwei thematische Spalten: links alles, was über die Bildqualität und damit
+	// über die Dateigröße entscheidet, rechts der Weg durch das Programm. Die
+	// Spalten werden NICHT zeilenweise durchgezählt, sonst stünden zufällige
+	// Paare wie "Plateau tolerance | NVENC preset" nebeneinander.
+	type detail struct{ label, value string }
+	var quality, pipeline []detail
+	addQuality := func(label, value string) { quality = append(quality, detail{label, value}) }
+	addPipeline := func(label, value string) { pipeline = append(pipeline, detail{label, value}) }
+
+	// Ein von Hand gesetzter Deckel steht schon oben in der Hauptliste — hier
+	// noch einmal wäre er die einzige doppelte Angabe der ganzen Anzeige.
+	if !bitrateActive {
+		addQuality("Max bitrate", fmt.Sprintf("%d k", bitrate))
 	}
+	if cfg != nil && cfg.autoCQ {
+		target := fmt.Sprintf("VMAF %.4g", s.autoCQTargetVMAF)
+		if s.autoCQTolerance > 0 {
+			target = fmt.Sprintf("VMAF %.4g (accepts %.4g)",
+				s.autoCQTargetVMAF, s.autoCQTargetVMAF-s.autoCQTolerance)
+		}
+		addQuality("Quality target", target)
+		addQuality("Plateau tolerance", fmt.Sprintf("%.4g VMAF", s.autoCQPlateauTolerance))
+	}
+
+	// Die encoder-eigenen Regler unterscheiden sich je Backend: NVENC-Preset,
+	// AQ-Stärke, Lookahead und B-Frames haben im CPU-Modus keinerlei Wirkung,
+	// dort zählen stattdessen das x265-/SVT-Preset und die Thread-Grenze.
 	if cpuModeActive {
 		presetVal := s.cpuPreset + " (libx265)"
 		if cfg != nil && cfg.av1 {
@@ -1361,29 +1465,21 @@ func printActiveSettings(cfg *AppConfig) {
 		if s.cpuThreads > 0 {
 			threadsVal = fmt.Sprintf("%d threads", s.cpuThreads)
 		}
-		encoderDetails = []string{"CPU preset " + presetVal, "threads " + threadsVal}
+		addQuality("CPU preset", presetVal)
+		addQuality("Threads", threadsVal)
+	} else {
+		addQuality("NVENC preset", s.nvencPreset)
+		addQuality("AQ strength", fmt.Sprintf("%d", s.aqStrength))
+		addQuality("Lookahead", fmt.Sprintf("%d frames", s.nvencLookahead))
+		addQuality("B-frames", bfVal)
 	}
 
-	var details []string
-	if !bitrateActive {
-		details = append(details, fmt.Sprintf("max bitrate %d k", bitrate))
-	}
-	if cfg != nil && cfg.autoCQ {
-		target := fmt.Sprintf("quality target VMAF %.4g", s.autoCQTargetVMAF)
-		if s.autoCQTolerance > 0 {
-			target = fmt.Sprintf("quality target VMAF %.4g -%.4g",
-				s.autoCQTargetVMAF, s.autoCQTolerance)
-		}
-		details = append(details, target)
-	}
-	details = append(details, encoderDetails...)
-	details = append(details,
-		"decoding "+decodeVal,
-		"sharpening "+casVal,
-		fmt.Sprintf("audio %d k per channel", s.audioKbpsPerChannel),
-		fmt.Sprintf("audio fallback %d k", s.fallbackAudioBitrate))
+	addPipeline("Decoding", decodeVal)
+	addPipeline("Sharpening", casVal)
+	addPipeline("Audio", fmt.Sprintf("%d k per channel", s.audioKbpsPerChannel))
+	addPipeline("Audio fallback", fmt.Sprintf("%d k", s.fallbackAudioBitrate))
 	if ffmpegSource != "" {
-		details = append(details, "ffmpeg "+ffmpegSource)
+		addPipeline("FFmpeg", ffmpegSource)
 	}
 
 	colorize := func(val, color string) string {
@@ -1432,34 +1528,44 @@ func printActiveSettings(cfg *AppConfig) {
 		fmt.Printf("  %s%*s%s\n", left, columnWidth-leftLen+columnGap, "", right)
 	}
 
-	// Umbruch nach sichtbarer Breite statt nach fester Anzahl: die Detailteile
-	// sind je nach Modus unterschiedlich lang (CPU- gegen NVENC-Regler), eine
-	// feste Spaltenzahl würde je nach Lauf ausfransen.
-	const detailLineWidth = 72
-	var detailLines []string
-	current := ""
-	for _, part := range details {
-		switch {
-		case current == "":
-			current = part
-		case len(current)+3+len(part) <= detailLineWidth:
-			current += " · " + part
-		default:
-			detailLines = append(detailLines, current)
-			current = part
+	// Spaltenbreiten aus den SICHTBAREN Texten rechnen und erst danach färben:
+	// pterm packt die Farben in ANSI-Steuerzeichen, die jede Breitenrechnung
+	// mitzählen würde. Genau daran verrutschte die frühere Tabelle.
+	widest := func(rows []detail, pick func(detail) string) int {
+		w := 0
+		for _, r := range rows {
+			if n := len(pick(r)); n > w {
+				w = n
+			}
 		}
+		return w
 	}
-	if current != "" {
-		detailLines = append(detailLines, current)
+	leftLabel := widest(quality, func(d detail) string { return d.label })
+	leftValue := widest(quality, func(d detail) string { return d.value })
+	rightLabel := widest(pipeline, func(d detail) string { return d.label })
+
+	// Die rechte Spalte wird bewusst nicht aufgefüllt — sonst hingen unsichtbare
+	// Leerzeichen am Zeilenende, die beim Kopieren des Fensters mitwandern.
+	cell := func(d detail, labelW, valueW int) string {
+		return pterm.Gray(fmt.Sprintf("%-*s", labelW, d.label)) + "  " +
+			pterm.LightCyan(fmt.Sprintf("%-*s", valueW, d.value))
 	}
 
 	fmt.Println()
-	for i, line := range detailLines {
-		prefix := "  " + pterm.Gray("Details:  ")
-		if i > 0 {
-			prefix = "            " // bündig unter dem ersten Detail-Eintrag
+	fmt.Println("  " + pterm.Gray("Details"))
+	for i := 0; i < len(quality) || i < len(pipeline); i++ {
+		row := "    "
+		switch {
+		case i < len(quality) && i < len(pipeline):
+			row += cell(quality[i], leftLabel, leftValue) + "    " +
+				cell(pipeline[i], rightLabel, 0)
+		case i < len(quality):
+			row += cell(quality[i], leftLabel, 0)
+		default:
+			row += strings.Repeat(" ", leftLabel+2+leftValue+4) +
+				cell(pipeline[i], rightLabel, 0)
 		}
-		fmt.Println(prefix + pterm.Gray(line))
+		fmt.Println(row)
 	}
 
 	fmt.Println()
@@ -1488,15 +1594,19 @@ func printStreamSettings() {
 
 func printSummary(ctx context.Context, cfg *AppConfig, results []ProcessResult, elapsed time.Duration) {
 	ok, fail, skip, preview, noAudio := 0, 0, 0, 0, 0
-	var saved float64
+	var saved, sourceTotal, previewPct float64
 	for _, r := range results {
 		if r.Skipped {
 			skip++
 		} else if r.IsPreview {
 			preview++
+			if r.PreviewPct > previewPct {
+				previewPct = r.PreviewPct
+			}
 		} else if r.Success {
 			ok++
 			saved += r.SavedMB
+			sourceTotal += r.InputMB
 			if r.NoAudio {
 				noAudio++
 			}
@@ -1508,11 +1618,6 @@ func printSummary(ctx context.Context, cfg *AppConfig, results []ProcessResult, 
 		writeErrorLog(cfg, results)
 	}
 
-	abortNote := ""
-	if ctx.Err() != nil {
-		abortNote = pterm.LightRed("  (aborted)")
-	}
-
 	fmt.Println()
 	pterm.DefaultHeader.
 		WithFullWidth().
@@ -1521,6 +1626,11 @@ func printSummary(ctx context.Context, cfg *AppConfig, results []ProcessResult, 
 		Println("Summary")
 	fmt.Println()
 
+	// Erst auf Breite bringen, DANN einfärben: pterm packt die Farbe in
+	// ANSI-Steuerzeichen, die %-18s mitgezählt hätte. Dadurch stand hinter dem
+	// kurzen "Failed:" mehr Luft als hinter "Successful:", und die Zahlen
+	// standen nicht untereinander.
+	const summaryLabelWidth = 14
 	line := func(label, value, color string) {
 		styled := value
 		switch color {
@@ -1535,7 +1645,18 @@ func printSummary(ctx context.Context, cfg *AppConfig, results []ProcessResult, 
 		case "gray":
 			styled = pterm.Gray(value)
 		}
-		fmt.Printf("  %-18s %s\n", pterm.LightWhite(label), styled)
+		fmt.Printf("  %s %s\n",
+			pterm.LightWhite(fmt.Sprintf("%-*s", summaryLabelWidth, label)), styled)
+	}
+
+	// Der Abbruch gehört als eigener Satz nach oben. Vorher hing ein "(aborted)"
+	// hinter dem Skipped-Zähler — also ausgerechnet an einer 0, wenn gar nichts
+	// übersprungen wurde. Und die Frage, die nach Strg+C wirklich offen ist,
+	// lautet nicht "wie viele", sondern "sind meine Originale noch da?".
+	if ctx.Err() != nil {
+		pterm.NewStyle(pterm.FgLightYellow, pterm.Bold).
+			Println("  Stopped by you (Ctrl+C) — no original was touched.")
+		fmt.Println()
 	}
 
 	okColor := "green"
@@ -1552,15 +1673,24 @@ func printSummary(ctx context.Context, cfg *AppConfig, results []ProcessResult, 
 		line("Without audio:", fmt.Sprintf("%d  (video-only fallback, original kept)", noAudio), "yellow")
 	}
 	if preview > 0 {
-		line("Preview:", fmt.Sprintf("%d  (aborted)", preview), "yellow")
+		note := fmt.Sprintf("%d  (partial file kept as .preview.mkv", preview)
+		if previewPct > 0 {
+			note += fmt.Sprintf(", %.0f %% done", previewPct)
+		}
+		line("Unfinished:", note+")", "yellow")
 	}
 	line("Failed:", fmt.Sprintf("%d", fail), failColor)
-	fmt.Printf("  %-18s %s%s\n",
-		pterm.LightWhite("Skipped:"),
-		pterm.Gray(fmt.Sprintf("%d", skip)),
-		abortNote)
-	if saved > 0 {
+	line("Skipped:", fmt.Sprintf("%d", skip), "gray")
+	// Die Ersparnis ist die Währung des Programms — deshalb steht sie auch dann
+	// da, wenn nichts zusammenkam, statt einfach zu fehlen.
+	switch {
+	case saved > 0 && sourceTotal > 0:
+		line("Saved:", fmt.Sprintf("%.0f MB  (%.0f %% of %.0f MB)",
+			saved, saved/sourceTotal*100, sourceTotal), "cyan")
+	case saved > 0:
 		line("Saved:", fmt.Sprintf("%.0f MB", saved), "cyan")
+	default:
+		line("Saved:", "nothing yet", "gray")
 	}
 	if fail > 0 {
 		fmt.Println()
@@ -1600,7 +1730,7 @@ func main() {
 	splitMode = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "-split")
 	joinMode = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "-join")
 	if !debugMode {
-		pErr = pErr.WithWriter(io.Discard)
+		pDetail = pDetail.WithWriter(io.Discard)
 	}
 
 	// Self-extract the embedded build sources into ./sourcecode (only if absent)
@@ -1639,6 +1769,11 @@ func main() {
 	// look like it demands studying a manual first — the single most common
 	// reason newcomers bounce off a command-line tool. The full list is one
 	// keystroke away via -help.
+	//
+	// Sie erscheint aber nur noch, wenn wirklich jemand ratlos davorsitzt (siehe
+	// droppedSomething weiter unten) — bei jedem Drag-and-drop-Lauf stand hier
+	// vierzehn Zeilen lang die Anleitung für etwas, das der Anwender gerade
+	// getan hat.
 	quickStart := pterm.LightWhite("Just drag video files or a folder onto NVENCForge.exe.") + "\n" +
 		pterm.Gray("Nothing else is needed — the best quality setting is measured") + "\n" +
 		pterm.Gray("automatically, separately for every single file.") + "\n\n" +
@@ -1650,12 +1785,26 @@ func main() {
 		pterm.LightYellow("-davinci   -split   -join") + "\n\n" +
 		pterm.Gray("Every option explained:  ") + pterm.LightYellow("NVENCForge.exe -help")
 
-	pterm.DefaultBox.
-		WithTitle(pterm.LightCyan("  Quick Start  ")).
-		WithTitleTopCenter().
-		WithBoxStyle(pterm.NewStyle(pterm.FgGray)).
-		Println(quickStart)
-	fmt.Println()
+	// Die Anleitung richtet sich an den, der die EXE einfach doppelklickt und
+	// nicht weiß, was zu tun ist. Wer schon Dateien draufgezogen hat, weiß es —
+	// dort kostet die Box nur vierzehn Zeilen und schiebt die eigentliche Arbeit
+	// aus dem Bild. Geprüft wird auf ein Argument, das kein Schalter ist; die
+	// genaue Auswertung übernimmt später parseArgs.
+	droppedSomething := false
+	for _, a := range os.Args[1:] {
+		if !strings.HasPrefix(a, "-") {
+			droppedSomething = true
+			break
+		}
+	}
+	if !droppedSomething {
+		pterm.DefaultBox.
+			WithTitle(pterm.LightCyan("  Quick Start  ")).
+			WithTitleTopCenter().
+			WithBoxStyle(pterm.NewStyle(pterm.FgGray)).
+			Println(quickStart)
+		fmt.Println()
+	}
 
 	if err := initTools(); err != nil {
 		fmt.Println()
@@ -1673,11 +1822,16 @@ func main() {
 	loadOrCreateAppConfig()
 	srtCleanerPhrases()
 
+	// Die Werkzeug-Modi laufen nicht über die Stapel-Verwaltung, brauchen aber
+	// denselben Startzeitpunkt für ihre Schlussübersicht.
+	batch = batchTracker{start: batchStart}
+
 	// DaVinci Resolve workflow: pure remux/AAC work, no NVENC involved — the GPU
 	// probe is skipped (faster start; it even works without an Nvidia card).
 	if davinciMode {
 		printStreamSettings()
 		runDavinciMode(ctx, os.Args[2:])
+		printToolSummary(ctx)
 		waitForEnter()
 		return
 	}
@@ -1686,11 +1840,13 @@ func main() {
 	// probe, works without an Nvidia card.
 	if splitMode {
 		runSplitMode(ctx, os.Args[2:])
+		printToolSummary(ctx)
 		waitForEnter()
 		return
 	}
 	if joinMode {
 		runJoinMode(ctx, os.Args[2:])
+		printToolSummary(ctx)
 		waitForEnter()
 		return
 	}
@@ -1816,7 +1972,7 @@ func main() {
 		fmt.Println(pterm.Gray("Tip: 'shutdown /a' cancels the shutdown."))
 
 		if err := exec.Command("shutdown", "/s", "/t", "30").Run(); err != nil {
-			pErr.Printf("Could not schedule shutdown: %v\n", err)
+			pErr.Printf("Could not schedule shutdown: %s\n", plainError(err))
 			waitForEnter()
 			return
 		}

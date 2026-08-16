@@ -374,8 +374,20 @@ func buildPerStreamAudioArgs(streams []AudioStreamInfo, forceAACAll bool, isTS b
 // ----------------------------------------------------------------------------
 
 type cascadeAttempt struct {
-	label                        string
+	label                        string // technischer Kurzname (Tests, Fehlersuche)
+	human                        string // was auf dem Bildschirm steht
 	audioCopy, withSubs, noAudio bool
+}
+
+// attemptStep beschreibt die Position einer Kaskadenstufe für die Anzeige.
+// Die erste Stufe ist der Normalfall und bekommt bewusst KEINEN Zähler: das
+// frühere "1/3" las sich wie "es folgen noch zwei Durchgänge", dabei starten
+// die übrigen Stufen überhaupt nur, wenn dieser Versuch scheitert.
+func attemptStep(idx, total int) string {
+	if idx == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" — retry %d/%d", idx+1, total)
 }
 
 // buildCascadeAttempts assembles only the rungs that can actually differ for
@@ -385,20 +397,17 @@ type cascadeAttempt struct {
 func buildCascadeAttempts(hasSubs, hasAudio, pureCopy bool) []cascadeAttempt {
 	var at []cascadeAttempt
 	if hasSubs {
-		at = append(at, cascadeAttempt{"SUBS+ACOPY", true, true, false})
+		at = append(at, cascadeAttempt{"SUBS+ACOPY", "subtitles kept, audio 1:1", true, true, false})
 		if hasAudio && !pureCopy {
-			at = append(at, cascadeAttempt{"SUBS+AAC", false, true, false})
+			at = append(at, cascadeAttempt{"SUBS+AAC", "subtitles kept, audio → AAC", false, true, false})
 		}
 	}
-	at = append(at, cascadeAttempt{"NO-SUBS+ACOPY", true, false, false})
+	at = append(at, cascadeAttempt{"NO-SUBS+ACOPY", "no subtitles, audio 1:1", true, false, false})
 	if hasAudio && !pureCopy {
-		at = append(at, cascadeAttempt{"NO-SUBS+AAC", false, false, false})
+		at = append(at, cascadeAttempt{"NO-SUBS+AAC", "no subtitles, audio → AAC", false, false, false})
 	}
 	if hasAudio {
-		at = append(at, cascadeAttempt{"VIDEO-ONLY (fallback)", false, false, true})
-	}
-	for i := range at {
-		at[i].label = fmt.Sprintf("%s %d/%d", at[i].label, i+1, len(at))
+		at = append(at, cascadeAttempt{"VIDEO-ONLY (fallback)", "video only, no audio", false, false, true})
 	}
 	return at
 }
@@ -523,7 +532,7 @@ func retireOriginal(cfg *AppConfig, filePath string) {
 	if appSettings.retireMode == retireModeFolder {
 		moved, err := moveOriginalToFolder(filePath)
 		if err != nil {
-			pWarn.Printf("Original is kept: %s → %v\n", filePath, err)
+			pWarn.Printf("Original is kept: %s → %s\n", filePath, plainError(err))
 			return
 		}
 		pInfo.Printf("Original moved to \"%s\": %s\n", originalsFolderName, filepath.Base(moved))
@@ -540,7 +549,7 @@ func retireOriginal(cfg *AppConfig, filePath string) {
 		pWarn.Printf("Original was deleted PERMANENTLY — Windows did not put it into the recycle bin: %s\n",
 			filePath)
 	default:
-		pWarn.Printf("Original is kept (recycle bin): %s → %v\n", filePath, err)
+		pWarn.Printf("Original is kept (recycle bin): %s → %s\n", filePath, plainError(err))
 	}
 }
 
@@ -809,21 +818,41 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	preview := filepath.Join(outputDir, basenameFull+".preview.mkv")
 	if _, err := os.Stat(preview); err == nil {
 		if err := os.Remove(preview); err == nil {
-			fmt.Println(pterm.Gray("  · Preview removed: " + filepath.Base(preview)))
+			// Wortlaut wie bei der Rettung selbst ("Partial file kept"), damit
+			// klar ist, worauf sich das bezieht: der Rest eines früheren Abbruchs.
+			fmt.Println(pterm.Gray("  · Partial file from an earlier run removed: " +
+				filepath.Base(preview)))
 		}
 	}
 
 	if stats.FPSDen == 0 {
 		stats.FPSDen = 1
 	}
+	result.InputMB = stats.FileSizeMB
 	fps := float64(stats.FPSNum) / float64(stats.FPSDen)
-	fmt.Printf("  %s · %s · %s · %s %s · %s\n",
+	// Größe und Gesamt-Bitrate der Quelle gehören in diese Zeile: die Größe ist
+	// der Maßstab, an dem am Ende der Erfolg gemessen wird, und die Bitrate sagt
+	// vorab, ob überhaupt Luft nach unten ist bzw. ob der Deckel greifen wird.
+	// Vorher standen beide Werte nirgends, bevor der Encode schon lief.
+	sourceFacts := pterm.LightWhite(fmt.Sprintf("%.0f MB", stats.FileSizeMB))
+	if stats.DurationSec > 0 && stats.FileSizeMB > 0 {
+		mbit := stats.FileSizeMB * 8 / stats.DurationSec
+		sourceFacts += " · " + pterm.LightWhite(fmt.Sprintf("%.1f Mbit/s", mbit))
+	}
+	// Ohne Tonspur stand hier bisher "UNKNOWN 0ch" — das liest sich wie ein
+	// Fehler, dabei ist eine stumme Datei völlig in Ordnung.
+	audioPart := pterm.LightBlue(strings.ToUpper(stats.AudioCodec)) + " " +
+		pterm.LightWhite(fmt.Sprintf("%dch", stats.Channels))
+	if len(stats.AudioStreams) == 0 {
+		audioPart = pterm.Gray("no audio")
+	}
+	fmt.Printf("  %s · %s · %s · %s · %s · %s\n",
 		pterm.LightGreen(strings.ToUpper(stats.VideoCodec)),
 		pterm.Cyan(fmt.Sprintf("%dx%d", stats.Width, stats.Height)),
 		pterm.LightWhite(fmt.Sprintf("%.2ffps", fps)),
-		pterm.LightBlue(strings.ToUpper(stats.AudioCodec)),
-		pterm.LightWhite(fmt.Sprintf("%dch", stats.Channels)),
-		pterm.Yellow(formatDuration(stats.DurationSec)))
+		audioPart,
+		pterm.Yellow(formatDuration(stats.DurationSec)),
+		sourceFacts)
 
 	// HDR-Policy (per Datei, leckt nie in SDR-Dateien): nur noch Erkennung +
 	// Hinweis. Der Bitraten-Deckel wird durch HDR NICHT mehr angehoben — er
@@ -1001,30 +1030,33 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// with the same audio handling, encoder errors abort outright (no rung can
 	// fix a broken video encode). A rung that exits 0 but fails validation
 	// counts as failed, so the next rung still gets its chance.
-	runCascade := func(buildArgs func(convJob) []string, labelPrefix string) {
+	runCascade := func(buildArgs func(convJob) []string, stageName string) {
 		attempts := buildCascadeAttempts(
 			len(stats.SubCodecs) > 0, len(stats.AudioStreams) > 0, cfg.copyAudio)
 		subsFailed := false
 		videoFailed := false
 		audioModeFailed := map[bool]bool{}
 		firstRun := true
-		for _, att := range attempts {
+		for i, att := range attempts {
 			if ctx.Err() != nil || videoFailed {
 				break
 			}
 			if subsFailed && att.withSubs {
-				fmt.Println(pterm.Gray("  · " + labelPrefix + att.label + " skipped (subtitle error)"))
+				fmt.Println(pterm.Gray(fmt.Sprintf("  · Stage %d/%d skipped (subtitle error) — %s",
+					i+1, len(attempts), att.human)))
 				continue
 			}
 			if !att.noAudio && audioModeFailed[att.audioCopy] {
-				fmt.Println(pterm.Gray("  · " + labelPrefix + att.label + " skipped (audio error)"))
+				fmt.Println(pterm.Gray(fmt.Sprintf("  · Stage %d/%d skipped (audio error) — %s",
+					i+1, len(attempts), att.human)))
 				continue
 			}
 			if !firstRun {
 				_ = os.Remove(outputFile)
 			}
 			firstRun = false
-			pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).Printf("  >> %s%s\n", labelPrefix, att.label)
+			pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
+				Printf("  >> %s%s  ·  %s\n", stageName, attemptStep(i, len(attempts)), att.human)
 			job := baseJob
 			// Ist das Entpacken auf der Grafikkarte in diesem Lauf schon einmal
 			// gescheitert, nehmen auch alle folgenden Stufen gleich den
@@ -1076,10 +1108,10 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 
 	if doConvert {
 		outputFile = filepath.Join(outputDir, basenameFull+outSuffix+".part.mkv")
-		runCascade(func(j convJob) []string { return j.buildConvertArgs() }, "")
+		runCascade(func(j convJob) []string { return j.buildConvertArgs() }, "Encoding")
 	} else if doRemux {
 		outputFile = filepath.Join(outputDir, basenameFull+remuxSuffix(stats.VideoCodec)+".part.mkv")
-		runCascade(func(j convJob) []string { return j.buildRemuxArgs() }, "REMUX ")
+		runCascade(func(j convJob) []string { return j.buildRemuxArgs() }, "Remux (stream copy)")
 	}
 
 	if ctx.Err() != nil {
@@ -1095,7 +1127,16 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 				}
 				result.OutputFile = previewFile
 				result.IsPreview = true
-				pOK.Printf("Preview saved: %s\n\n", filepath.Base(previewFile))
+				result.PreviewPct = lastRunProgressPct
+				// "Preview" allein beantwortet die zwei Fragen nicht, die nach
+				// einem Abbruch offen sind: was steckt in der Datei, und ist mein
+				// Original noch da? Beides steht deshalb jetzt daneben.
+				pOK.Printf("Partial file kept: %s\n", filepath.Base(previewFile))
+				done := formatDuration(stats.DurationSec * lastRunProgressPct / 100)
+				fmt.Println(pterm.Gray(fmt.Sprintf(
+					"  · contains the first %s of %s (%.1f %%) — your original is untouched",
+					done, formatDuration(stats.DurationSec), lastRunProgressPct)))
+				fmt.Println()
 				return result
 			}
 		}
@@ -1126,7 +1167,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 
 	if err := copyTimestamps(filePath, outputFile); err != nil {
-		pWarn.Printf("Could not transfer file timestamps: %v\n", err)
+		pWarn.Printf("Could not transfer file timestamps: %s\n", plainError(err))
 	}
 
 	outSizeMB := getFileSizeMB(outputFile)
@@ -1224,7 +1265,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 					result.Skipped = true
 					return result
 				}
-				pWarn.Printf("Final MKV remux failed, original is kept: %v\n", err2)
+				pWarn.Printf("Final MKV remux failed, original is kept: %s\n", plainError(err2))
 				result.ErrMsg = fmt.Sprintf("Converter.go: processFile: MKV remux after H.265 discard failed: %v", err2)
 				result.FailedAt = time.Now()
 				fmt.Println()
@@ -1239,7 +1280,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			return result
 		}
 		if err := copyTimestamps(filePath, mkvFile); err != nil {
-			pWarn.Printf("Could not transfer file timestamps: %v\n", err)
+			pWarn.Printf("Could not transfer file timestamps: %s\n", plainError(err))
 		}
 		retireOriginal(cfg, filePath)
 		result.OutputFile = mkvFile
@@ -1531,10 +1572,39 @@ func overallProgressLine(filePct float64, fileIdx, fileTotal int) string {
 		pterm.LightYellow(remainingText))
 }
 
+// smoothOutputEstimate glättet die Größen-Prognose der Ausgabedatei. Die ersten
+// Messwerte zappeln stark (der Muxer schreibt schubweise), deshalb wird gemischt
+// statt einfach übernommen — aber je weiter der Lauf ist, desto stärker zählt
+// der aktuelle Wert, bei 100 % dann vollständig.
+//
+// Das frühere feste Gewicht von 0,15 ließ kurze Läufe an ihrer viel zu
+// niedrigen Anfangsschätzung kleben: am 47-Sekunden-Muster zeigte die Anzeige
+// bis zum Schluss "~13 MB", während 26 MB entstanden.
+func smoothOutputEstimate(current, fresh, pct float64) float64 {
+	if current <= 0 {
+		return fresh
+	}
+	weight := pct / 100
+	if weight < 0.15 {
+		weight = 0.15
+	}
+	if weight > 1 {
+		weight = 1
+	}
+	return current*(1-weight) + fresh*weight
+}
+
+// lastRunProgressPct hält den zuletzt gemeldeten Fortschritt des laufenden
+// FFmpeg-Aufrufs. Nach einem Abbruch ist das die einzige verbliebene Angabe,
+// wie weit die Datei gekommen ist — und genau danach fragt man in dem Moment.
+// Eine Paketvariable reicht, weil immer nur EIN Encode zur Zeit läuft.
+var lastRunProgressPct float64
+
 func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx, fileTotal int, inputSizeMB float64) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	lastRunProgressPct = 0
 
 	outputPath := ""
 	if len(args) > 0 {
@@ -1619,6 +1689,13 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 	defer fmt.Print("\033[?25h\033[?7h")
 
 	progressArea, _ := pterm.DefaultArea.WithRemoveWhenDone(false).Start()
+	// Ab hier gehört der untere Bildschirmrand der Anzeige — der Abbruch-Handler
+	// hält seine Meldung bis zum Stop zurück (siehe progressAreaActive).
+	progressAreaActive.Store(true)
+	defer func() {
+		progressAreaActive.Store(false)
+		flushAbortNotice()
+	}()
 
 	cyanLabel := func(s string, width int) string {
 		return pterm.Cyan(fmt.Sprintf("%-*s", width, s))
@@ -1661,6 +1738,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 		if pct < 0.1 {
 			pct = 0.1
 		}
+		lastRunProgressPct = pct
 		filled := int(pct / 100 * float64(barLen))
 		if filled > barLen {
 			filled = barLen
@@ -1696,13 +1774,19 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 			frame = f
 		}
 
+		// Vor dieser Marke ist jede Hochrechnung Unsinn: der Muxer schreibt seine
+		// ersten Blöcke verzögert, wodurch die Anzeige kurz "~0 MB / 100 %
+		// smaller" meldete — eine Zahl, die im nächsten Moment widerrufen wird.
+		const minPctForEstimate = 10.0
+
 		var estMBVal float64
 		if v := fields["total_size"]; v != "" && v != "N/A" {
-			if bytesVal, e := strconv.ParseFloat(v, 64); e == nil && bytesVal > 0 && pct > 5 {
+			if bytesVal, e := strconv.ParseFloat(v, 64); e == nil && bytesVal > 0 &&
+				pct > minPctForEstimate {
 				estMBVal = (bytesVal / 1024 / 1024) / (pct / 100)
 			}
 		}
-		if estMBVal == 0 && pct > 5 && outputPath != "" &&
+		if estMBVal == 0 && pct > minPctForEstimate && outputPath != "" &&
 			time.Since(lastStatTime) >= time.Second {
 			lastStatTime = time.Now()
 			if info, statErr := os.Stat(outputPath); statErr == nil {
@@ -1712,11 +1796,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 			}
 		}
 		if estMBVal > 0 {
-			if smoothedEstMB == 0 {
-				smoothedEstMB = estMBVal
-			} else {
-				smoothedEstMB = smoothedEstMB*0.85 + estMBVal*0.15
-			}
+			smoothedEstMB = smoothOutputEstimate(smoothedEstMB, estMBVal, pct)
 		}
 
 		if progressStarted && time.Since(lastRender) < renderInterval {
@@ -1739,9 +1819,13 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 			cyanLabel("Bitrate", 10), bitrate,
 			cyanLabel("Speed", 8), pterm.LightGreen(speed))
 
+		// Unter einem Megabyte ist die Hochrechnung noch nichts wert — dann
+		// bleibt die Zeile lieber bei den drei Punkten.
+		const minEstimateMB = 1.0
+
 		var l4 string
 		switch {
-		case smoothedEstMB > 0 && inputSizeMB > 0:
+		case smoothedEstMB > minEstimateMB && inputSizeMB > 0:
 			savingsMB := inputSizeMB - smoothedEstMB
 			savingsPct := savingsMB / inputSizeMB * 100
 			if savingsMB < 0 {
@@ -1756,7 +1840,7 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 					pterm.LightGreen(fmt.Sprintf("(–%.0f MB / %.0f%% smaller)",
 						savingsMB, savingsPct)))
 			}
-		case smoothedEstMB > 0:
+		case smoothedEstMB > minEstimateMB:
 			// No meaningful input size (e.g. merge, where growing is expected):
 			// show the estimated output size without any smaller/larger verdict.
 			l4 = fmt.Sprintf("  %s %-8s   %s  ~%.0f MB",
@@ -1794,10 +1878,15 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 	err = cmd.Wait()
 
 	if ctx.Err() != nil {
-		if progressStarted {
-			progressArea.Update("")
-		}
+		// Nach Strg+C bleibt der letzte Stand ABSICHTLICH stehen: er beantwortet
+		// die einzige Frage, die in dem Moment zählt — wie weit war der Lauf und
+		// wie groß wäre die Datei geworden. Das frühere Leeren der Anzeige nahm
+		// genau diese Zahlen wieder weg (und zwar nur teilweise, weil der Bereich
+		// nach dem Abbruch nicht mehr vollständig gezeichnet war).
 		_ = progressArea.Stop()
+		if progressStarted {
+			fmt.Println()
+		}
 		return ctx.Err()
 	}
 	if errors.Is(context.Cause(runCtx), errFFmpegStall) {

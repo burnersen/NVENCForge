@@ -950,7 +950,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 			return 0, false // user abort — no misleading failure warning
 		}
 		pWarn.Printf("Auto-CQ: %s failed — using fallback CQ %d.\n", step, sc.fallbackCQ())
-		pErr.Printf("Auto-CQ detail: %v\n", err)
+		pDetail.Printf("Auto-CQ detail: %v\n", err)
 		return 0, false
 	}
 
@@ -1035,7 +1035,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		case verr != nil:
 			// The anchors were fine, so keep the interpolated pick.
 			verifyNote = " (verification failed, interpolated value kept)"
-			pErr.Printf("Auto-CQ verification detail: %v\n", verr)
+			pDetail.Printf("Auto-CQ verification detail: %v\n", verr)
 		case verified < target && autoCQSaturated(sc, cq, verified, vmafLow):
 			// Saturation brake: the source is already compressed so hard
 			// that VMAF plateaus below the target — more bitrate buys no
@@ -1077,7 +1077,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 					verifyNote = fmt.Sprintf(
 						" (CQ %d measured %.1f, stepped down to CQ %d — re-measurement failed, estimate kept)",
 						cq, verified, stepped)
-					pErr.Printf("Auto-CQ re-measurement detail: %v\n", rerr)
+					pDetail.Printf("Auto-CQ re-measurement detail: %v\n", rerr)
 					cq, predicted = stepped, pred
 				case remeasured >= target:
 					verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d, verified)",
@@ -1153,7 +1153,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				var cerr error
 				if score, cerr = measure(rung); cerr != nil {
 					if ctx.Err() == nil {
-						pErr.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
+						pDetail.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
 					}
 					break
 				}
@@ -1173,7 +1173,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if ctx.Err() != nil {
 		return 0, false
 	}
-	pOK.Printf("Auto-CQ: %d → predicted VMAF %.1f (target %.4g)%s\n",
+	pOK.Printf("Auto-CQ: CQ %d → predicted VMAF %.1f (target %.4g)%s\n",
 		cq, predicted, target, verifyNote)
 	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
 		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,

@@ -1069,6 +1069,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			job.withSubs = att.withSubs
 			job.noAudio = att.noAudio
 			job.pureAudioCopy = cfg.copyAudio
+			emitStage("encode")
 			err := runFFmpegWithCPUDecodeFallback(ctx, job, buildArgs,
 				stats.DurationSec, idx, total, stats.FileSizeMB)
 			if errors.Is(err, context.Canceled) {
@@ -1803,6 +1804,22 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 			continue
 		}
 		lastRender = time.Now()
+
+		// Im -json-Modus im selben Takt wie die Bildschirmanzeige: die Drosselung
+		// oben gilt für beide, damit eine Oberfläche nicht mit Ereignissen
+		// überschüttet wird.
+		emitEvent(eventProgress{
+			Ev:      "progress",
+			Index:   fileIdx,
+			Pct:     pct,
+			PosSec:  sec,
+			ETA:     etaStr,
+			FPS:     fps,
+			Speed:   speed,
+			Bitrate: bitrate,
+			EstMB:   smoothedEstMB,
+			InMB:    inputSizeMB,
+		})
 
 		l1 := fmt.Sprintf("  [%s%s]  %s",
 			pterm.LightGreen(barFilled), pterm.Gray(barEmpty),

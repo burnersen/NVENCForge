@@ -872,6 +872,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		toleranceNote = fmt.Sprintf(" (%.4g - %.4g tolerance)",
 			appSettings.autoCQTargetVMAF, tolerance)
 	}
+	// Erst hier steht fest, dass wirklich gemessen wird — alle Abbruchgründe
+	// (zu kurzes Video, unbekannte Bildrate, kein Temp-Ordner) liegen oben.
+	// Die Analyse liefert keine Fortschrittswerte und dauert ein bis zwei
+	// Minuten; ohne diese Meldung stünde eine Oberfläche so lange bei null,
+	// ohne sagen zu können, warum.
+	emitStage("analyze")
+
 	pInfo.Printf("%s Auto-CQ: analyzing %d sample windows (%.0f s) for VMAF target %.4g%s...\n",
 		pterm.LightMagenta("›"), len(windows), sampleSec, target, toleranceNote)
 

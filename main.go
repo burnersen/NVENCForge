@@ -1240,6 +1240,13 @@ func getWorkDir(cfg *AppConfig) string {
 // ----------------------------------------------------------------------------
 
 func waitForEnter() {
+	// In -json mode there is nobody at a keyboard: a graphical front end starts
+	// this process without a console, so waiting here would hang the run forever
+	// (or until the front end pushes a fake keystroke, which is exactly the kind
+	// of guesswork -json exists to remove).
+	if jsonMode {
+		return
+	}
 	fmt.Print("\nPress Enter to exit...")
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
@@ -1829,6 +1836,15 @@ func main() {
 
 	batchStart := time.Now()
 
+	// -json splits the two channels: machine-readable events on stdout, the
+	// entire human-facing display on stderr. Must run before ANY output, or the
+	// first lines would already be in the wrong channel. Without the flag
+	// nothing is redirected and nothing is emitted.
+	jsonMode = consumeJSONFlag()
+	if jsonMode {
+		enableJSONMode()
+	}
+
 	// Hidden developer switch: without -debug, suppress all error output so end
 	// users never see internal failure reasons. Must run before any pErr use.
 	debugMode = consumeDebugFlag()
@@ -2051,6 +2067,8 @@ func main() {
 
 	batch = batchTracker{start: batchStart, totalBytes: totalInputBytes(files)}
 
+	emitRunStart(cfg, len(files))
+
 	results := make([]ProcessResult, 0, len(files))
 	for i, f := range files {
 		if ctx.Err() != nil {
@@ -2058,6 +2076,7 @@ func main() {
 			continue
 		}
 		batch.curBytes = fileSizeBytes(f)
+		emitFileStart(i+1, len(files), f)
 		res := processFile(ctx, cfg, f, i+1, len(files))
 		if cfg.mp4Mode {
 			// -mp4: repackage the finished MKV output into a compatible MP4.
@@ -2067,10 +2086,12 @@ func main() {
 		// in curBytes while that repackaging still reports progress.
 		batch.doneBytes += batch.curBytes
 		batch.curBytes = 0
+		emitFileResult(i+1, res)
 		results = append(results, res)
 	}
 
 	printSummary(ctx, cfg, results, time.Since(batchStart))
+	emitRunSummary(results, time.Since(batchStart))
 
 	if cfg.autoShutdown && ctx.Err() == nil {
 		fmt.Println()

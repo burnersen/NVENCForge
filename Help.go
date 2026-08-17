@@ -170,6 +170,17 @@ CONVERSION OPTIONS
                  overwritten. Use this if you want both files.
   -shutdown      Shut the PC down 30 s after the batch finishes
                  ("shutdown /a" cancels it).
+  -json          Report progress in a machine-readable form: standard
+                 output then carries one JSON line per event, while
+                 the usual display moves to the error output. Meant
+                 for front-ends and scripts that want to follow a run
+                 without reading screen text - a display that changes
+                 would otherwise break them. The moving spinner and
+                 the live progress block are switched off in this
+                 mode: nobody is watching, and on a pipe they would
+                 print hundreds of lines instead of redrawing
+                 themselves. Events: run, file, stage, progress,
+                 result, summary.
   -help          Print the complete option list in the console and
                  exit. Also works as -h, -?, /? or --help, and can
                  stand anywhere in the command. Nothing is
@@ -411,6 +422,7 @@ func printConsoleHelp() {
 	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
 	option("-keep", "leave the originals exactly where they are")
 	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")
+	option("-json", "report progress as JSON lines - for front-ends and scripts")
 
 	section("MODES") // must be the first argument - runMode dispatch happens on os.Args[1]
 	option("-davinci <files>", "DaVinci Resolve workflow: split, extract, merge, AAC")

@@ -12,6 +12,7 @@ hood. **[← Back to the README](README.md)**
 - [💻 CPU mode](#cpu-depth)
 - [🧰 DaVinci Resolve mode](#davinci-depth)
 - [🪓 Lossless Split / Join](#split-depth)
+- [📡 JSON event channel (`-json`)](#json-events)
 - [⚙️ Configuration, key by key](#config-depth)
 - [🔧 Under the hood — the safety nets and clever bits](#under-the-hood)
 - [🔨 Building from source](#building)
@@ -164,6 +165,39 @@ Where `-davinci` re-encodes incompatible audio to AAC and converts/cleans subtit
 The silent picture always gets a `.NoSound` suffix, so the original is never overwritten. The stereo-downmix option from `-davinci` is hidden in `-split`, because a downmix would be a re-encode.
 
 **On join, dropped audio files replace the base audio.** `-join` takes the video track from the base file plus the audio files you drop; if you drop no audio at all (subtitles only), the base video keeps its own sound instead of going silent. Subtitles inside the base are never carried over — you choose the subtitle files you actually want as arguments. Your source files are never modified, so nothing is lost. Because every stream is copied 1:1, picture and sound stay in sync; a `-split` followed by `-join` is a clean lossless round-trip.
+
+---
+
+<a id="json-events"></a>
+
+## 📡 JSON event channel (`-json`)
+
+A front-end or script should never have to read the screen text to follow a run — the display is written for humans and does change between versions (1.15.0 was a display-only release). With `-json`, NVENCForge splits its two channels:
+
+- **stdout** carries nothing but events, one JSON object per line
+- **stderr** carries the complete normal display, unchanged
+
+Both channels still end up next to each other in a terminal, so nothing looks different when you run it by hand.
+
+In this mode the **moving** parts of the display are switched off: the Auto-CQ spinner and the live progress block. They repaint themselves ten times a second, which only works on a real terminal — on a pipe every repaint becomes another line (measured: 169 log lines for one file, 51 with them gone). Everything static stays: settings table, Auto-CQ result, warnings, summary.
+
+| Event | When | Key fields |
+|---|---|---|
+| `run` | once, before the first file | `version`, `mode` (convert/davinci/split/join), `codec`, `encoder`, `files` |
+| `file` | a file starts | `index`, `total`, `name`, `path`, `in_mb` |
+| `stage` | the step changes | `stage`: `analyze` \| `encode` \| `remux` \| `mp4` |
+| `progress` | ~10× per second while encoding | `pct`, `pos_sec`, `eta`, `fps`, `speed`, `bitrate`, `est_mb` |
+| `result` | a file is done | `status`: `success` \| `skipped` \| `failed` \| `preview`, `out_mb`, `saved_mb`, `saved_pct` |
+| `summary` | once, at the very end | `files`, `success`, `skipped`, `failed`, `saved_mb`, `elapsed_sec` |
+
+```json
+{"ev":"run","version":"1.17.0","mode":"convert","codec":"h265","encoder":"nvidia","files":1}
+{"ev":"stage","index":1,"stage":"analyze"}
+{"ev":"progress","index":1,"pct":8.38,"pos_sec":5.03,"eta":"0:06","fps":"-","speed":"9.9x","bitrate":"1k"}
+{"ev":"summary","files":1,"success":1,"skipped":0,"failed":0,"saved_mb":71.7,"elapsed_sec":20.9}
+```
+
+`status: "preview"` is the honest answer to Ctrl+C: the run was cancelled, but the part that was already encoded is a playable file — and the original is untouched. Without the flag, not a single byte of this is emitted.
 
 ---
 

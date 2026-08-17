@@ -27,6 +27,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,11 +87,58 @@ func consumeJSONFlag() bool {
 //   - os.Stdout erwischt fmt.* und die Fortschritts-Area,
 //   - SetDefaultOutput die Drucker, Überschriften und Tabellen,
 //   - der Fortschrittsbalken hat einen eigenen Writer und ignoriert beides.
+//
+// Zusätzlich verstummen hier die BEWEGTEN Anzeigen. Sie zeichnen sich zehnmal
+// je Sekunde neu und setzen dafür voraus, dass am anderen Ende ein Terminal
+// sitzt, das den Zeilenanfang (\r) versteht. Am -json-Kanal sitzt aber ein
+// Programm: dort wird aus jeder Neuzeichnung eine eigene Zeile — gemessen
+// 105 Protokollzeilen für eine einzige 4K-Datei. Alles Statische (Meldungen,
+// Tabellen, Ergebnisse) bleibt unberührt.
 func enableJSONMode() {
 	jsonSink = os.Stdout
 	os.Stdout = os.Stderr
 	pterm.SetDefaultOutput(os.Stderr)
-	pterm.DefaultProgressbar = *pterm.DefaultProgressbar.WithWriter(os.Stderr)
+	pterm.DefaultSpinner = *pterm.DefaultSpinner.WithWriter(io.Discard)
+	// Vorsorge: Dieser Drucker wird derzeit von keiner Stelle des Programms
+	// benutzt (die Fortschrittsbalken sind selbst gebaut). Er ist global —
+	// ohne diese Zeile würde eine spätere Verwendung den Hauptkanal wieder
+	// verschmutzen.
+	pterm.DefaultProgressbar = *pterm.DefaultProgressbar.WithWriter(io.Discard)
+}
+
+// ----------------------------------------------------------------------------
+// Die mehrzeilige Fortschrittsanzeige
+// ----------------------------------------------------------------------------
+
+// progressDisplay ist genau der Ausschnitt des pterm-Flächendruckers, den die
+// Fortschrittsanzeige in Converter.go wirklich benutzt.
+//
+// Warum eine eigene Schnittstelle statt einer Umleitung: pterm.AreaPrinter hat
+// zwar eine Methode SetWriter, deren Rumpf ist aber LEER (nachgesehen in
+// pterm v0.12.79, area_printer.go:52) — sie tut nichts. Die Fläche schreibt
+// über atomicgo.dev/cursor unverrückbar nach os.Stdout. Umbiegen lässt sie
+// sich also nicht; im -json-Modus muss an ihre Stelle eine stille Attrappe
+// treten.
+type progressDisplay interface {
+	Update(text ...interface{})
+	Stop() error
+}
+
+// silentArea nimmt jede Aktualisierung entgegen und wirft sie weg.
+type silentArea struct{}
+
+func (silentArea) Update(...interface{}) {}
+
+func (silentArea) Stop() error { return nil }
+
+// startProgressArea liefert die Fläche für die laufende Fortschrittsanzeige:
+// im -json-Modus die stille Attrappe, sonst die gewohnte pterm-Fläche.
+func startProgressArea() progressDisplay {
+	if jsonMode {
+		return silentArea{}
+	}
+	area, _ := pterm.DefaultArea.WithRemoveWhenDone(false).Start()
+	return area
 }
 
 // emitEvent schreibt ein Ereignis als eine Zeile JSON.

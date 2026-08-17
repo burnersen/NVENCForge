@@ -15,9 +15,13 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pterm/pterm"
 )
 
 // captureJSON schaltet den JSON-Modus für die Dauer eines Tests ein, fängt alles
@@ -216,6 +220,112 @@ func TestStageUsesIndexFromLastFileStart(t *testing.T) {
 	}
 	if stage.Index != 7 {
 		t.Errorf("stage.index = %d, erwartet 7 (aus dem file-Ereignis)", stage.Index)
+	}
+}
+
+// captureOSStreams biegt die beiden Betriebssystem-Kanäle für die Dauer eines
+// Tests auf Röhren um und gibt zurück, was dort ankam.
+//
+// Nötig, weil die bewegten Anzeigen NICHT über die JSON-Senke laufen, sondern
+// über die ganz normale Bildschirmausgabe — genau dort liest die Oberfläche
+// mit, und genau dort entstand die Zeilenflut.
+func captureOSStreams(t *testing.T, body func()) (fromStdout, fromStderr string) {
+	t.Helper()
+
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+
+	prevStdout, prevStderr := os.Stdout, os.Stderr
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = prevStdout, prevStderr
+		pterm.SetDefaultOutput(prevStdout)
+	})
+	os.Stdout, os.Stderr = wOut, wErr
+
+	body()
+
+	_ = wOut.Close()
+	_ = wErr.Close()
+	out, _ := io.ReadAll(rOut)
+	errOut, _ := io.ReadAll(rErr)
+	_ = rOut.Close()
+	_ = rErr.Close()
+	return string(out), string(errOut)
+}
+
+// Die mehrzeilige Fortschrittsanzeige ist der lauteste Teil der Ausgabe: Sie
+// zeichnet sich zehnmal je Sekunde neu. An einem Terminal überschreibt sie sich
+// dabei selbst, an einer Leitung wird aus jeder Neuzeichnung eine eigene Zeile.
+// Im -json-Modus muss sie deshalb ganz schweigen — ohne das Flag aber
+// unverändert zeichnen.
+func TestStartProgressAreaSilentOnlyInJSONMode(t *testing.T) {
+	prevMode := jsonMode
+	t.Cleanup(func() { jsonMode = prevMode })
+
+	const content = "Frame 1\nPosition 0:01\nFrames/s 60"
+
+	jsonMode = true
+	out, errOut := captureOSStreams(t, func() {
+		area := startProgressArea()
+		area.Update(content)
+		_ = area.Stop()
+	})
+	if out != "" || errOut != "" {
+		t.Errorf("mit -json darf die Fortschrittsanzeige nichts schreiben, kam: stdout=%q stderr=%q",
+			out, errOut)
+	}
+
+	jsonMode = false
+	out, _ = captureOSStreams(t, func() {
+		area := startProgressArea()
+		area.Update(content)
+		_ = area.Stop()
+	})
+	if !strings.Contains(out, "Frames/s 60") {
+		t.Errorf("ohne -json muss die gewohnte Anzeige weiter zeichnen, kam: %q", out)
+	}
+}
+
+// Der Spinner der Auto-CQ-Analyse war die zweite Quelle der Zeilenflut: rund
+// 100 Zeilen je 4K-Datei. Dieser Test lässt ihn wirklich laufen, statt nur
+// seinen Ausgabekanal zu vergleichen — sonst bliebe ungeprüft, ob er ihn
+// überhaupt benutzt.
+func TestEnableJSONModeSilencesSpinnerAndProgressbar(t *testing.T) {
+	prevMode, prevSink := jsonMode, jsonSink
+	prevSpinner, prevBar := pterm.DefaultSpinner, pterm.DefaultProgressbar
+	t.Cleanup(func() {
+		jsonMode, jsonSink = prevMode, prevSink
+		pterm.DefaultSpinner, pterm.DefaultProgressbar = prevSpinner, prevBar
+	})
+
+	out, errOut := captureOSStreams(t, func() {
+		jsonMode = true
+		enableJSONMode()
+
+		spinner, _ := pterm.DefaultSpinner.
+			WithText("Auto-CQ: measuring VMAF at CQ 26...").
+			Start()
+		// Der Spinner zeichnet alle 100 ms; drei Runden genügen als Nachweis.
+		time.Sleep(300 * time.Millisecond)
+		_ = spinner.Stop()
+		// Der Spinner läuft in einer eigenen Goroutine — ihr Zeit zum Auslaufen
+		// geben, sonst schriebe sie erst nach dem Schließen der Röhre.
+		time.Sleep(50 * time.Millisecond)
+	})
+	if out != "" || errOut != "" {
+		t.Errorf("mit -json darf der Spinner nichts schreiben, kam: stdout=%q stderr=%q",
+			out, errOut)
+	}
+
+	if pterm.DefaultProgressbar.Writer != io.Discard {
+		t.Errorf("der Fortschrittsbalken schreibt nach %v statt ins Leere",
+			pterm.DefaultProgressbar.Writer)
 	}
 }
 

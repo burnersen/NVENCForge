@@ -178,6 +178,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-cq NN` | Force a fixed CQ (H.265 1–51, AV1 1–63) |
 | `-keep` | Keep the originals exactly where they are |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
+| `-json` | Report progress as **JSON lines on stdout** — for front-ends and scripts ([details](TECHNICAL.md#json-events)) |
 | `-davinci` | DaVinci Resolve workflow (split / extract / merge); must be the first argument |
 | `-split` | Lossless split: every stream copied 1:1; must be the first argument |
 | `-join` | Lossless join: recombine picture + audio/subtitles into one MKV; must be the first argument |

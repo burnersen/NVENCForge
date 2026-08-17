@@ -1686,10 +1686,16 @@ func runFFmpeg(ctx context.Context, args []string, durationSec float64, fileIdx,
 	const renderInterval = 100 * time.Millisecond
 	var lastL2, lastL3, lastL4 string
 
-	fmt.Print("\033[?25l\033[?7l")
-	defer fmt.Print("\033[?25h\033[?7h")
+	// Cursor ausblenden und den automatischen Zeilenumbruch abschalten, damit
+	// die Anzeige nicht flackert und in schmalen Fenstern nicht umbricht. Im
+	// -json-Modus unterbleibt das: dort läge diese Terminal-Steuerung nur als
+	// Zeichensalat im Protokoll der Oberfläche.
+	if !jsonMode {
+		fmt.Print("\033[?25l\033[?7l")
+		defer fmt.Print("\033[?25h\033[?7h")
+	}
 
-	progressArea, _ := pterm.DefaultArea.WithRemoveWhenDone(false).Start()
+	progressArea := startProgressArea()
 	// Ab hier gehört der untere Bildschirmrand der Anzeige — der Abbruch-Handler
 	// hält seine Meldung bis zum Stop zurück (siehe progressAreaActive).
 	progressAreaActive.Store(true)

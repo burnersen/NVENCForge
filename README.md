@@ -26,6 +26,16 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 </div>
 
+> ### 🖥️ New: there is a window for this now
+>
+> Rather click than type? **[NVENCForgeGUI](https://github.com/burnersen/NVENCForgeGUI)**
+> is a desktop window around this converter: drag your videos in, watch the
+> progress bars, convert up to three at a time, or point it at a folder and let
+> it convert whatever lands there. Same converter, same results — it starts
+> this exact `NVENCForge.exe` and reads its event channel.
+>
+> [**→ Download the window**](https://github.com/burnersen/NVENCForgeGUI/releases)
+
 ---
 
 **📑 Contents**

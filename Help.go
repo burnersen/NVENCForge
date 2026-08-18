@@ -252,8 +252,10 @@ LOSSLESS SPLIT / JOIN  (-split / -join)   1:1 copy, no re-encode
   when you need DaVinci-ready output (AAC audio, cleaned subtitles).
 
 SUBTITLE CLEANER
-  Every extracted .srt is cleaned automatically: HTML/styling
-  tags, invisible characters and advertising lines are removed.
+  In -davinci mode every extracted .srt is cleaned automatically:
+  HTML/styling tags, invisible characters and advertising lines
+  are removed. -split and -join never touch a subtitle - they are
+  the 1:1 route. Phrases to strip: "SRTCleaner_config.txt".
 
 FFMPEG
   ffmpeg.exe and ffprobe.exe do the actual encoding work.

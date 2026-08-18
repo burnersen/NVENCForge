@@ -34,6 +34,8 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 > it convert whatever lands there. Same converter, same results — it starts
 > this exact `NVENCForge.exe` and reads its event channel.
 >
+> <a href="https://github.com/burnersen/NVENCForgeGUI"><img src=".github/gui-screenshot.png" alt="The NVENCForgeGUI window: three videos queued for conversion, per-run options for codec, container, resolution and quality, live progress bars with speed and ETA, and the converter's own log at the bottom" width="700"></a>
+>
 > [**→ Download the window**](https://github.com/burnersen/NVENCForgeGUI/releases)
 
 ---

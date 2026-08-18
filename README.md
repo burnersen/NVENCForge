@@ -22,7 +22,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 *Free for personal & noncommercial use — [source-available](#-license), never for resale.*
 
-<img src=".github/screenshot.png" alt="NVENCForge converting a 4K HDR clip with -keep: 266 MB in, 59 MB out, HDR detected and passed through, original kept" width="840">
+<img src=".github/screenshot.png" alt="NVENCForge converting a 1080p clip: Auto-CQ measures three sample windows, settles on CQ 32 for a VMAF target of 95.5, and the 263 MB source is heading for about 154 MB - 41 percent smaller" width="840">
 
 </div>
 

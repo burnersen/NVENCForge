@@ -366,3 +366,180 @@ func TestConsumeJSONFlag(t *testing.T) {
 		})
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Die Rückfrage (Spurauswahl)
+// ----------------------------------------------------------------------------
+
+func TestEmitQuestionStaysSilentWithoutFlag(t *testing.T) {
+	lines := captureJSON(t, false, func() {
+		emitQuestion(questionKindTracks, `C:\tmp\film.mkv`, "Enter = all",
+			[]string{"Audio  ger  EAC3 6ch", "Sub    eng  SUBRIP"})
+	})
+	if len(lines) != 0 {
+		t.Fatalf("ohne -json darf keine Frage angekündigt werden, es kamen %d Zeilen: %v",
+			len(lines), lines)
+	}
+}
+
+// TestEmitQuestionNumbersOptionsInDisplayOrder sichert die einzige Zusage ab,
+// auf die sich eine Oberfläche beim Antworten verlässt: Die Nummer im
+// Datenkanal ist dieselbe, die auf dem Bildschirm in eckigen Klammern steht.
+// Liefe das auseinander, würde stillschweigend die falsche Spur gewählt.
+func TestEmitQuestionNumbersOptionsInDisplayOrder(t *testing.T) {
+	labels := []string{
+		"Audio  ger  EAC3 6ch   ",
+		"  ↳ Stereo mix of [1]  (extra .stereo.m4a)",
+		"Sub    eng  SUBRIP",
+	}
+	lines := captureJSON(t, true, func() {
+		emitQuestion(questionKindTracks, `C:\tmp\film.mkv`,
+			"Enter = all tracks WITHOUT stereo mix", labels)
+	})
+	if len(lines) != 1 {
+		t.Fatalf("erwartet 1 Zeile, bekommen %d: %v", len(lines), lines)
+	}
+
+	var got eventQuestion
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("Zeile ist kein gültiges JSON: %v (%q)", err, lines[0])
+	}
+	if got.Ev != "question" || got.Kind != questionKindTracks {
+		t.Errorf("falsche Kennzeichnung: ev=%q kind=%q", got.Ev, got.Kind)
+	}
+	if got.File != `C:\tmp\film.mkv` {
+		t.Errorf("Dateiangabe verloren: %q", got.File)
+	}
+	if got.Hint != "Enter = all tracks WITHOUT stereo mix" {
+		t.Errorf("Hinweis verloren: %q", got.Hint)
+	}
+	if len(got.Options) != len(labels) {
+		t.Fatalf("erwartet %d Einträge, bekommen %d", len(labels), len(got.Options))
+	}
+	for i, opt := range got.Options {
+		if opt.N != i+1 {
+			t.Errorf("Eintrag %d trägt die Nummer %d", i+1, opt.N)
+		}
+	}
+	if got.Options[0].Label != "Audio  ger  EAC3 6ch" {
+		t.Errorf("nachlaufende Leerzeichen nicht entfernt: %q", got.Options[0].Label)
+	}
+	// Die Einrückung des Stereo-Eintrags gehört zur Aussage („gehört zu [1]")
+	// und darf deshalb NICHT wegoptimiert werden.
+	if !strings.HasPrefix(got.Options[1].Label, "  ↳") {
+		t.Errorf("Einrückung des Stereo-Eintrags verloren: %q", got.Options[1].Label)
+	}
+}
+
+func TestTrackPromptTimeoutUnlimitedOnlyInJSONMode(t *testing.T) {
+	prev := jsonMode
+	t.Cleanup(func() { jsonMode = prev })
+
+	jsonMode = true
+	if got := trackPromptTimeout(); got != 0 {
+		t.Errorf("im -json-Modus darf es keine Frist geben, bekommen %v", got)
+	}
+	jsonMode = false
+	if got := trackPromptTimeout(); got != mp4TrackPromptTimeout {
+		t.Errorf("auf der Konsole bleibt die 30-s-Frist, bekommen %v", got)
+	}
+}
+
+// TestReadLineTimeoutWaitsWhenUnlimited belegt, dass die Frist 0 wirklich
+// „unbegrenzt" bedeutet. Der naheliegende Fehler wäre ein time.After(0): das
+// feuert sofort, und die Oberfläche bekäme keine Gelegenheit zu antworten —
+// der Nutzer sähe stillschweigend alle Spuren statt seiner Auswahl.
+func TestReadLineTimeoutWaitsWhenUnlimited(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	prev := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = prev
+		_ = r.Close()
+	})
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = io.WriteString(w, "1,3\n")
+		_ = w.Close()
+	}()
+
+	line, ok := readLineTimeout(0)
+	if !ok {
+		t.Fatal("die Antwort wurde nicht abgewartet")
+	}
+	if strings.TrimSpace(line) != "1,3" {
+		t.Errorf("falsche Antwort gelesen: %q", line)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Die Werkzeug-Modi
+// ----------------------------------------------------------------------------
+
+// TestEmitToolSummaryReportsOnlyWhatItKnows hält die Zusage fest, dass die
+// Werkzeug-Modi keine Erfolgszahlen erfinden. Stünde dort z. B. „alle
+// erfolgreich", würde eine Oberfläche einen abgebrochenen Lauf als geglückt
+// anzeigen.
+func TestEmitToolSummaryReportsOnlyWhatItKnows(t *testing.T) {
+	lines := captureJSON(t, true, func() {
+		emitToolSummary(7, 90*time.Second)
+	})
+	if len(lines) != 1 {
+		t.Fatalf("erwartet 1 Zeile, bekommen %d: %v", len(lines), lines)
+	}
+	var got eventSummary
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("kein gültiges JSON: %v", err)
+	}
+	if got.Files != 7 || got.ElapsedSec != 90 {
+		t.Errorf("falsche Eckdaten: files=%d elapsed=%v", got.Files, got.ElapsedSec)
+	}
+	if got.Success != 0 || got.Skipped != 0 || got.Failed != 0 || got.SavedMB != 0 {
+		t.Errorf("erfundene Zahlen im Werkzeug-Modus: %+v", got)
+	}
+}
+
+// TestAnnounceToolFileNumbersFilesForToolModes sichert die Zählung ab, mit der
+// eine Oberfläche „Datei 2 von 5" anzeigt. Ist die Gesamtzahl nicht bekannt
+// (einzeln hineingezogene Datei), muss sie mit der laufenden Nummer
+// mitwachsen — sonst stünde dort „1 von 0".
+func TestAnnounceToolFileNumbersFilesForToolModes(t *testing.T) {
+	prevHandled, prevTotal := toolFilesHandled, toolFilesTotal
+	t.Cleanup(func() { toolFilesHandled, toolFilesTotal = prevHandled, prevTotal })
+
+	// Fall 1: Gesamtzahl bekannt (Stapel über einen Ordner).
+	toolFilesHandled, toolFilesTotal = 0, 3
+	lines := captureJSON(t, true, func() {
+		announceToolFile(`C:\tmp\a.mkv`, "» %s\n", "a.mkv")
+		announceToolFile(`C:\tmp\b.mkv`, "» %s\n", "b.mkv")
+	})
+	if len(lines) != 2 {
+		t.Fatalf("erwartet 2 Zeilen, bekommen %d: %v", len(lines), lines)
+	}
+	for i, line := range lines {
+		var got eventFile
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("kein gültiges JSON: %v", err)
+		}
+		if got.Index != i+1 || got.Total != 3 {
+			t.Errorf("Zeile %d: index=%d total=%d erwartet %d/3", i+1, got.Index, got.Total, i+1)
+		}
+	}
+
+	// Fall 2: Gesamtzahl unbekannt — sie darf nie kleiner sein als die Nummer.
+	toolFilesHandled, toolFilesTotal = 0, 0
+	lines = captureJSON(t, true, func() {
+		announceToolFile(`C:\tmp\einzeln.mkv`, "» %s\n", "einzeln.mkv")
+	})
+	var single eventFile
+	if err := json.Unmarshal([]byte(lines[0]), &single); err != nil {
+		t.Fatalf("kein gültiges JSON: %v", err)
+	}
+	if single.Index != 1 || single.Total != 1 {
+		t.Errorf("einzelne Datei muss 1 von 1 sein, bekommen %d von %d", single.Index, single.Total)
+	}
+}

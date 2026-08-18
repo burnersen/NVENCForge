@@ -178,10 +178,26 @@ func printDavinciAudioInfo(infos []AudioStreamInfo, pureCopy bool) {
 // zu fädeln — und es läuft hier ohnehin strikt eine Datei nach der anderen.
 var toolFilesHandled int
 
+// toolFilesTotal ist die Gesamtzahl der Quelldateien, sofern sie vorher
+// feststeht — also beim Stapel über einen Ordner. Bei einzeln hineingezogenen
+// Dateien bleibt sie 0; announceToolFile setzt dann die laufende Nummer ein,
+// was bei einer einzelnen Datei genau richtig ist ("1 von 1").
+var toolFilesTotal int
+
 // announceToolFile kündigt eine Quelldatei an und zählt sie zugleich mit.
 // Übersprungene Dateien laufen bewusst NICHT hierüber.
-func announceToolFile(format string, args ...any) {
+//
+// path ist derselbe Pfad, über den auch die Bildschirmzeile spricht. Er wird
+// gebraucht, weil hier zusätzlich das file-Ereignis des Datenkanals entsteht:
+// Diese eine Stelle deckt alle drei Werkzeug-Modi ab, sodass eine Oberfläche
+// mitzählen kann, ohne dass fünf Aufrufer davon wissen müssen.
+func announceToolFile(path, format string, args ...any) {
 	toolFilesHandled++
+	total := toolFilesTotal
+	if total < toolFilesHandled {
+		total = toolFilesHandled
+	}
+	emitFileStart(toolFilesHandled, total, path)
 	pInfo.Printf(format, args...)
 }
 
@@ -217,6 +233,8 @@ func printToolSummary(ctx context.Context) {
 		pterm.LightWhite(fmt.Sprintf("%-*s", labelWidth, "Elapsed time:")),
 		pterm.LightCyan(formatDuration(time.Since(batch.start).Seconds())))
 	fmt.Println()
+
+	emitToolSummary(toolFilesHandled, time.Since(batch.start))
 }
 
 // plainError macht aus einer internen Fehlerkette den Satz, der den Anwender
@@ -532,7 +550,9 @@ func trimToolSuffixes(base string) string {
 // With fewer than two selectable entries no question is asked at all.
 // allowStereo=false (lossless -split) hides the stereo-mix entries entirely,
 // because a downmix would be a re-encode and has no place in a 1:1 split.
-func promptTrackSelection(streams *ffprobeOutput, allowStereo bool) (audioSel, subSel, stereoSel map[int]bool) {
+// srcPath is only passed on so the -json announcement can name the file; it has
+// no effect on the selection itself.
+func promptTrackSelection(streams *ffprobeOutput, allowStereo bool, srcPath string) (audioSel, subSel, stereoSel map[int]bool) {
 	const (
 		kindAudio = iota
 		kindStereo
@@ -582,15 +602,23 @@ func promptTrackSelection(streams *ffprobeOutput, allowStereo bool) (audioSel, s
 	}
 
 	fmt.Println(pterm.Gray("  → Multiple tracks found:"))
+	labels := make([]string, 0, len(entries))
 	for i, e := range entries {
 		fmt.Printf("    %s %s\n",
 			pterm.LightCyan(fmt.Sprintf("[%d]", i+1)), e.label)
+		labels = append(labels, e.label)
 	}
 	hint := "Enter = all"
 	if hasStereoOption {
 		hint = "Enter = all tracks WITHOUT stereo mix"
 	}
 	fmt.Printf("  Tracks to extract (%s, e.g. 1,3): ", hint)
+	emitQuestion(questionKindTracks, srcPath, hint, labels)
+
+	// No time limit here — that has always been the case and stays true in
+	// -json mode (see eventQuestion): a front-end shows its selection dialog
+	// without a running clock. If the input ends instead (console closed,
+	// front-end gone), ReadString returns at once and all tracks are kept.
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -722,6 +750,7 @@ func runBatchSplit(ctx context.Context) {
 		return
 	}
 
+	toolFilesTotal = len(files)
 	pInfo.Printf("Batch split: %d MKV file(s) in %s\n",
 		len(files), dir)
 	fmt.Println(pterm.Gray("  All tracks, no stereo mixes, no questions — parallel instances share the work."))
@@ -778,6 +807,7 @@ func runBatchSplit(ctx context.Context) {
 
 func runDemuxFromMKV(ctx context.Context, files []string) {
 	total := len(files)
+	toolFilesTotal = total
 	for i, f := range files {
 		if ctx.Err() != nil {
 			fmt.Println()
@@ -800,7 +830,7 @@ func runDemuxFromMKV(ctx context.Context, files []string) {
 // extracted, stereo mixes stay opt-in-only and are never created.
 func processOneMKV(ctx context.Context, mkvPath string, askTracks bool) {
 	abs, _ := filepath.Abs(mkvPath)
-	announceToolFile("» %s\n", filepath.Base(abs))
+	announceToolFile(abs, "» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
 		pErr.Printf("  File not found: %s\n", plainError(err))
@@ -836,7 +866,7 @@ func processOneMKV(ctx context.Context, mkvPath string, askTracks bool) {
 	printDavinciAudioInfo(audioInfos, false)
 	var audioSel, subSel, stereoSel map[int]bool
 	if askTracks {
-		audioSel, subSel, stereoSel = promptTrackSelection(streams, true)
+		audioSel, subSel, stereoSel = promptTrackSelection(streams, true, abs)
 	}
 
 	// Ctrl+C means STOP: no salvage extraction of the remaining tracks.
@@ -929,6 +959,7 @@ func muxMP4VideoOnly(ctx context.Context, mp4Path string, streams *ffprobeOutput
 
 func runExtractFromMP4(ctx context.Context, files []string) {
 	total := len(files)
+	toolFilesTotal = total
 	for i, f := range files {
 		if ctx.Err() != nil {
 			fmt.Println()
@@ -947,7 +978,7 @@ func runExtractFromMP4(ctx context.Context, files []string) {
 
 func processOneMP4(ctx context.Context, mp4Path string) {
 	abs, _ := filepath.Abs(mp4Path)
-	announceToolFile("» %s\n", filepath.Base(abs))
+	announceToolFile(abs, "» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
 		pErr.Printf("  File not found: %s\n", plainError(err))
@@ -981,7 +1012,7 @@ func processOneMP4(ctx context.Context, mp4Path string) {
 		})
 	}
 	printDavinciAudioInfo(audioInfos, false)
-	audioSel, subSel, stereoSel := promptTrackSelection(streams, true)
+	audioSel, subSel, stereoSel := promptTrackSelection(streams, true, abs)
 
 	// Ctrl+C means STOP: no salvage extraction of the remaining tracks.
 	muxErr := muxMP4VideoOnly(ctx, abs, streams)
@@ -1417,7 +1448,7 @@ func parseSubTags(file string) (lang string, isForced bool, isSDH bool) {
 
 func runMerge(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
 	abs, _ := filepath.Abs(videoPath)
-	announceToolFile("» %s + %d Audio + %d SRT\n",
+	announceToolFile(abs, "» %s + %d Audio + %d SRT\n",
 		filepath.Base(abs), len(audioPaths), len(srtPaths))
 
 	if _, err := os.Stat(abs); err != nil {
@@ -1957,6 +1988,7 @@ func runBatchSplitLossless(ctx context.Context, dir string) {
 		return
 	}
 
+	toolFilesTotal = len(files)
 	pInfo.Printf("Split (batch): %d video file(s) in %s\n", len(files), dir)
 	fmt.Println(pterm.Gray("  All tracks, 1:1 copy, no questions — parallel instances share the work."))
 
@@ -2008,7 +2040,7 @@ func runBatchSplitLossless(ctx context.Context, dir string) {
 // raw subtitles. askTracks=false (batch) extracts everything without asking.
 func processOneVideoLossless(ctx context.Context, srcPath string, askTracks bool) {
 	abs, _ := filepath.Abs(srcPath)
-	announceToolFile("» %s\n", filepath.Base(abs))
+	announceToolFile(abs, "» %s\n", filepath.Base(abs))
 
 	if _, err := os.Stat(abs); err != nil {
 		pErr.Printf("  File not found: %s\n", plainError(err))
@@ -2026,7 +2058,7 @@ func processOneVideoLossless(ctx context.Context, srcPath string, askTracks bool
 	printLosslessTrackInfo(streams)
 	var audioSel, subSel map[int]bool
 	if askTracks {
-		audioSel, subSel, _ = promptTrackSelection(streams, false)
+		audioSel, subSel, _ = promptTrackSelection(streams, false, abs)
 	}
 
 	// Ctrl+C means STOP: the failing step removes its own unfinished output.
@@ -2432,7 +2464,7 @@ func runJoinMode(ctx context.Context, args []string) {
 // source is never touched.
 func runJoinLossless(ctx context.Context, videoPath string, audioPaths, srtPaths []string) {
 	abs, _ := filepath.Abs(videoPath)
-	announceToolFile("» %s + %d Audio + %d Sub\n",
+	announceToolFile(abs, "» %s + %d Audio + %d Sub\n",
 		filepath.Base(abs), len(audioPaths), len(srtPaths))
 
 	if _, err := os.Stat(abs); err != nil {

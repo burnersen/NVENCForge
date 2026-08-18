@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.17.0"
+const appVersion = "1.18.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1954,6 +1954,7 @@ func main() {
 	// DaVinci Resolve workflow: pure remux/AAC work, no NVENC involved — the GPU
 	// probe is skipped (faster start; it even works without an Nvidia card).
 	if davinciMode {
+		emitToolRunStart()
 		printStreamSettings()
 		runDavinciMode(ctx, os.Args[2:])
 		printToolSummary(ctx)
@@ -1964,12 +1965,14 @@ func main() {
 	// Lossless split/join: -split / -join copy every stream 1:1. No NVENC, no GPU
 	// probe, works without an Nvidia card.
 	if splitMode {
+		emitToolRunStart()
 		runSplitMode(ctx, os.Args[2:])
 		printToolSummary(ctx)
 		waitForEnter()
 		return
 	}
 	if joinMode {
+		emitToolRunStart()
 		runJoinMode(ctx, os.Args[2:])
 		printToolSummary(ctx)
 		waitForEnter()

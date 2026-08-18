@@ -188,16 +188,32 @@ In this mode the **moving** parts of the display are switched off: the Auto-CQ s
 | `stage` | the step changes | `stage`: `analyze` \| `encode` \| `remux` \| `mp4` |
 | `progress` | ~10× per second while encoding | `pct`, `pos_sec`, `eta`, `fps`, `speed`, `bitrate`, `est_mb` |
 | `result` | a file is done | `status`: `success` \| `skipped` \| `failed` \| `preview`, `out_mb`, `saved_mb`, `saved_pct` |
+| `question` | a track selection is due (`-mp4`, `-davinci`, `-split`) | `kind`: `tracks`, `file`, `hint`, `options` (`n`, `label`) |
 | `summary` | once, at the very end | `files`, `success`, `skipped`, `failed`, `saved_mb`, `elapsed_sec` |
 
 ```json
-{"ev":"run","version":"1.17.0","mode":"convert","codec":"h265","encoder":"nvidia","files":1}
+{"ev":"run","version":"1.18.0","mode":"convert","codec":"h265","encoder":"nvidia","files":1}
 {"ev":"stage","index":1,"stage":"analyze"}
 {"ev":"progress","index":1,"pct":8.38,"pos_sec":5.03,"eta":"0:06","fps":"-","speed":"9.9x","bitrate":"1k"}
 {"ev":"summary","files":1,"success":1,"skipped":0,"failed":0,"saved_mb":71.7,"elapsed_sec":20.9}
 ```
 
 `status: "preview"` is the honest answer to Ctrl+C: the run was cancelled, but the part that was already encoded is a playable file — and the original is untouched. Without the flag, not a single byte of this is emitted.
+
+**Answering a `question`.** The reply goes back on **stdin** as exactly the line a person would type at the console — `1,3` for single entries, an empty line for all tracks. Nothing else is needed; the numbers in `options[].n` are the ones printed in square brackets on screen.
+
+```json
+{"ev":"question","kind":"tracks","file":"C:\\Videos\\Movie.mkv","hint":"Enter = all tracks WITHOUT stereo mix","options":[{"n":1,"label":"Audio  ger  EAC3 6ch"},{"n":2,"label":"  ↳ Stereo mix of [1]  (extra .stereo.m4a)"},{"n":3,"label":"Sub    eng  SUBRIP"}]}
+```
+
+In `-json` mode the program then waits **without a time limit** — a front-end shows a dialog, and a running clock would be a trap for anyone taking their time. Two rules follow from that:
+
+- the front-end **must** answer every question; if it closes stdin instead, the safe default (all tracks) applies, exactly as before
+- **one answer per question, and only after the announcement** — each prompt reads with its own buffer, so a reply sent ahead of time would be stranded there
+
+At the console nothing changes: `-mp4` still falls back to all tracks after 30 s, so an unattended batch never gets stuck.
+
+**In the tool modes** (`-davinci`, `-split`, `-join`) the same channel is used, with two honest limits. `run` carries no file count — it is not known until the folder has been read. And `summary` carries only `files` and `elapsed_sec`: these modes produce several outputs per source and keep no success/skipped/failed bookkeeping, so those counters stay at zero rather than claiming something. Everything else is the same: one `file` event per source, `progress` while a step runs, `question` when a selection is due.
 
 ---
 

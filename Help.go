@@ -180,7 +180,13 @@ CONVERSION OPTIONS
                  mode: nobody is watching, and on a pipe they would
                  print hundreds of lines instead of redrawing
                  themselves. Events: run, file, stage, progress,
-                 result, summary.
+                 result, question, summary. A "question" event lists
+                 the tracks to choose from; it is answered on standard
+                 input with the same line a person would type ("1,3",
+                 empty = all tracks). The program waits for that
+                 answer without a time limit, so a front-end can show
+                 a dialog in peace - at the console the usual 30 s
+                 fallback to "all tracks" stays.
   -help          Print the complete option list in the console and
                  exit. Also works as -h, -?, /? or --help, and can
                  stand anywhere in the command. Nothing is

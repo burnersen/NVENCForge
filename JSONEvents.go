@@ -387,3 +387,109 @@ func emitRunSummary(results []ProcessResult, elapsed time.Duration) {
 	}
 	emitEvent(sum)
 }
+
+// ----------------------------------------------------------------------------
+// Die Rückfrage
+// ----------------------------------------------------------------------------
+
+// questionKindTracks benennt die einzige Rückfrage, die es heute gibt: welche
+// Ton- und Untertitelspuren übernommen werden sollen (-mp4, -davinci, -split).
+const questionKindTracks = "tracks"
+
+// eventQuestion kündigt eine Rückfrage an, die sonst nur im Konsolenfenster
+// stünde.
+//
+// Geantwortet wird über die gewohnte Eingabe (stdin) mit GENAU der Zeile, die
+// auch ein Mensch tippen würde: "1,3" für einzelne Nummern, eine leere Zeile
+// für alle Spuren. Deshalb muss am Einlesen nichts umgebaut werden — es kommt
+// nur diese Ankündigung dazu.
+//
+// Im -json-Modus wartet das Programm unbegrenzt auf die Antwort: Vor einer
+// Oberfläche sitzt ein Mensch, der in Ruhe ankreuzen soll, und eine ablaufende
+// Uhr wäre dort eine Falle. Die Gegenseite MUSS deshalb immer antworten.
+// Schließt sie die Eingabe stattdessen, gilt wie bisher „alle Spuren".
+//
+// Zweite Bedingung an die Gegenseite: immer nur EINE Antwort schicken, und erst
+// nach dieser Ankündigung. Jede Frage-Stelle liest mit einem eigenen Puffer —
+// eine Antwort auf Vorrat bliebe dort liegen und wäre für die nächste Frage
+// verloren.
+type eventQuestion struct {
+	Ev      string           `json:"ev"`   // "question"
+	Kind    string           `json:"kind"` // derzeit immer "tracks"
+	File    string           `json:"file,omitempty"`
+	Hint    string           `json:"hint,omitempty"`
+	Options []questionOption `json:"options"`
+}
+
+// questionOption ist ein Eintrag der Auswahlliste. N ist die Nummer, die auf
+// dem Bildschirm in eckigen Klammern steht — genau aus diesen Nummern besteht
+// die Antwort.
+type questionOption struct {
+	N     int    `json:"n"`
+	Label string `json:"label"`
+}
+
+// emitQuestion kündigt eine Auswahlfrage an.
+//
+// labels kommt in der Reihenfolge der Bildschirmliste; die Nummerierung
+// entsteht hier aus dieser Reihenfolge und nicht beim Aufrufer, damit Anzeige
+// und Datenkanal nicht auseinanderlaufen können. Der Text bleibt sonst
+// unangetastet (nur nachlaufende Leerzeichen der Tabellenform fallen weg):
+// Die Einrückung eines Stereo-Mix-Eintrags gehört zur Aussage.
+func emitQuestion(kind, file, hint string, labels []string) {
+	if !jsonMode {
+		return
+	}
+	options := make([]questionOption, 0, len(labels))
+	for i, label := range labels {
+		options = append(options, questionOption{N: i + 1, Label: strings.TrimRight(label, " ")})
+	}
+	emitEvent(eventQuestion{
+		Ev:      "question",
+		Kind:    kind,
+		File:    file,
+		Hint:    hint,
+		Options: options,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Die Werkzeug-Modi (-davinci, -split, -join)
+//
+// Sie laufen nicht über die Stapel-Verwaltung des Konvertierens und kennen
+// deshalb weder ProcessResult noch Erfolgs- oder Ersparnis-Zahlen. Gemeldet
+// wird genau das, was das Programm über sie WEISS — lieber zwei ehrliche
+// Angaben als vier erfundene.
+// ----------------------------------------------------------------------------
+
+// emitToolRunStart eröffnet einen Werkzeug-Lauf.
+//
+// Die Dateizahl bleibt hier 0: Sie steht erst fest, wenn der Ordner gelesen
+// oder die Übergabe ausgewertet ist. Wie viele es wirklich waren, sagt die
+// Zusammenfassung am Ende.
+func emitToolRunStart() {
+	if !jsonMode {
+		return
+	}
+	emitEvent(eventRun{
+		Ev:      "run",
+		Version: appVersion,
+		Mode:    runModeName(),
+	})
+}
+
+// emitToolSummary beendet einen Werkzeug-Lauf mit denselben zwei Zahlen, die
+// auch auf dem Bildschirm stehen: bearbeitete Dateien und Dauer. Die Zähler für
+// erfolgreich/übersprungen/fehlgeschlagen bleiben bewusst leer — diese Modi
+// erzeugen je Quelle mehrere Ausgabedateien und führen darüber keine
+// Buchhaltung, die man hier ehrlich wiedergeben könnte.
+func emitToolSummary(files int, elapsed time.Duration) {
+	if !jsonMode {
+		return
+	}
+	emitEvent(eventSummary{
+		Ev:         "summary",
+		Files:      files,
+		ElapsedSec: elapsed.Seconds(),
+	})
+}

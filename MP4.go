@@ -97,7 +97,11 @@ type mp4TrackSelection struct {
 // VobSub) kann es dagegen wirklich nicht: die tauchen deshalb gar nicht erst
 // in der Liste auf, werden aber gemeldet, damit ihr Fehlen nicht wie ein
 // Fehler aussieht.
-func chooseMP4Tracks(streams *ffprobeOutput) mp4TrackSelection {
+//
+// srcPath wird nur weitergereicht, damit die Ankündigung im Datenkanal (-json)
+// sagen kann, um welche Datei es geht; auf die Auswahl selbst hat er keinen
+// Einfluss.
+func chooseMP4Tracks(streams *ffprobeOutput, srcPath string) mp4TrackSelection {
 	type entry struct {
 		isSub bool
 		rel   int
@@ -149,13 +153,21 @@ func chooseMP4Tracks(streams *ffprobeOutput) mp4TrackSelection {
 	}
 
 	fmt.Println(pterm.Gray("  → Multiple tracks found:"))
+	labels := make([]string, 0, len(entries))
 	for i, e := range entries {
 		fmt.Printf("    %s %s\n", pterm.LightCyan(fmt.Sprintf("[%d]", i+1)), e.label)
+		labels = append(labels, e.label)
 	}
-	fmt.Printf("  Tracks for the MP4 (Enter = all, e.g. 1,3; all after %.0f s): ",
-		mp4TrackPromptTimeout.Seconds())
+	timeout := trackPromptTimeout()
+	if timeout > 0 {
+		fmt.Printf("  Tracks for the MP4 (Enter = all, e.g. 1,3; all after %.0f s): ",
+			timeout.Seconds())
+	} else {
+		fmt.Print("  Tracks for the MP4 (Enter = all, e.g. 1,3): ")
+	}
+	emitQuestion(questionKindTracks, srcPath, "Enter = all", labels)
 
-	line, ok := readLineTimeout(mp4TrackPromptTimeout)
+	line, ok := readLineTimeout(timeout)
 	if !ok {
 		fmt.Println()
 		return sel
@@ -207,14 +219,35 @@ func readLineTimeout(timeout time.Duration) (string, bool) {
 		}
 		answer <- line
 	}()
+	// timeout <= 0 heißt „unbegrenzt warten". Ein nil-Kanal liefert nie etwas,
+	// deshalb bleibt der Zeitzweig dann einfach für immer stumm.
+	var expired <-chan time.Time
+	if timeout > 0 {
+		expired = time.After(timeout)
+	}
 	select {
 	case a := <-answer:
 		return a, true
 	case <-unreadable:
 		return "", false
-	case <-time.After(timeout):
+	case <-expired:
 		return "", false
 	}
+}
+
+// trackPromptTimeout liefert die Bedenkzeit für die Spurauswahl.
+//
+// Auf der Konsole gibt das Programm nach 30 s auf (siehe
+// mp4TrackPromptTimeout). Im -json-Modus sitzt dagegen eine Oberfläche davor,
+// die einen Auswahl-Dialog zeigt — dort wäre eine ablaufende Uhr eine Falle:
+// Wer in Ruhe ankreuzt, bekäme sonst stillschweigend alle Spuren. Die
+// Oberfläche muss dafür immer antworten; schließt sie die Eingabe, greift
+// weiterhin die sichere Vorgabe.
+func trackPromptTimeout() time.Duration {
+	if jsonMode {
+		return 0
+	}
+	return mp4TrackPromptTimeout
 }
 
 // mapArgsForSelection baut die -map-Argumente und liefert die zur Auswahl
@@ -322,7 +355,7 @@ func selectionForFile(ctx context.Context, cfg *AppConfig, path string, stats *V
 		pWarn.Printf("MP4: cannot list tracks (%v) — keeping all of them.\n", err)
 		return allTracksSelection(stats)
 	}
-	return chooseMP4Tracks(streams)
+	return chooseMP4Tracks(streams, path)
 }
 
 // allTracksSelection ist der Rückfall ohne Spurliste: alle bekannten Tonspuren,

@@ -337,7 +337,6 @@ Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that �
 - **Real long-path support.** Paths over the classic 260-character limit — and UNC network paths — are handled with the `\\?\` prefix, correctly round-tripped both ways.
 - **Colours on old terminals.** ANSI/virtual-terminal mode is switched on explicitly, so the coloured UI works even in the plain classic console.
 - **Graceful window-close.** Closing the window, logging off or shutting down is caught: FFmpeg is given a few seconds to finalise the current file into a playable preview instead of leaving a corrupt fragment.
-- **Ships its own source, safely.** The binary carries the exact source it was built from and extracts it on first run — but only if the folder isn't already there (your edits are never overwritten), and with a zip-slip guard so a crafted archive can't write outside its folder.
 - **Correct to the byte.** The low-level Windows calls (recycle bin, timestamps) are laid out to match the OS ABI exactly, checked *at compile time* — if a structure offset were ever wrong, the build fails instead of shipping a subtle bug.
 
 </details>
@@ -361,11 +360,12 @@ Most of the work in NVENCForge isn't the encoding itself — FFmpeg does that �
 ## 🔨 Building from source
 
 ```
-cd sourcecode
+git clone https://github.com/burnersen/NVENCForge.git
+cd NVENCForge
 build.bat
 ```
 
-That's it. `build.bat` packs the embedded source archive and compiles `NVENCForge.exe` (Go 1.21+). And remember: every released EXE extracts its own sources on first run.
+That's it. `build.bat` resolves the dependencies and compiles `NVENCForge.exe` (Go 1.21+).
 
 ---
 

@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.19.0"
+const appVersion = "1.20.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1860,9 +1860,7 @@ func main() {
 		pDetail = pDetail.WithWriter(io.Discard)
 	}
 
-	// Self-extract the embedded build sources into ./sourcecode (only if absent)
-	// and lay down the user help file. Both are non-fatal best-effort steps.
-	_ = extractEmbeddedSource()
+	// Lay down the user help file next to the exe. Non-fatal best-effort step.
 	_ = syncHelpFile()
 
 	ctx, cancel := setupSignalContext()

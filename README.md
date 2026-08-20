@@ -124,7 +124,7 @@ The finished files land in an `output` subfolder, and each source that was conve
 - 🚦 **Resilient by design.** Per-file locks, a stall watchdog for frozen encodes, and a multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down a whole batch.
 - 👯 **Parallel out of the box.** Start the same command in two terminals; instances lock files individually and split the work automatically.
 - 🎛️ **DaVinci-Resolve-safe audio.** DTS, TrueHD, EAC3, FLAC, Opus & >5.1 layouts become AAC that Resolve actually imports — or stay 1:1 with `-copyaudio`.
-- 🔁 **Ships with its own source.** The EXE carries the exact source it was built from and extracts it on first run.
+- 🔓 **Source-available.** The complete source of every release lives [right here on GitHub](https://github.com/burnersen/NVENCForge) — read it, audit it, or build it yourself.
 - 🌍 **Unicode-safe filename cleanup.** `Movie (2016) [BluRay] x264.mkv` → `Movie.2016.h265.mkv`. Every script in the world survives, release-group noise doesn't.
 
 > The full mechanics behind each of these — all eight categories of safety nets — are on the **[technical page →](TECHNICAL.md#under-the-hood)**
@@ -273,7 +273,7 @@ The three worth knowing about:
 
 Windows or your antivirus may warn you the first time you run `NVENCForge.exe`. The honest reason: **the EXE is not code-signed.** Signing certificates cost several hundred euros *per year*, and this is a free hobby project with zero income. Unsigned Go binaries are frequent false-positive targets; there is nothing I can do about it except be transparent.
 
-You don't have to trust me blindly: **scan it** on [VirusTotal](https://www.virustotal.com), **read it** — the complete source is in this repository — or **[build it yourself](TECHNICAL.md#building)**. The downloaded EXE even carries its own source inside and extracts it on first run.
+You don't have to trust me blindly: **scan it** on [VirusTotal](https://www.virustotal.com), **read it** — the complete source is in this repository — or **[build it yourself](TECHNICAL.md#building)**.
 
 If SmartScreen blocks the start: click **"More info" → "Run anyway"**.
 

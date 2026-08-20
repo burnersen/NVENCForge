@@ -23,16 +23,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Embed.go embeds this archive, and it is deliberately not committed -
-      # build.bat regenerates it on every build. Without it, build, vet AND
-      # test all stop at "pattern embedded_source.zip: no matching files
-      # found", so it has to be packed before anything else runs. Same file
-      # list build.bat uses.
-      - name: Pack embedded sources
-        run: |
-          $inc = Get-ChildItem -File | Where-Object { @('.go','.mod','.sum','.md','.bat') -contains $_.Extension }
-          Compress-Archive -Path $inc.FullName -DestinationPath embedded_source.zip -Force
-
       # gofmt -l prints the offenders and then exits 0, so on its own it can
       # never fail a build. Turning its output into the verdict is the whole
       # point of this step.

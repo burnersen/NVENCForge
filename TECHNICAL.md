@@ -48,6 +48,7 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 
 - **Sample encodes use the real settings.** The little test clips are encoded with the *exact* encoder options of the final run, and the reference side runs through the *same* downscale/sharpen filter chain — so the VMAF score isolates the encoder's loss alone, not the scaling.
 - **Finds the hard scenes without decoding.** Sample windows are placed using the source's bitrate profile, read straight from the container by demuxing packet *sizes* (no decoding — seconds even on a multi-GB movie). The single heaviest scene is always included; intros, credits and near-black frames (which score a flattering fake-perfect VMAF) are deliberately avoided.
+- **Variable frame rates are read correctly.** For a VFR source the container's `r_frame_rate` is just the timebase denominator, not a frame rate — one real 60 fps file reported 300 fps. Sampling at that rate feeds VMAF five duplicates of every frame and drives the samples into the bitrate cap, where CQ stops mattering: the anchors flatten out, the saturation brake reads that as a plateau and settles on a CQ that is visibly too soft (and the analysis takes five times as long). Such a timebase is now detected and the true average frame rate is used instead, with a line in the log. Constant-frame-rate sources report the same value either way and are untouched.
 - **Two nasty VMAF pitfalls handled.** Decoded segments are re-based to a zero start time, and both comparison inputs are forced onto frame-number-based timestamps — otherwise Matroska's millisecond rounding pairs the wrong frames and tanks the score. (These are the kind of bugs that silently make a quality measurement meaningless.)
 - **Trust, but verify.** The interpolated pick is always confirmed with one extra real measurement; on a miss it steps down along the measured slope. A **saturation brake** detects pre-compressed sources whose quality plateaus below the target, and a **plateau climb** then probes higher CQ levels with real measurements — on such sources the low CQ steps often just ride the bitrate cap, so the climb routinely cuts a third of the file size at no visible cost.
 - **It can never break a conversion.** Any hiccup (clip under 30 s, unknown frame rate, an FFmpeg build without `libvmaf`, a wedged step) just falls back to the configured CQ with a warning. The whole analysis runs at idle priority with hard per-step timeouts, and `libvmaf`'s presence is checked once up front — one clear notice, not one failure per file.
@@ -192,7 +193,7 @@ In this mode the **moving** parts of the display are switched off: the Auto-CQ s
 | `summary` | once, at the very end | `files`, `success`, `skipped`, `failed`, `saved_mb`, `elapsed_sec` |
 
 ```json
-{"ev":"run","version":"1.18.0","mode":"convert","codec":"h265","encoder":"nvidia","files":1}
+{"ev":"run","version":"1.19.0","mode":"convert","codec":"h265","encoder":"nvidia","files":1}
 {"ev":"stage","index":1,"stage":"analyze"}
 {"ev":"progress","index":1,"pct":8.38,"pos_sec":5.03,"eta":"0:06","fps":"-","speed":"9.9x","bitrate":"1k"}
 {"ev":"summary","files":1,"success":1,"skipped":0,"failed":0,"saved_mb":71.7,"elapsed_sec":20.9}

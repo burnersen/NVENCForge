@@ -854,6 +854,12 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		pterm.Yellow(formatDuration(stats.DurationSec)),
 		sourceFacts)
 
+	// Auffällige Bildrate offenlegen, statt still damit weiterzurechnen: die
+	// angezeigte Zahl steckt in Auto-CQ und im Keyframe-Abstand.
+	if stats.FPSNote != "" {
+		pInfo.Printf("%s %s\n", pterm.LightMagenta("›"), stats.FPSNote)
+	}
+
 	// HDR-Policy (per Datei, leckt nie in SDR-Dateien): nur noch Erkennung +
 	// Hinweis. Der Bitraten-Deckel wird durch HDR NICHT mehr angehoben — er
 	// richtet sich allein nach dem Modus: 1080p (Standard) → maxBitrate1080p
@@ -1333,6 +1339,89 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 // getVideoStats: FFprobe wrapper
 // ----------------------------------------------------------------------------
 
+const (
+	// Ab diesem Verhältnis gilt die Zeitbasis-Bildrate als Artefakt und wird im
+	// Protokoll erwähnt. 1,5-fach ist bewusst grob: normale Schwankungen einer
+	// VFR-Datei liegen weit darunter, der gemessene Fall lag bei 5-fach.
+	frameRateTimebaseFactor = 1.5
+	// Über dieser Bildrate ist bei Realmaterial fast immer die Zeitbasis schuld
+	// und nicht die Kamera. Der Wert wird trotzdem benutzt — nur eben nicht
+	// mehr stillschweigend.
+	frameRateImplausibleFPS = 120.0
+)
+
+// parseFrameRate zerlegt eine ffprobe-Bruchangabe wie "60/1" in Zähler und
+// Nenner. "0/0" (ffprobe für "unbekannt") und alles Unplausible fällt durch.
+func parseFrameRate(rate string) (num, den int, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(rate), "/", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	num, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || num <= 0 {
+		return 0, 0, false
+	}
+	den, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || den <= 0 {
+		return 0, 0, false
+	}
+	return num, den, true
+}
+
+// pickFrameRate wählt aus den beiden Bildraten, die ffprobe meldet, die
+// belastbare aus und gibt 0/0 zurück, wenn keine brauchbar ist.
+//
+// Warum überhaupt eine Wahl: Bei variabler Bildrate ist r_frame_rate nur der
+// kleinste gemeinsame Nenner der Zeitbasis, keine echte Bildrate — an einer
+// echten 60-fps-Datei meldete ffprobe dort 300/1 (gemessen 2026-08-20). Alles,
+// was auf dieser Zahl aufbaut, geht dann schief: Auto-CQ filtert die Fenster
+// auf 300 fps, misst fünffach doppelte Bilder, läuft mit 7,2 statt 4,0 Mbit/s
+// in den Bitraten-Deckel — dort ist CQ wirkungslos, die Anker liegen fast
+// gleich, die Sättigungs-Bremse hält das für ein Plateau und wählt ein zu
+// weiches CQ. Zusätzlich wird der Keyframe-Abstand für 300 fps berechnet und
+// die Analyse dauert fünfmal so lange.
+//
+// avg_frame_rate ist Bilder geteilt durch Laufzeit und trifft in diesem Fall
+// den echten Wert. Umgestellt wird trotzdem nur, wenn r_frame_rate erkennbar
+// ein Artefakt ist (siehe unten) — bei sauberen CFR-Dateien sind ohnehin beide
+// Angaben gleich, dort ändert sich also nichts.
+func pickFrameRate(avgRate, realRate string) (num, den int, note string) {
+	avgNum, avgDen, avgOK := parseFrameRate(avgRate)
+	realNum, realDen, realOK := parseFrameRate(realRate)
+
+	switch {
+	case !avgOK && !realOK:
+		return 0, 0, ""
+	case !realOK:
+		num, den = avgNum, avgDen // nur der Durchschnitt ist brauchbar
+	case !avgOK:
+		num, den = realNum, realDen
+	default:
+		// Beide Angaben da: r_frame_rate bleibt die Grundlage — außer sie ist
+		// erkennbar ein Zeitbasis-Artefakt, also gleichzeitig unrealistisch hoch
+		// UND deutlich über dem Durchschnitt. Bewusst so eng: eine Datei mit
+		// Löchern in der Zeitachse hat ebenfalls einen niedrigeren Durchschnitt,
+		// dort wäre er aber die schlechtere Grundlage. Nur die Artefakt-Fälle
+		// (300, 600, 1000 fps …) sollen umgestellt werden, alle heute korrekt
+		// laufenden Dateien bleiben unverändert.
+		realFPS := float64(realNum) / float64(realDen)
+		avgFPS := float64(avgNum) / float64(avgDen)
+		if realFPS > frameRateImplausibleFPS && realFPS > avgFPS*frameRateTimebaseFactor {
+			return avgNum, avgDen, fmt.Sprintf(
+				"variable frame rate: the container timebase says %.2f fps, the real average is %.2f fps — measurement and encode use the average",
+				realFPS, avgFPS)
+		}
+		num, den = realNum, realDen
+	}
+
+	if fps := float64(num) / float64(den); fps > frameRateImplausibleFPS {
+		return num, den, fmt.Sprintf(
+			"unusually high frame rate (%.2f fps) — if that is a timebase artefact, the Auto-CQ measurement can be off",
+			fps)
+	}
+	return num, den, ""
+}
+
 func getVideoStats(ctx context.Context, filePath string) (*VideoStats, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -1377,12 +1466,12 @@ func getVideoStats(ctx context.Context, filePath string) (*VideoStats, error) {
 			s.ColorTransfer = st.ColorTransfer
 			s.ColorPrimaries = st.ColorPrimaries
 			s.ColorRange = st.ColorRange
-			if st.RFrameRate != "" {
-				parts := strings.SplitN(st.RFrameRate, "/", 2)
-				if len(parts) == 2 {
-					s.FPSNum, _ = strconv.Atoi(parts[0])
-					s.FPSDen, _ = strconv.Atoi(parts[1])
-				}
+			// Bildrate: avg_frame_rate schlägt r_frame_rate — warum, steht bei
+			// pickFrameRate. Meldet die Datei beides nicht brauchbar, bleibt es
+			// wie bisher bei 0/0 ("unbekannt"), damit Auto-CQ bewusst aussteigt
+			// statt mit einem geratenen Wert zu messen.
+			if st.RFrameRate != "" || st.AvgFrameRate != "" {
+				s.FPSNum, s.FPSDen, s.FPSNote = pickFrameRate(st.AvgFrameRate, st.RFrameRate)
 			}
 			if bps, e := strconv.ParseInt(st.BitRate, 10, 64); e == nil {
 				s.BitrateBps = bps

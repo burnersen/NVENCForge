@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.18.0"
+const appVersion = "1.19.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -245,6 +245,7 @@ type ffprobeStream struct {
 	Width          int                `json:"width"`
 	Height         int                `json:"height"`
 	RFrameRate     string             `json:"r_frame_rate"`
+	AvgFrameRate   string             `json:"avg_frame_rate"`
 	BitRate        string             `json:"bit_rate"`
 	Channels       int                `json:"channels"`
 	ChannelLayout  string             `json:"channel_layout"`
@@ -289,6 +290,7 @@ type VideoStats struct {
 	Height         int
 	FPSNum         int
 	FPSDen         int
+	FPSNote        string // Hinweis zur Bildrate (leer = unauffällig), siehe pickFrameRate
 	DurationSec    float64
 	BitrateBps     int64
 	FileSizeMB     float64

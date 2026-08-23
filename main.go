@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.21.2"
+const appVersion = "1.22.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -983,6 +983,13 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("Auto-shutdown after completion enabled.")
 			continue
 		}
+		// Gegenstück zu -shutdown, für den Fall autoShutdown=true in der INI.
+		// Ohne diesen Schalter könnte eine Oberfläche das Abschalten nicht
+		// abwählen: sie kann nur Argumente MITGEBEN, keine wegnehmen.
+		if strings.EqualFold(arg, "-noshutdown") {
+			cfg.autoShutdown = false
+			continue
+		}
 		if strings.EqualFold(arg, "-orig") || strings.EqualFold(arg, "-original") {
 			cfg.keepOriginal = true
 			pInfo.Println("Original resolution mode enabled: no downscaling.")
@@ -997,6 +1004,14 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			// Gemeldet wird erst nach der Schleife: welcher AV1-Encoder läuft,
 			// hängt von -cpu ab, und das darf hinter -av1 stehen.
 			cfg.av1 = true
+			continue
+		}
+		// Gegenstück zu -av1, für den Fall encoder=av1 in der INI. Dieselbe
+		// Überlegung wie bei -noshutdown: eine Oberfläche kann Argumente nur
+		// mitgeben, nicht wegnehmen — ohne diesen Schalter ließe sich H.265
+		// nicht wählen, wenn die Datei AV1 vorgibt.
+		if strings.EqualFold(arg, "-h265") || strings.EqualFold(arg, "-hevc") {
+			cfg.av1 = false
 			continue
 		}
 		if strings.EqualFold(arg, "-cpu") {

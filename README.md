@@ -182,6 +182,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
+| `-h265` | Encode **H.265** even if the config says `encoder=av1` |
 | `-mp4` | Write an **MP4 that plays almost everywhere** (H.265/`hvc1` + AAC + faststart). *(`-apple` still works — it's the old name)* |
 | `-8bit` | Encode in **8 bit** instead of 10 bit, for older devices that reject "Main 10" |
 | `-cpu` | Encode on the **processor** — no NVIDIA card needed (libx265, or SVT-AV1 with `-av1`) |
@@ -193,6 +194,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-nocrop` | Keep the black bars for this run |
 | `-keep` | Keep the originals exactly where they are |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
+| `-noshutdown` | Do **not** shut down, even if the config says `autoShutdown=true` |
 | `-json` | Report progress as **JSON lines on stdout** — for front-ends and scripts ([details](TECHNICAL.md#json-events)) |
 | `-davinci` | DaVinci Resolve workflow (split / extract / merge); must be the first argument |
 | `-split` | Lossless split: every stream copied 1:1; must be the first argument |
@@ -246,7 +248,7 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 ## ⚙️ Configuration
 
-Everything lives in `NVENCForge_Config.ini` next to the EXE — auto-created, and **you don't have to touch it at all.** The defaults are the measured ones. An invalid value is reset individually in the file with a warning, leaving your comments and everything else untouched.
+Everything lives in `NVENCForge_Config.ini` next to the EXE — auto-created, and **you don't have to touch it at all.** The defaults are the measured ones. An invalid value is reset individually in the file with a warning, leaving your comments and everything else untouched. Settings added by a newer version are filled in automatically at their proper place, so an old config file never quietly misses a feature — your previous file is kept as `.bak`.
 
 The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
 

@@ -87,6 +87,10 @@ CONVERSION OPTIONS
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
+  -h265          Encode H.265 even when the config file says
+                 encoder=av1. The counterpart to -av1: a front-end
+                 can only ADD arguments, never take one away, so
+                 without this switch the config would always win.
   -mp4           Write a ".mp4" instead of ".mkv" - the container
                  nearly every device can open: iPhone/iPad (imports
                  into the Photos app), smart TVs, tablets, browsers.
@@ -214,6 +218,9 @@ CONVERSION OPTIONS
                  overwritten. Use this if you want both files.
   -shutdown      Shut the PC down 30 s after the batch finishes
                  ("shutdown /a" cancels it).
+  -noshutdown    Do not shut down, even when the config file says
+                 autoShutdown=true. Counterpart to -shutdown, for
+                 the same reason as -h265.
   -json          Report progress in a machine-readable form: standard
                  output then carries one JSON line per event, while
                  the usual display moves to the error output. Meant
@@ -465,6 +472,7 @@ func printConsoleHelp() {
 	option("-original, -orig", "keep the source resolution (no downscale to 1080p)")
 	option("-copyaudio, -ca", "copy all audio tracks 1:1 (no AAC re-encode)")
 	option("-av1", "encode AV1 instead of H.265 (needs an RTX 40 or newer)")
+	option("-h265", "encode H.265 even if the config says encoder=av1")
 	option("-mp4", "write a .mp4 that plays almost everywhere, instead of .mkv")
 	option("-8bit", "encode in 8 bit for older devices that reject 10 bit")
 	option("-cpu", "encode on the processor - no Nvidia card needed, slower")
@@ -477,6 +485,7 @@ func printConsoleHelp() {
 	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
 	option("-keep", "leave the originals exactly where they are")
 	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")
+	option("-noshutdown", "do not shut down, even if the config says autoShutdown=true")
 	option("-json", "report progress as JSON lines - for front-ends and scripts")
 
 	section("MODES") // must be the first argument - runMode dispatch happens on os.Args[1]

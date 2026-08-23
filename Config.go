@@ -198,6 +198,23 @@ func loadOrCreateAppConfig() {
 		return
 	}
 
+	// Die Datei ist da, aber vielleicht älter als das Programm. Fehlende
+	// Einstellungen werden ergänzt, BEVOR gelesen wird — nicht wegen der Werte
+	// (dafür gäbe es Standardwerte), sondern wegen der Oberfläche: das Fenster
+	// baut seine Einstellungsseite aus dieser Datei und kann nur anbieten, was
+	// darin steht.
+	added, addErr := addMissingConfigEntries(path)
+	switch {
+	case addErr != nil:
+		pWarn.Printf("Config: could not add new settings to the config file: %v\n",
+			plainError(addErr))
+	case len(added) > 0:
+		pInfo.Printf("Config: %d new setting(s) added to NVENCForge_Config.ini: %s\n",
+			len(added), strings.Join(added, ", "))
+		pInfo.Printf("        Your previous file was kept as %s\n",
+			filepath.Base(path)+configBackupSuffix)
+	}
+
 	parsed, invalids, warns := parseAppConfig(path)
 	for _, w := range warns {
 		pWarn.Println("Config: " + w)
@@ -570,10 +587,11 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 // also kein Formalismus, sondern Lesbarkeit auf dem Zielsystem.
 const configLineEnding = "\r\n"
 
-// writeDefaultAppConfig legt die Konfigurationsdatei im Auslieferungszustand an.
+// buildDefaultConfigText erzeugt die Konfigurationsdatei im Auslieferungs-
+// zustand als Text.
 //
 // Aufbau in zwei Teilen: oben die Handvoll Werte, die Nutzer wirklich ändern
-// wollen, darunter die Experten-Regler. Vorher standen alle 28 Schlüssel
+// wollen, darunter die Experten-Regler. Vorher standen alle Schlüssel
 // gleichrangig untereinander, was die Datei wie eine Aufgabenliste wirken ließ,
 // obwohl kein einziger Wert angefasst werden muss.
 //
@@ -583,7 +601,11 @@ const configLineEnding = "\r\n"
 // einer separaten Argumentliste — ein eingeschobener Eintrag hätte dort alle
 // folgenden Werte lautlos in die falschen Schlüssel geschrieben, und weil die
 // Typen gleich sind, hätte weder der Compiler noch go vet etwas gemerkt.
-func writeDefaultAppConfig(path string) error {
+//
+// Der Text hat zwei Abnehmer: writeDefaultAppConfig legt damit die Datei beim
+// allerersten Start an, und addMissingConfigEntries bedient sich daraus, wenn
+// einer vorhandenen Datei später hinzugekommene Einstellungen fehlen.
+func buildDefaultConfigText() string {
 	d := defaultAppSettings()
 	var b strings.Builder
 
@@ -643,10 +665,15 @@ What it does for you depends on how quality is decided:
   on the whole picture, and black bars flatter that measurement, so
   letterboxed films have been getting less quality than you asked
   for. Cutting the bars makes the measurement honest again.
-Off by default on purpose. The bars are detected from five samples
-across the film and NOTHING is cut unless every usable sample agrees,
-but no automatic detection is perfect - and a wrong cut is not
-visible in the result, only in what is missing from it.
+Off by default on purpose. The bars are detected from nine samples
+across the film and the MAJORITY decides, so a logo flashing up
+inside a bar cannot hold the cut back. The cut is always symmetric,
+because letterbox and pillarbox sit centred. Where the samples
+genuinely disagree - a film that changes aspect ratio part-way,
+like the IMAX scenes in some blockbusters - nothing is cut at all.
+Bars on the sides or on all four edges work the same way.
+No automatic detection is perfect, and a wrong cut is not visible
+in the result, only in what is missing from it.
 Use -cropcheck first: it writes a picture showing where the cut would
 go, without converting anything. The -crop option turns cutting on
 for a single run, -nocrop off.`)
@@ -818,8 +845,210 @@ and dots. Spaces always become dots, multiple dots are collapsed,
 and characters Windows forbids are always removed.
 Example:  extraFilenameChars=-_'`)
 
-	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+	return b.String()
+}
+
+// writeDefaultAppConfig legt die INI neu an — nur beim allerersten Start.
+func writeDefaultAppConfig(path string) error {
+	if err := os.WriteFile(path, []byte(buildDefaultConfigText()), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}
 	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Fehlende Einstellungen nachrüsten
+// ----------------------------------------------------------------------------
+//
+// Eine INI, die schon existierte, wurde bis 1.21.2 nie wieder ergänzt: neue
+// Einstellungen kamen nur in Dateien, die frisch angelegt wurden. Wer
+// NVENCForge länger benutzt, hatte deshalb eine INI, in der alles fehlte, was
+// seit ihrer Entstehung dazugekommen war.
+//
+// Für den Konverter selbst war das harmlos — für fehlende Schlüssel gelten
+// seine eingebauten Standardwerte. Für die Oberfläche war es das nicht: das
+// Fenster baut seine Einstellungsseite AUS DER INI. Was dort nicht steht, kann
+// es nicht anbieten, und niemand sieht, dass etwas fehlt.
+
+// configBackupSuffix hängt an die Sicherungskopie. Es gibt bewusst nur eine:
+// eine wachsende Sammlung von .bak-Dateien will niemand im Programmordner.
+const configBackupSuffix = ".bak"
+
+// configBlock ist ein Eintrag der Vorlage: der Schlüssel und die Zeilen, die zu
+// ihm gehören (Erklärung, erlaubter Bereich und die Wertzeile selbst).
+type configBlock struct {
+	key   string
+	lines []string
+}
+
+// configBlocksFromTemplate zerlegt die Vorlage in ihre Einträge.
+//
+// Ein Block sind die Kommentarzeilen unmittelbar über einer Wertzeile plus
+// diese Zeile. Eine Leerzeile beendet ihn — dieselbe Regel, nach der configEntry
+// die Datei schreibt und nach der die Oberfläche sie liest. Überschriften
+// bleiben dadurch von selbst außen vor: hinter ihnen steht eine Leerzeile.
+func configBlocksFromTemplate() []configBlock {
+	var blocks []configBlock
+	var pending []string
+
+	for _, raw := range strings.Split(buildDefaultConfigText(), "\n") {
+		line := strings.TrimSuffix(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case trimmed == "":
+			pending = nil
+		case strings.HasPrefix(trimmed, "#"):
+			pending = append(pending, line)
+		default:
+			key, _, found := strings.Cut(trimmed, "=")
+			if !found {
+				pending = nil
+				continue
+			}
+			blocks = append(blocks, configBlock{
+				key:   strings.TrimSpace(key),
+				lines: append(append([]string(nil), pending...), line),
+			})
+			pending = nil
+		}
+	}
+	return blocks
+}
+
+// configKeyOfLine liefert den Schlüssel einer Wertzeile. Kommentare, Leerzeilen
+// und Zeilen ohne "=" haben keinen.
+func configKeyOfLine(line string) (string, bool) {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	key, _, found := strings.Cut(trimmed, "=")
+	if !found {
+		return "", false
+	}
+	return strings.TrimSpace(key), true
+}
+
+// configKeysInFile liefert die Schlüssel, die eine INI bereits enthält.
+func configKeysInFile(content string) map[string]bool {
+	keys := make(map[string]bool)
+	for _, raw := range strings.Split(content, "\n") {
+		if key, ok := configKeyOfLine(raw); ok {
+			keys[key] = true
+		}
+	}
+	return keys
+}
+
+// detectLineEnding liest das Zeilenende der vorhandenen Datei ab, statt das
+// eigene aufzudrängen: wer seine INI einmal durch ein Werkzeug geschickt hat,
+// das auf LF umstellt, bekäme sonst eine Datei mit zwei verschiedenen Enden.
+func detectLineEnding(content string) string {
+	if strings.Contains(content, "\r\n") {
+		return "\r\n"
+	}
+	if strings.Contains(content, "\n") {
+		return "\n"
+	}
+	return configLineEnding
+}
+
+// pendingEntry ist ein noch einzufügender Eintrag samt der Stelle, an die er
+// gehört: hinter "anchor", dem letzten Schlüssel vor ihm, den die Datei kennt.
+type pendingEntry struct {
+	anchor string
+	block  configBlock
+	placed bool
+}
+
+// insertMissingEntries baut den neuen Dateiinhalt.
+//
+// Getrennt vom Schreiben, damit die Regel selbst ohne Datei auf der Platte
+// prüfbar ist — genau hier steckt die Arbeit, nicht im os.WriteFile.
+//
+// Jeder Eintrag landet an SEINER Stelle: direkt hinter dem Eintrag, der in der
+// Vorlage vor ihm steht und in der Datei schon vorhanden ist. Ans Ende hängen
+// wäre einfacher, risse die Einstellung aber aus ihrem Abschnitt — die
+// Oberfläche gruppiert nach genau dieser Reihenfolge, und ein alltäglicher
+// Schalter wie autoCrop gehört nicht hinter die Experten-Regler.
+//
+// Alles Vorhandene bleibt Zeichen für Zeichen stehen: Werte, Kommentare,
+// Einrückung, eigene Notizen.
+func insertMissingEntries(content string, blocks []configBlock) (string, []string) {
+	keys := configKeysInFile(content)
+
+	var pending []*pendingEntry
+	anchor := ""
+	for _, block := range blocks {
+		if keys[block.key] {
+			anchor = block.key
+			continue
+		}
+		pending = append(pending, &pendingEntry{anchor: anchor, block: block})
+	}
+	if len(pending) == 0 {
+		return content, nil
+	}
+
+	var out []string
+	emit := func(entry *pendingEntry) {
+		// Leerzeile zuerst: die Zeile hinter dem Anker gehört noch zu ihm, der
+		// neue Eintrag braucht Luft davor. Die Leerzeile, die in der Datei
+		// ohnehin folgt, schließt den neuen Block dann ab.
+		out = append(out, "")
+		out = append(out, entry.block.lines...)
+		entry.placed = true
+	}
+
+	for _, raw := range strings.Split(content, "\n") {
+		out = append(out, strings.TrimSuffix(raw, "\r"))
+		key, ok := configKeyOfLine(raw)
+		if !ok {
+			continue
+		}
+		for _, entry := range pending {
+			if !entry.placed && entry.anchor == key {
+				emit(entry)
+			}
+		}
+	}
+
+	// Übrig bleibt, wessen Anker die Datei doch nicht enthielt — etwa weil die
+	// Zeile von Hand gelöscht wurde. Hinten anhängen ist unschön, aber besser
+	// als die Einstellung stillschweigend fallen zu lassen.
+	for _, entry := range pending {
+		if !entry.placed {
+			emit(entry)
+		}
+	}
+
+	added := make([]string, 0, len(pending))
+	for _, entry := range pending {
+		added = append(added, entry.block.key)
+	}
+	return strings.Join(out, detectLineEnding(content)), added
+}
+
+// addMissingConfigEntries trägt fehlende Einstellungen in eine vorhandene INI
+// nach und meldet, welche das waren. Angefasst wird die Datei nur, wenn
+// wirklich etwas fehlt; vorher entsteht eine Sicherungskopie.
+func addMissingConfigEntries(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (read): %w", err)
+	}
+
+	updated, added := insertMissingEntries(string(content), configBlocksFromTemplate())
+	if len(added) == 0 {
+		return nil, nil
+	}
+
+	if err := os.WriteFile(path+configBackupSuffix, content, 0644); err != nil {
+		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (backup): %w", err)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (write): %w", err)
+	}
+	return added, nil
 }

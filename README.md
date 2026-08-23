@@ -188,6 +188,9 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-autocq` | Measure the CQ per file — **on by default**; set `autoCQ=false` in the config to disable |
 | `-noautocq` | Disable Auto-CQ for this run |
 | `-cq NN` | Force a fixed CQ (H.265 1–51, AV1 1–63) |
+| `-cropcheck` | Show where black bars **would** be cut — writes a picture, converts nothing |
+| `-crop` | Cut the black bars off letterboxed video — **off by default**, see [what it changes](#crop) |
+| `-nocrop` | Keep the black bars for this run |
 | `-keep` | Keep the originals exactly where they are |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-json` | Report progress as **JSON lines on stdout** — for front-ends and scripts ([details](TECHNICAL.md#json-events)) |
@@ -226,9 +229,11 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 <a id="apple"></a>
 <a id="cpu-mode"></a>
 <a id="davinci"></a>
+<a id="crop"></a>
 
 | Mode | What it's for |
 |---|---|
+| ✂️ **Auto-crop** (`-crop`, `-cropcheck`) | Cuts the black bars off letterboxed video. **Off by default, and what it does for you flips with Auto-CQ:** at a fixed CQ a quarter of the frame in bars makes the file ~6 % smaller and the encode 19 % faster; with Auto-CQ on, files come out *larger* — because the bars had been flattering the quality measurement, so letterboxed sources were quietly landing below the target you set. Bars are found from five samples across the film and nothing is cut unless every usable sample agrees. Run `-cropcheck` first: it draws the proposed cut on the full frame and converts nothing. |
 | 🔮 **AV1** (`-av1`) | Switches to `av1_nvenc` (RTX 40+). Reaches H.265 quality at noticeably smaller sizes; Auto-CQ measures it on its own calibrated scale. 10-bit and HDR pass-through included. H.265 stays the default. **[Details →](TECHNICAL.md#av1-depth)** |
 | 📱 **MP4** (`-mp4`) and **8-bit** (`-8bit`) | An `.mp4` tagged `hvc1` with AAC and faststart — what the iOS Photos app, smart TVs and browsers actually accept. An already-converted file is repackaged losslessly, not encoded twice. `-8bit` is the rescue for older devices that reject 10-bit. **[Details →](TECHNICAL.md#mp4-depth)** |
 | 💻 **CPU mode** (`-cpu`) | Encodes on the processor (libx265, or SVT-AV1 with `-av1`) so the tool works without an NVIDIA card. Everything else stays identical. It's not a quality upgrade — at the default preset it lands where your GPU already is. **[Details and the honest numbers →](TECHNICAL.md#cpu-depth)** |

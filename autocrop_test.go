@@ -48,39 +48,123 @@ func TestParseCropDetectRejectsGarbage(t *testing.T) {
 	}
 }
 
-// TestCropUnionKeepsEverySample ist die Sicherheitsregel der Erkennung:
-// die Vereinigung mehrerer Stichproben lässt lieber schwarze Zeilen stehen,
-// als Bildinhalt zu opfern, den nur EINE Probe gesehen hat.
-func TestCropUnionKeepsEverySample(t *testing.T) {
-	// Zwei Proben, jede sieht Bildinhalt, den die andere nicht sieht:
-	// Probe A reicht weiter nach unten (bis 940), Probe B weiter nach oben
-	// (ab 100). Die Vereinigung muss beide Enden abdecken, also 100 bis 940.
-	unten := cropRect{w: 1920, h: 800, x: 0, y: 140} // 140 … 940
-	oben := cropRect{w: 1920, h: 780, x: 0, y: 100}  // 100 … 880
-	got := unten.union(oben)
-	want := cropRect{w: 1920, h: 840, x: 0, y: 100} // 100 … 940
+// TestCropOutlierIsOutvoted ist der Fall, der den Nutzer 2026-08-23 einen
+// schiefen Film gekostet hat: im Testfilm "Exodus" blitzt in EINER von neun
+// Proben ein Copyright-Logo im unteren Balken auf. Früher genügte das, um den
+// unteren Schnitt um 210 Pixel zu verkürzen — oben wurde geschnitten, unten
+// blieb ein dicker Balken stehen. Die Mehrheit muss den Ausreißer überstimmen.
+func TestCropOutlierIsOutvoted(t *testing.T) {
+	const w, h = 3840, 2160
+	samples := make([]cropRect, 0, 9)
+	for i := 0; i < 8; i++ {
+		samples = append(samples, cropRect{w: w, h: 1600, x: 0, y: 280})
+	}
+	// Die Probe mit dem Logo: unten bleiben nur 70 px Rand.
+	samples = append(samples, cropRect{w: w, h: 1810, x: 0, y: 280})
+
+	got, why := symmetricCropFromSamples(samples, w, h)
+	if why != "" {
+		t.Fatalf("unerwartet abgelehnt: %s", why)
+	}
+	want := cropRect{w: w, h: 1600, x: 0, y: 280}
 	if got != want {
-		t.Errorf("union = %+v, erwartet %+v — die Vereinigung muss BEIDE Bereiche enthalten", got, want)
-	}
-	// Und sie darf nie kleiner sein als eine der Proben.
-	if got.h < unten.h || got.h < oben.h {
-		t.Errorf("union ist kleiner als eine Einzelprobe: %+v", got)
-	}
-	// Der obere Rand der einen und der untere der anderen müssen drinliegen.
-	if got.y > oben.y || got.y+got.h < unten.y+unten.h {
-		t.Errorf("union %+v schneidet eine der Proben an", got)
+		t.Errorf("= %+v, erwartet %+v — ein einzelnes Logo darf nicht entscheiden", got, want)
 	}
 }
 
-// TestCropUnionWithEmpty: das leere Rechteck ist der Startwert der Schleife
-// und darf das erste echte Ergebnis nicht verfälschen.
-func TestCropUnionWithEmpty(t *testing.T) {
-	echt := cropRect{w: 1920, h: 816, x: 0, y: 132}
-	if got := (cropRect{}).union(echt); got != echt {
-		t.Errorf("leer.union(echt) = %+v, erwartet %+v", got, echt)
+// TestCropResultIsAlwaysSymmetric: Letterbox sitzt mittig. Ein Ergebnis, das
+// oben mehr wegnimmt als unten, ist immer ein Fehler — auch wenn die Proben
+// sich uneinig sind, muss das Bild in der Mitte bleiben.
+func TestCropResultIsAlwaysSymmetric(t *testing.T) {
+	const w, h = 1920, 1080
+	// Leicht unterschiedliche Ränder, alle innerhalb der Toleranz:
+	// oben 132/134, unten 136/134 — typische Rundungsreste von cropdetect.
+	samples := []cropRect{
+		{w: w, h: 812, x: 0, y: 132},
+		{w: w, h: 810, x: 0, y: 134},
+		{w: w, h: 808, x: 0, y: 134},
+		{w: w, h: 812, x: 0, y: 132},
+		{w: w, h: 810, x: 0, y: 134},
 	}
-	if got := echt.union(cropRect{}); got != echt {
-		t.Errorf("echt.union(leer) = %+v, erwartet %+v", got, echt)
+	got, why := symmetricCropFromSamples(samples, w, h)
+	if why != "" {
+		t.Fatalf("unerwartet abgelehnt: %s", why)
+	}
+	top, bottom := got.y, h-got.h-got.y
+	if top != bottom {
+		t.Errorf("oben %d, unten %d — der Schnitt muss symmetrisch sein (%+v)", top, bottom, got)
+	}
+	left, right := got.x, w-got.w-got.x
+	if left != right {
+		t.Errorf("links %d, rechts %d — der Schnitt muss symmetrisch sein (%+v)", left, right, got)
+	}
+}
+
+// TestCropChangingFormatIsLeftAlone ist die Notbremse: Filme mit wechselndem
+// Bildformat (die IMAX-Szenen in "Dark Knight" oder "Interstellar") haben in
+// einem Teil des Films wirklich ein höheres Bild. Hier darf NICHT geschnitten
+// werden — sonst gehen genau diese Szenen oben und unten verloren.
+func TestCropChangingFormatIsLeftAlone(t *testing.T) {
+	const w, h = 3840, 2160
+	samples := []cropRect{
+		{w: w, h: 1600, x: 0, y: 280}, // 2.40:1
+		{w: w, h: 1600, x: 0, y: 280},
+		{w: w, h: 1600, x: 0, y: 280},
+		{w: w, h: 1600, x: 0, y: 280},
+		{w: w, h: 1600, x: 0, y: 280},
+		{w: w, h: 2020, x: 0, y: 70}, // IMAX-Szene, deutlich höher
+		{w: w, h: 2020, x: 0, y: 70},
+		{w: w, h: 2020, x: 0, y: 70},
+		{w: w, h: 2020, x: 0, y: 70},
+	}
+	got, why := symmetricCropFromSamples(samples, w, h)
+	if why == "" {
+		t.Errorf("wurde geschnitten (%+v) — bei wechselndem Bildformat muss die "+
+			"Erkennung die Finger stillhalten", got)
+	}
+	if !got.isFullFrame(w, h) {
+		t.Errorf("= %+v, erwartet das Vollbild", got)
+	}
+}
+
+// TestCropSidesAreDetected: Pillarbox (Balken links und rechts) muss genauso
+// erkannt werden wie Letterbox — 4:3-Material in einem 16:9-Rahmen.
+func TestCropSidesAreDetected(t *testing.T) {
+	const w, h = 1920, 1080
+	samples := make([]cropRect, 0, 5)
+	for i := 0; i < 5; i++ {
+		samples = append(samples, cropRect{w: 1440, h: h, x: 240, y: 0})
+	}
+	got, why := symmetricCropFromSamples(samples, w, h)
+	if why != "" {
+		t.Fatalf("unerwartet abgelehnt: %s", why)
+	}
+	want := cropRect{w: 1440, h: h, x: 240, y: 0}
+	if got != want {
+		t.Errorf("= %+v, erwartet %+v", got, want)
+	}
+}
+
+// TestCropNoSamplesKeepsFullFrame: ohne brauchbare Probe wird nicht geraten.
+func TestCropNoSamplesKeepsFullFrame(t *testing.T) {
+	got, why := symmetricCropFromSamples(nil, 1920, 1080)
+	if why == "" {
+		t.Error("ohne Proben muss ein Grund genannt werden")
+	}
+	if !got.isFullFrame(1920, 1080) {
+		t.Errorf("= %+v, erwartet das Vollbild", got)
+	}
+}
+
+// TestMedianOfIgnoresOutliers sichert den Kern der Mehrheitsbildung: ein
+// einzelner Ausreißer darf den Mittelwert nicht verschieben.
+func TestMedianOfIgnoresOutliers(t *testing.T) {
+	if got := medianOf([]int{280, 280, 280, 280, 70}); got != 280 {
+		t.Errorf("medianOf = %d, erwartet 280", got)
+	}
+	// Bei gerader Anzahl der kleinere der beiden mittleren: weniger schneiden.
+	if got := medianOf([]int{100, 140}); got != 100 {
+		t.Errorf("medianOf = %d, erwartet 100 (den kleineren)", got)
 	}
 }
 

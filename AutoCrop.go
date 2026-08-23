@@ -36,7 +36,7 @@ package main
 // eingestellt. Der Schnitt macht die Messung ehrlich; der Encoder gibt danach
 // die Bitrate aus, die das Ziel tatsächlich verlangt.
 //
-// Der Suchlauf selbst kostet rund 1 s pro Datei.
+// Der Suchlauf selbst kostet rund 2 s pro Datei (neun Stichproben).
 
 import (
 	"context"
@@ -45,6 +45,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -57,9 +58,29 @@ const (
 	// cropDetectSamples ist die Zahl der Stichproben über die Laufzeit.
 	// Eine einzige Probe reicht nachweislich NICHT: an einer Schwarzblende
 	// liefert cropdetect ein unbrauchbares Ergebnis (gemessen 2026-08-23 an
-	// einem Video mit 8 s Schwarzblende am Anfang). Fünf Proben kosten rund
-	// 1 s und machen genau diesen Fall harmlos.
-	cropDetectSamples = 5
+	// einem Video mit 8 s Schwarzblende am Anfang).
+	//
+	// Neun statt der früheren fünf, seit über die Proben eine MEHRHEIT
+	// gebildet wird (siehe symmetricCropFromSamples): eine Mehrheit aus fünf
+	// Stimmen kippt schon bei zwei Ausreißern. Neun Proben kosten rund zwei
+	// Sekunden pro Datei und machen die Entscheidung spürbar ruhiger.
+	cropDetectSamples = 9
+
+	// cropEdgeTolerancePx: Randbreiten, die sich um höchstens so viele Pixel
+	// unterscheiden, gelten als derselbe Wert. cropdetect rundet selbst auf
+	// gerade Maße, und ein um ein Pixel versetztes Bild ist kein anderer
+	// Schnitt, sondern derselbe mit Rundungsrest.
+	cropEdgeTolerancePx = 4
+
+	// cropMajorityPercent ist der Anteil der Stichproben, der sich über eine
+	// Kante einig sein muss, damit überhaupt geschnitten wird.
+	//
+	// Das ist die Notbremse für Filme mit wechselndem Bildformat — etwa die
+	// IMAX-Szenen in "Dark Knight" oder "Interstellar", wo das Bild in einem
+	// Teil des Films wirklich höher ist. Ein einzelnes Logo im Balken wird von
+	// zwei Dritteln locker überstimmt; ein echter Formatwechsel nicht, und
+	// dann bleibt das Bild lieber ganz stehen.
+	cropMajorityPercent = 67
 
 	// cropDetectWindowSec ist die Länge einer Stichprobe.
 	cropDetectWindowSec = 4.0
@@ -171,22 +192,108 @@ func (c cropRect) describe(srcW, srcH int) string {
 	return strings.Join(parts, ", ") + " px"
 }
 
-// union legt zwei Rechtecke übereinander und liefert das kleinste, das BEIDE
-// enthält. Das ist die Sicherheitsregel der ganzen Erkennung: sieht auch nur
-// eine Stichprobe an einer Stelle Bildinhalt, bleibt diese Stelle stehen.
-// Lieber ein paar schwarze Zeilen mitschleppen als einen Kopf abschneiden.
-func (c cropRect) union(o cropRect) cropRect {
-	if !c.valid() {
-		return o
+// cropEdges sind die vier Randbreiten eines Vorschlags in Pixeln.
+//
+// Für die Mehrheitsbildung ist das die richtige Sicht: verglichen werden muss,
+// wie DICK der Rand an einer Kante ist — nicht, wo ein Rechteck liegt.
+type cropEdges struct {
+	top, bottom, left, right int
+}
+
+// edgesOf rechnet ein Rechteck in seine vier Randbreiten um.
+func edgesOf(r cropRect, srcW, srcH int) cropEdges {
+	return cropEdges{
+		top:    r.y,
+		bottom: srcH - r.h - r.y,
+		left:   r.x,
+		right:  srcW - r.w - r.x,
 	}
-	if !o.valid() {
-		return c
+}
+
+// medianOf liefert den mittleren Wert einer Stichprobenreihe. Bei gerader
+// Anzahl wird der kleinere der beiden mittleren genommen — das schneidet im
+// Zweifel weniger weg.
+func medianOf(values []int) int {
+	sorted := append([]int(nil), values...)
+	sort.Ints(sorted)
+	return sorted[(len(sorted)-1)/2]
+}
+
+// agreeingCount zählt, wie viele Werte höchstens cropEdgeTolerancePx vom
+// Bezugswert abweichen — also wie groß die Mehrheit für ihn ist.
+func agreeingCount(values []int, ref int) int {
+	agreeing := 0
+	for _, v := range values {
+		diff := v - ref
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= cropEdgeTolerancePx {
+			agreeing++
+		}
 	}
-	left := min(c.x, o.x)
-	top := min(c.y, o.y)
-	right := max(c.x+c.w, o.x+o.w)
-	bottom := max(c.y+c.h, o.y+o.h)
-	return cropRect{w: right - left, h: bottom - top, x: left, y: top}
+	return agreeing
+}
+
+// symmetricCropFromSamples verdichtet die Stichproben zu EINEM Schnitt.
+//
+// Hier stecken die beiden Regeln, um die es bei Auto-Crop eigentlich geht.
+// Beide stammen aus einem echten Fehlerfall, keine ist theoretisch gemeint.
+//
+// MEHRHEIT statt Vereinigung. Früher genügte eine einzige Probe, die an einer
+// Stelle Bildinhalt sah, um diese Stelle stehen zu lassen. Das klingt sicher,
+// war es aber nicht: im Testfilm "Exodus" blitzt in einer von fünf Proben ein
+// Copyright-Logo im unteren Balken auf. Der Schnitt blieb daraufhin unten
+// 210 Pixel zu kurz, und das Bild saß im fertigen Film sichtbar schief.
+// Jetzt entscheidet die Mehrheit, und ein einzelnes Logo wird überstimmt.
+//
+// SYMMETRIE. Letterbox und Pillarbox sitzen immer mittig — das Bild steht in
+// der Mitte seines Rahmens. Ein Schnitt, der oben mehr wegnimmt als unten, ist
+// deshalb kein Sonderfall, sondern ein Fehler. Beide Seiten bekommen den
+// KLEINEREN der beiden Werte: das Ergebnis ist mittig, und im Zweifel bleibt
+// lieber eine schwarze Zeile stehen, als dass Bild verloren geht.
+func symmetricCropFromSamples(samples []cropRect, srcW, srcH int) (cropRect, string) {
+	full := fullFrame(srcW, srcH)
+	if len(samples) == 0 {
+		return full, "detection found nothing usable"
+	}
+
+	tops := make([]int, 0, len(samples))
+	bottoms := make([]int, 0, len(samples))
+	lefts := make([]int, 0, len(samples))
+	rights := make([]int, 0, len(samples))
+	for _, s := range samples {
+		e := edgesOf(s, srcW, srcH)
+		tops = append(tops, e.top)
+		bottoms = append(bottoms, e.bottom)
+		lefts = append(lefts, e.left)
+		rights = append(rights, e.right)
+	}
+
+	// Aufgerundet, damit die Schwelle bei kleinen Stichprobenzahlen nicht
+	// stillschweigend nach unten rutscht.
+	needed := (len(samples)*cropMajorityPercent + 99) / 100
+	for _, edge := range [][]int{tops, bottoms, lefts, rights} {
+		if agreeingCount(edge, medianOf(edge)) < needed {
+			return full, "picture size keeps changing — leaving it alone"
+		}
+	}
+
+	vertical := max(0, min(medianOf(tops), medianOf(bottoms)))
+	horizontal := max(0, min(medianOf(lefts), medianOf(rights)))
+
+	// Gerade Ränder: sonst biegt makeEven die Maße hinterher gerade und
+	// zerstört dabei genau die Symmetrie, die hier hergestellt wurde.
+	// Abrunden lässt im Zweifel eine Zeile stehen.
+	vertical -= vertical % 2
+	horizontal -= horizontal % 2
+
+	return cropRect{
+		w: srcW - 2*horizontal,
+		h: srcH - 2*vertical,
+		x: horizontal,
+		y: vertical,
+	}, ""
 }
 
 // makeEven rundet das Rechteck auf gerade Maße ab — ungerade Breiten/Höhen
@@ -306,9 +413,12 @@ func detectCropRect(ctx context.Context, path string, srcW, srcH int, durationSe
 		return full, "source dimensions unknown"
 	}
 
+	// Erst ALLE Proben einsammeln, dann entscheiden. Früher brach die Schleife
+	// ab, sobald eine Probe das volle Bild sah — unter der Vereinigungsregel
+	// war das richtig, unter der Mehrheitsregel wäre es das Gegenteil: eine
+	// einzelne Probe darf nicht mehr für alle sprechen.
 	offsets := cropSampleOffsets(durationSec, cropDetectSamples)
-	var combined cropRect
-	usable := 0
+	samples := make([]cropRect, 0, len(offsets))
 	for _, off := range offsets {
 		if ctx.Err() != nil {
 			return full, "cancelled"
@@ -323,18 +433,14 @@ func detectCropRect(ctx context.Context, path string, srcW, srcH int, durationSe
 			// Ein Vorschlag, der über den Bildrand hinausragt, ist kaputt.
 			continue
 		}
-		usable++
-		combined = combined.union(r)
-		if combined.isFullFrame(srcW, srcH) {
-			// Eine Probe sieht das volle Bild — dann gibt es keine
-			// durchgehenden Balken und weitere Proben ändern daran nichts.
-			return full, "no bars"
-		}
+		samples = append(samples, r)
 	}
 
-	if usable == 0 {
-		return full, "detection found nothing usable"
+	combined, why := symmetricCropFromSamples(samples, srcW, srcH)
+	if why != "" {
+		return full, why
 	}
+
 	combined = combined.makeEven()
 	if !combined.fitsInside(srcW, srcH) {
 		return full, "detected rectangle outside the frame"

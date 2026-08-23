@@ -180,10 +180,20 @@ CONVERSION OPTIONS
                  makes the measurement honest, and the encoder then
                  spends the bitrate the target actually asked for.
                  Off unless you ask for it (or set autoCrop=true).
-                 The bars are looked for in five samples spread
-                 across the film, and nothing is cut unless every
-                 usable sample agrees - a single sample landing on a
-                 fade to black would otherwise propose nonsense.
+                 The bars are looked for in nine samples spread
+                 across the film, and the MAJORITY decides. A logo
+                 flashing up inside a bar in a single sample no
+                 longer holds the whole cut back - that used to
+                 leave the picture sitting visibly off-centre.
+                 The cut is always symmetric: letterbox and
+                 pillarbox sit centred, so a cut taking more off
+                 the top than the bottom is always a mistake.
+                 If the samples genuinely disagree - a film that
+                 changes its aspect ratio part-way through, like
+                 the IMAX scenes in some blockbusters - nothing is
+                 cut at all, because those scenes really are taller.
+                 Bars on the sides, or on all four edges, are
+                 handled the same way.
                  Cutting moves the scaling onto the processor,
                  because the graphics card's scaler cannot crop.
                  Decoding stays on the card.

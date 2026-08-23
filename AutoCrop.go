@@ -65,9 +65,20 @@ const (
 	cropDetectWindowSec = 4.0
 
 	// cropDetectLimit ist die Schwelle, ab der ein Pixel als "nicht schwarz"
-	// gilt (0-255). 24 ist der FFmpeg-Standard und hat in der Messreihe auch
-	// an extrem dunklem HDR-Material keinen Fehlalarm erzeugt.
-	cropDetectLimit = 24
+	// gilt — als ANTEIL des Wertebereichs (0.0 bis 1.0), nicht als feste Zahl.
+	//
+	// Das ist keine Geschmacksfrage, sondern Pflicht: FFmpeg rechnet nur eine
+	// Fließkomma-Angabe auf die Bittiefe des Videos um. Eine ganze Zahl nimmt
+	// es wörtlich, und dann ist die Schwelle an 10-Bit-Material zu tief:
+	// Schwarz liegt dort bei 64, die frühere feste 24 also DARUNTER. Jede
+	// schwarze Zeile galt damit als Bildinhalt, und Auto-Crop hat an HDR-Filmen
+	// (die immer mindestens 10 Bit haben) NIE einen Balken gefunden — ohne
+	// Fehlermeldung, mit der beruhigenden Auskunft "keeping the full frame".
+	// Gemessen 2026-08-23 an drei 4K-HDR-Dateien, alle drei blind.
+	//
+	// 24/255 ist der FFmpeg-Standard, ausgedrückt als Anteil: an 8-Bit ergibt
+	// das wieder exakt 24 (Altmaterial bleibt bitgleich), an 10-Bit 96.
+	cropDetectLimit = 24.0 / 255.0
 
 	// cropDetectRound: erkannte Maße werden auf ein Vielfaches hiervon
 	// abgerundet. 2 ist das Minimum, das Encoder verlangen (gerade Maße).
@@ -255,6 +266,16 @@ func cropSampleOffsets(durationSec float64, samples int) []float64 {
 	return offsets
 }
 
+// cropDetectFilter baut den FFmpeg-Filter der Erkennung.
+//
+// Eigene Funktion, damit eine Prüfung den fertigen Text sehen kann: der Fehler,
+// den es hier zu verhindern gilt, steckt nicht in der Logik, sondern in der
+// Schreibweise EINER Zahl (siehe cropDetectLimit).
+func cropDetectFilter() string {
+	return fmt.Sprintf("cropdetect=limit=%.5f:round=%d:reset=0",
+		cropDetectLimit, cropDetectRound)
+}
+
 // runCropDetectWindow misst ein einzelnes Fenster.
 func runCropDetectWindow(ctx context.Context, path string, offsetSec float64) (cropRect, bool) {
 	args := []string{
@@ -263,7 +284,7 @@ func runCropDetectWindow(ctx context.Context, path string, offsetSec float64) (c
 		"-t", strconv.FormatFloat(cropDetectWindowSec, 'f', 3, 64),
 		"-i", path,
 		"-map", "0:V:0",
-		"-vf", fmt.Sprintf("cropdetect=limit=%d:round=%d:reset=0", cropDetectLimit, cropDetectRound),
+		"-vf", cropDetectFilter(),
 		"-an", "-sn", "-f", "null", "-",
 	}
 	// cropdetect schreibt sein Ergebnis nach stderr; CombinedOutput fängt beides.

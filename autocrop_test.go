@@ -250,3 +250,36 @@ func TestAutoCropDefaultsOff(t *testing.T) {
 		t.Error("autoCrop muss in der Voreinstellung ausgeschaltet sein")
 	}
 }
+
+// TestCropDetectLimitIsScaledByBitDepth sichert den Fehler ab, der Auto-Crop
+// bis 1.21.0 an JEDEM HDR-Film blind gemacht hat.
+//
+// FFmpeg rechnet die Schwarz-Schwelle nur dann auf die Bittiefe des Videos um,
+// wenn sie als Anteil zwischen 0 und 1 ankommt. Eine ganze Zahl nimmt es
+// wörtlich — und 24 liegt unter dem 10-Bit-Schwarzwert 64, weshalb dort jede
+// schwarze Zeile als Bildinhalt galt und nie ein Balken gefunden wurde.
+//
+// Der Fehler war von außen unsichtbar: das Programm meldete keinen Absturz,
+// sondern in aller Ruhe "keeping the full frame". Genau deshalb steht hier
+// eine Prüfung auf die Schreibweise und nicht bloß auf den Zahlenwert.
+func TestCropDetectLimitIsScaledByBitDepth(t *testing.T) {
+	if cropDetectLimit <= 0 || cropDetectLimit >= 1 {
+		t.Fatalf("cropDetectLimit = %v — muss zwischen 0 und 1 liegen, sonst "+
+			"skaliert FFmpeg sie nicht auf die Bittiefe und Auto-Crop ist an "+
+			"10-Bit-Material blind", cropDetectLimit)
+	}
+
+	filter := cropDetectFilter()
+	if !strings.Contains(filter, "limit=0.") {
+		t.Errorf("Filter %q — die Schwelle muss als Fließkomma geschrieben "+
+			"sein; eine ganze Zahl nimmt FFmpeg wörtlich", filter)
+	}
+
+	// Der Anteil muss am gewohnten 8-Bit-Verhalten nichts ändern: 24/255 ergibt
+	// dort wieder 24. Wandert dieser Wert, ändert sich das Ergebnis für alles
+	// bisher konvertierte Material — das wäre eine ganz andere Entscheidung.
+	if got := cropDetectLimit * 255; got < 23.5 || got > 24.5 {
+		t.Errorf("Schwelle entspricht an 8-Bit %.1f statt 24 — Altmaterial "+
+			"würde anders geschnitten als bisher", got)
+	}
+}

@@ -182,7 +182,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
-| `-h265` | Encode **H.265** even if the config says `encoder=av1` |
+| `-h265` | Force **H.265** when `-av1` appears earlier on the same command line (the later switch wins) |
 | `-mp4` | Write an **MP4 that plays almost everywhere** (H.265/`hvc1` + AAC + faststart). *(`-apple` still works — it's the old name)* |
 | `-8bit` | Encode in **8 bit** instead of 10 bit, for older devices that reject "Main 10" |
 | `-cpu` | Encode on the **processor** — no NVIDIA card needed (libx265, or SVT-AV1 with `-av1`) |

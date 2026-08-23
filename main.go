@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.22.0"
+const appVersion = "1.22.1"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1006,10 +1006,15 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			cfg.av1 = true
 			continue
 		}
-		// Gegenstück zu -av1, für den Fall encoder=av1 in der INI. Dieselbe
-		// Überlegung wie bei -noshutdown: eine Oberfläche kann Argumente nur
-		// mitgeben, nicht wegnehmen — ohne diesen Schalter ließe sich H.265
-		// nicht wählen, wenn die Datei AV1 vorgibt.
+		// Gegenstück zu -av1: der spätere Schalter gewinnt. Gedacht für eine
+		// Befehlszeile, in der -av1 schon steht — etwa eine "Senden an"-
+		// Verknüpfung, die man für einen Lauf überstimmen will, ohne sie zu
+		// ändern.
+		//
+		// Ausdrücklich KEIN Gegenstück zur Konfigurationsdatei: die hat gar
+		// keinen Schlüssel, der AV1 einschaltet (encoder kennt nur "nvidia"
+		// und "cpu"). Diese Notiz steht hier, weil die erste Fassung dieses
+		// Schalters genau das behauptet hat.
 		if strings.EqualFold(arg, "-h265") || strings.EqualFold(arg, "-hevc") {
 			cfg.av1 = false
 			continue

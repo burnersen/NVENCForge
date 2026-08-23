@@ -877,12 +877,45 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	bitrateKbps := determineBitrateKbps(stats)
 	doScale := needsScaling(cfg, stats.Width, stats.Height)
 
+	// Auto-Crop (-crop / -cropcheck, Voreinstellung aus). Die Suche steht hier
+	// oben, weil der Schnitt mitentscheidet, WO verkleinert wird — und das muss
+	// vor den Encoder-Optionen feststehen.
+	//
+	// Sie läuft damit auch bei Dateien, die am Ende nur umgepackt werden. Das
+	// kostet dort rund eine Sekunde umsonst. Der Preis ist bewusst gewählt: die
+	// Alternative wäre, die Umpack-Bedingung hier ein zweites Mal zu formulieren,
+	// und zwei Kopien derselben Regel laufen früher oder später auseinander.
+	crop := cropRect{}
+	if cfg.autoCrop {
+		detected, why := detectCropRect(ctx, filePath, stats.Width, stats.Height, stats.DurationSec)
+		switch {
+		case detected.isFullFrame(stats.Width, stats.Height):
+			if why == "" {
+				why = "no bars"
+			}
+			pInfo.Printf("%s Auto-crop: keeping the full frame (%s).\n",
+				pterm.LightMagenta("›"), why)
+		default:
+			crop = detected
+			pInfo.Printf("%s Auto-crop: black bars found — cutting %s → %s (about %.0f%% fewer pixels).\n",
+				pterm.LightMagenta("›"),
+				crop.describe(stats.Width, stats.Height),
+				pterm.LightCyan(fmt.Sprintf("%dx%d", crop.w, crop.h)),
+				crop.trimmedAreaPercent(stats.Width, stats.Height))
+		}
+		if cfg.cropCheckOnly {
+			reportCropCheck(ctx, filePath, crop, stats)
+			result.Skipped = true
+			return result
+		}
+	}
+
 	// Einmal je Datei entscheiden, wo verkleinert wird — und zwar HIER, vor den
 	// Encoder-Optionen: bleibt das Bild im Grafikspeicher, darf der Encoder kein
 	// -pix_fmt bekommen (siehe gpuFramesStayOnCard).
 	doDeint := videoIsInterlaced(stats)
 	hwaccelOpts := gpuDecodeArgs(stats)
-	gpuScale := gpuScaleUsable(hwaccelOpts, doScale, doDeint)
+	gpuScale := gpuScaleUsable(hwaccelOpts, doScale, doDeint, crop.valid())
 	gpuFramesStayOnCard = gpuScale && appSettings.casStrength <= 0
 	if gpuScale {
 		// Ohne dieses Ausgabeformat landen die entpackten Bilder sofort wieder
@@ -977,13 +1010,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			pInfo.Printf("%s Interlaced source (%s) — deinterlacing with bwdif.\n",
 				pterm.LightMagenta("›"), stats.FieldOrder)
 		}
-		filterChain := buildVideoFilter(doScale, doDeint, gpuScale)
+		filterChain := buildVideoFilter(doScale, doDeint, gpuScale, crop)
 		vfOpts = []string{"-vf", filterChain}
 		if gpuScale {
 			// Rückweg für den Fall, dass die Grafikkarte den Lauf abweist: eine
 			// Kette mit scale_cuda kann ohne Bilder im Grafikspeicher nicht
 			// laufen, der Rückfall muss sie also mit austauschen.
-			vfOptsCPU = []string{"-vf", buildVideoFilter(doScale, doDeint, false)}
+			vfOptsCPU = []string{"-vf", buildVideoFilter(doScale, doDeint, false, crop)}
 			pInfo.Printf("%s Scaling on the graphics card (Lanczos).\n",
 				pterm.LightMagenta("›"))
 		}
@@ -2198,7 +2231,15 @@ func needsScaling(cfg *AppConfig, w, h int) bool {
 // laufen kann. Voraussetzung ist, dass die Bilder überhaupt dort liegen (also
 // NVDEC das Entpacken übernimmt) und dass keine CPU-Filter davor müssen:
 // bwdif (Deinterlacing) rechnet auf dem Prozessor und bekäme keine Bilder.
-func gpuScaleUsable(hwaccelOpts []string, doScale, deinterlace bool) bool {
+// cropOnCard ist false, weil scale_cuda dieser FFmpeg-Fassung nicht zuschneiden
+// kann: ein aktiver Auto-Crop verlegt die Filterkette deshalb auf den Prozessor.
+// Das Entpacken bleibt trotzdem auf der Grafikkarte — nur das Verkleinern nicht.
+const cropOnCard = false
+
+func gpuScaleUsable(hwaccelOpts []string, doScale, deinterlace, cropping bool) bool {
+	if cropping && !cropOnCard {
+		return false
+	}
 	return len(hwaccelOpts) > 0 && doScale && !deinterlace
 }
 
@@ -2306,12 +2347,24 @@ func encoderInputFormatArgs() []string {
 	return []string{"-pix_fmt", encodePixFmt()}
 }
 
-func buildVideoFilter(doScale, deinterlace, gpuScale bool) string {
+func buildVideoFilter(doScale, deinterlace, gpuScale bool, crop cropRect) string {
 	// bwdif before any scaling: deinterlacing needs the original field
 	// structure. send_frame keeps the source frame rate (25i → 25p).
 	pre := ""
 	if deinterlace {
 		pre = "bwdif=mode=send_frame,"
+	}
+	// Auto-Crop steht VOR dem Verkleinern: so nutzt das Bild die Zielbreite
+	// voll aus und es wird nicht über die Balkenkante hinweg interpoliert
+	// (das verschmiert sonst die oberste und unterste Bildzeile).
+	//
+	// Der Schnitt zwingt die Kette auf den Prozessor: scale_cuda dieser
+	// FFmpeg-Fassung kann nicht zuschneiden, und ein crop_cuda gibt es nicht.
+	// gpuScaleUsable weiß das bereits — die Abfrage hier ist die Rückversicherung,
+	// damit ein künftiger Aufrufer keinen unlauffähigen Filtergraphen bauen kann.
+	if crop.valid() {
+		pre += crop.filterArg() + ","
+		gpuScale = false
 	}
 	if doScale && gpuScale {
 		return pre + buildGPUScaleChain()
@@ -2332,6 +2385,12 @@ func buildVideoFilter(doScale, deinterlace, gpuScale bool) string {
 				strconv.FormatFloat(appSettings.casStrength, 'f', -1, 64)
 		}
 		return pre + chain + ",format=" + encodePixFmt()
+	}
+	// Ohne Verkleinern sorgt sonst dieser Crop für gerade Maße. Nach einem
+	// Auto-Crop ist er überflüssig: makeEven hat das Rechteck bereits auf
+	// gerade Kantenlängen gebracht.
+	if crop.valid() {
+		return pre + "format=" + encodePixFmt()
 	}
 	return pre + "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=" + encodePixFmt()
 }

@@ -34,6 +34,8 @@ type AppConfig struct {
 	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
 	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
 	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
+	autoCrop       bool     // -crop: schwarze Balken erkennen und wegschneiden (Voreinstellung aus)
+	cropCheckOnly  bool     // -cropcheck: nur das Kontrollbild schreiben, NICHT konvertieren
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 
@@ -72,6 +74,7 @@ type AppSettings struct {
 	gpuDecode              bool
 	gpuDecodeMaxMbit       int
 	retireMode             string
+	autoCrop               bool
 }
 
 var appSettings = defaultAppSettings()
@@ -107,6 +110,7 @@ func defaultAppSettings() AppSettings {
 		gpuDecode:              true,
 		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
 		retireMode:             retireModeFolder,
+		autoCrop:               false,
 	}
 }
 
@@ -253,6 +257,7 @@ func defaultConfigStrings() map[string]string {
 		"gpuDecode":              strconv.FormatBool(d.gpuDecode),
 		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
 		"retireMode":             d.retireMode,
+		"autoCrop":               strconv.FormatBool(d.autoCrop),
 	}
 }
 
@@ -516,6 +521,12 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "autoCrop":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.autoCrop = b
+			} else {
+				bad(key, val)
+			}
 		case "gpuDecodeMaxMbit":
 			// Obergrenze 500 statt "beliebig": ein Tippfehler darf nicht dazu
 			// führen, dass die Schutzgrenze faktisch wegfällt. 1 = praktisch aus.
@@ -620,6 +631,25 @@ func writeDefaultAppConfig(path string) error {
 		`Videos larger than this are scaled down (short edge, in pixels).
 1080 is Full HD. Set 2160 to keep 4K material at 4K.
 The -original option ignores this for a single run.`)
+
+	configEntry("autoCrop", d.autoCrop, "true, false",
+		`Cut off the black bars of letterboxed video (a 21:9 film inside a
+16:9 frame, for example).
+What it does for you depends on how quality is decided:
+  With a fixed CQ, files get about 6 % smaller for a quarter of the
+  frame in bars, and the encode runs 19 % faster.
+  With Auto-CQ on (the default), files get LARGER, not smaller - and
+  that is the feature working, not failing. Auto-CQ measures quality
+  on the whole picture, and black bars flatter that measurement, so
+  letterboxed films have been getting less quality than you asked
+  for. Cutting the bars makes the measurement honest again.
+Off by default on purpose. The bars are detected from five samples
+across the film and NOTHING is cut unless every usable sample agrees,
+but no automatic detection is perfect - and a wrong cut is not
+visible in the result, only in what is missing from it.
+Use -cropcheck first: it writes a picture showing where the cut would
+go, without converting anything. The -crop option turns cutting on
+for a single run, -nocrop off.`)
 
 	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
 		`How much visible quality the automatic search aims for, on a scale

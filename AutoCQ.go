@@ -931,7 +931,10 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if chainUsesGPU(filterChain) {
 		hwaccel = append(hwaccel, "-hwaccel_output_format", "cuda")
 		// Ohne Deinterlacing gebaut — das schließt gpuScaleUsable ohnehin aus.
-		cpuChain = buildVideoFilter(doScale, false, false)
+		// Und ohne Auto-Crop: dass die Kette scale_cuda enthält, heißt
+		// zwangsläufig, dass nicht geschnitten wird (gpuScaleUsable gibt bei
+		// aktivem Schnitt false zurück, weil scale_cuda nicht zuschneiden kann).
+		cpuChain = buildVideoFilter(doScale, false, false, cropRect{})
 	}
 
 	// runAutoCQStep führt einen Messlauf aus und wiederholt ihn EINMAL ohne

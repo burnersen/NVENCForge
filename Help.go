@@ -164,6 +164,40 @@ CONVERSION OPTIONS
                  and ignores the configured CQ. The scale depends
                  on the codec (H.265 1-51; AV1 1-63 with -av1).
                  Example:  NVENCForge.exe -cq 28 video.mp4
+  -crop          Cut off the black bars of letterboxed video - a
+                 21:9 film sitting inside a 16:9 frame, for example.
+                 What you get out of it depends on how the quality
+                 is decided:
+                 With a fixed CQ (-cq NN) a quarter of the frame in
+                 bars makes the file about 6 % smaller and the
+                 encode 19 % faster, at unchanged picture quality.
+                 With Auto-CQ on - the default - files come out
+                 LARGER instead, and that is the point: Auto-CQ
+                 measures quality across the whole picture, and
+                 black bars flatter that measurement. Letterboxed
+                 films have therefore been getting less quality
+                 than the configured target. Cutting the bars off
+                 makes the measurement honest, and the encoder then
+                 spends the bitrate the target actually asked for.
+                 Off unless you ask for it (or set autoCrop=true).
+                 The bars are looked for in five samples spread
+                 across the film, and nothing is cut unless every
+                 usable sample agrees - a single sample landing on a
+                 fade to black would otherwise propose nonsense.
+                 Cutting moves the scaling onto the processor,
+                 because the graphics card's scaler cannot crop.
+                 Decoding stays on the card.
+  -cropcheck     Look for black bars and write a picture showing
+                 where the cut would go - and convert nothing.
+                 The picture sits next to the source as
+                 "<name>.cropcheck.png": three frames from the film,
+                 uncut, with a red line around what -crop would keep.
+                 Check that no picture content sits outside the line,
+                 then run the same files again with -crop.
+                 This is the safe way round: in the converted file
+                 you can no longer see what was cut away.
+  -nocrop        Keep the black bars for this run (overrides
+                 autoCrop=true in the config).
   -keep          Keep the original files where they are: after a
                  successful conversion they are NOT moved at all.
                  The output lives in its own folder, so nothing is
@@ -427,6 +461,9 @@ func printConsoleHelp() {
 	option("-cq NN", "force a fixed quality (H.265 1-51, AV1 1-63; lower = better)")
 	option("-noautocq", "switch the automatic quality search off for this run")
 	option("-autocq", "switch it on for this run (it is already on by default)")
+	option("-cropcheck", "show where black bars would be cut - converts nothing")
+	option("-crop", "cut black bars off letterboxed video (see -help for what it costs)")
+	option("-nocrop", "keep the black bars for this run")
 	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
 	option("-keep", "leave the originals exactly where they are")
 	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")

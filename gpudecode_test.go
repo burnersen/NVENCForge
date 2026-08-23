@@ -169,7 +169,7 @@ func TestBuildVideoFilterCASOff(t *testing.T) {
 	withGPUDecodeDefaults(t)
 
 	appSettings.casStrength = 0
-	aus := buildVideoFilter(true, false, false)
+	aus := buildVideoFilter(true, false, false, cropRect{})
 	if strings.Contains(aus, "cas") {
 		t.Errorf("casStrength=0 darf keinen cas-Filter erzeugen: %s", aus)
 	}
@@ -183,13 +183,13 @@ func TestBuildVideoFilterCASOff(t *testing.T) {
 	}
 
 	appSettings.casStrength = 0.4
-	an := buildVideoFilter(true, false, false)
+	an := buildVideoFilter(true, false, false, cropRect{})
 	if !strings.Contains(an, "cas=strength=0.4") {
 		t.Errorf("casStrength=0.4 fehlt in der Kette: %s", an)
 	}
 
 	// Ohne Skalierung gab es noch nie ein Nachschärfen — das bleibt so.
-	if got := buildVideoFilter(false, false, false); strings.Contains(got, "cas") {
+	if got := buildVideoFilter(false, false, false, cropRect{}); strings.Contains(got, "cas") {
 		t.Errorf("ohne Skalierung darf kein cas auftauchen: %s", got)
 	}
 }

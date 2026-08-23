@@ -138,7 +138,7 @@ func TestEightBitSwitch(t *testing.T) {
 	if got := buildX265OptsWithCQ(18, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "yuv420p10le") {
 		t.Errorf("x265-Vorgabe muss yuv420p10le bleiben: %v", got)
 	}
-	if f := buildVideoFilter(true, false, false); !strings.HasSuffix(f, ",format=p010le") {
+	if f := buildVideoFilter(true, false, false, cropRect{}); !strings.HasSuffix(f, ",format=p010le") {
 		t.Errorf("Filterkette endet auf %q, erwartet format=p010le", f)
 	}
 
@@ -159,10 +159,10 @@ func TestEightBitSwitch(t *testing.T) {
 	}
 	// Die Filterkette muss mitziehen: bliebe sie auf p010le, würde FFmpeg
 	// unnötig zweimal wandeln.
-	if f := buildVideoFilter(true, false, false); !strings.HasSuffix(f, ",format=yuv420p") {
+	if f := buildVideoFilter(true, false, false, cropRect{}); !strings.HasSuffix(f, ",format=yuv420p") {
 		t.Errorf("-8bit: Filterkette endet auf %q, erwartet format=yuv420p", f)
 	}
-	if f := buildVideoFilter(false, false, false); !strings.HasSuffix(f, ",format=yuv420p") {
+	if f := buildVideoFilter(false, false, false, cropRect{}); !strings.HasSuffix(f, ",format=yuv420p") {
 		t.Errorf("-8bit: Crop-Kette endet auf %q, erwartet format=yuv420p", f)
 	}
 }
@@ -179,7 +179,7 @@ func TestGPUScaleChain(t *testing.T) {
 
 	// Mit Nachschärfen: das Bild muss für cas zurück in den Arbeitsspeicher.
 	appSettings.casStrength = 0.4
-	chain := buildVideoFilter(true, false, true)
+	chain := buildVideoFilter(true, false, true, cropRect{})
 	if !strings.Contains(chain, "scale_cuda") || !strings.Contains(chain, "interp_algo=lanczos") {
 		t.Errorf("GPU-Kette fehlt oder skaliert nicht mit Lanczos: %q", chain)
 	}
@@ -192,7 +192,7 @@ func TestGPUScaleChain(t *testing.T) {
 
 	// Ohne Nachschärfen: das Bild bleibt oben, kein hwdownload.
 	appSettings.casStrength = 0
-	chain = buildVideoFilter(true, false, true)
+	chain = buildVideoFilter(true, false, true, cropRect{})
 	if strings.Contains(chain, "hwdownload") || strings.Contains(chain, "cas=") {
 		t.Errorf("ohne CAS darf die Kette den Grafikspeicher nicht verlassen: %q", chain)
 	}
@@ -206,7 +206,7 @@ func TestGPUScaleChain(t *testing.T) {
 
 	// 8 Bit heißt im Grafikspeicher nv12 — ein yuv420p gibt es dort nicht.
 	eightBitActive = true
-	chain = buildVideoFilter(true, false, true)
+	chain = buildVideoFilter(true, false, true, cropRect{})
 	if !strings.Contains(chain, "format=nv12") {
 		t.Errorf("-8bit auf der Karte braucht nv12: %q", chain)
 	}
@@ -227,23 +227,25 @@ func TestGPUScaleChain(t *testing.T) {
 }
 
 // TestGPUScaleUsable prüft die Vorbedingungen: ohne Bilder auf der Karte, ohne
-// Verkleinern oder mit Deinterlacing (bwdif rechnet auf dem Prozessor) darf
-// die GPU-Kette nicht gewählt werden.
+// Verkleinern, mit Deinterlacing (bwdif rechnet auf dem Prozessor) oder mit
+// Auto-Crop (scale_cuda kann nicht zuschneiden) darf die GPU-Kette nicht
+// gewählt werden.
 func TestGPUScaleUsable(t *testing.T) {
 	hw := []string{"-hwaccel", "cuda"}
 	cases := []struct {
-		name       string
-		hw         []string
-		scale, int bool
-		want       bool
+		name             string
+		hw               []string
+		scale, int, crop bool
+		want             bool
 	}{
-		{"alles passt", hw, true, false, true},
-		{"kein GPU-Entpacken", nil, true, false, false},
-		{"nichts zu verkleinern", hw, false, false, false},
-		{"interlaced braucht bwdif", hw, true, true, false},
+		{"alles passt", hw, true, false, false, true},
+		{"kein GPU-Entpacken", nil, true, false, false, false},
+		{"nichts zu verkleinern", hw, false, false, false, false},
+		{"interlaced braucht bwdif", hw, true, true, false, false},
+		{"Auto-Crop muss auf den Prozessor", hw, true, false, true, false},
 	}
 	for _, c := range cases {
-		if got := gpuScaleUsable(c.hw, c.scale, c.int); got != c.want {
+		if got := gpuScaleUsable(c.hw, c.scale, c.int, c.crop); got != c.want {
 			t.Errorf("%s: gpuScaleUsable = %v, erwartet %v", c.name, got, c.want)
 		}
 	}

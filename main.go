@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.20.0"
+const appVersion = "1.21.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -975,6 +975,7 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	var rest []string
 	explicitBitrate := false
 	sawAutoCQFlag, sawNoAutoCQ := false, false
+	sawCropFlag, sawNoCropFlag := false, false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if strings.EqualFold(arg, "-shutdown") {
@@ -1031,6 +1032,27 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		if strings.EqualFold(arg, "-noautocq") {
 			cfg.autoCQ = false
 			sawNoAutoCQ = true
+			continue
+		}
+		// Auto-Crop: wie bei Auto-CQ gewinnt das zuletzt genannte Flag, deshalb
+		// wird auch hier erst nach der Schleife gemeldet.
+		if strings.EqualFold(arg, "-crop") {
+			cfg.autoCrop = true
+			sawCropFlag = true
+			continue
+		}
+		if strings.EqualFold(arg, "-nocrop") {
+			cfg.autoCrop = false
+			cfg.cropCheckOnly = false
+			sawNoCropFlag = true
+			continue
+		}
+		// -cropcheck schaut nur nach und schreibt das Kontrollbild. Es setzt
+		// die Erkennung mit an, weil ohne sie nichts zu zeigen wäre.
+		if strings.EqualFold(arg, "-cropcheck") {
+			cfg.cropCheckOnly = true
+			cfg.autoCrop = true
+			sawCropFlag = true
 			continue
 		}
 		if strings.EqualFold(arg, "-cq") {
@@ -1145,6 +1167,19 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		// Konfigurierten ist eine Meldung wert.
 	case sawNoAutoCQ && (sawAutoCQFlag || appSettings.autoCQ):
 		pInfo.Println("Auto-CQ disabled for this run (-noautocq) — using the configured CQ.")
+	}
+	// Auto-Crop. Der Prüfmodus bekommt eine eigene, deutliche Zeile: er sieht
+	// aus wie ein normaler Lauf, konvertiert aber absichtlich nichts — das
+	// muss vor dem ersten Nichts-passiert-Moment gesagt sein.
+	switch {
+	case cfg.cropCheckOnly:
+		pInfo.Println("Crop check only: writing a picture of the proposed cut — no file is converted.")
+	case cfg.autoCrop && sawCropFlag:
+		pInfo.Println("Auto-crop enabled: black bars are detected and cut off.")
+	case cfg.autoCrop:
+		pInfo.Println("Auto-crop enabled via configuration: black bars are detected and cut off.")
+	case sawNoCropFlag && appSettings.autoCrop:
+		pInfo.Println("Auto-crop disabled for this run (-nocrop) — black bars are kept.")
 	}
 	// AV1 reaches H.265 quality at ~25-30% less bitrate, so the AV1 mode has
 	// its own (lower) caps. An explicit -NNNN always wins.
@@ -1984,6 +2019,7 @@ func main() {
 		maxBitrateKbps: appSettings.maxBitrate1080p,
 		autoShutdown:   appSettings.autoShutdown,
 		autoCQ:         appSettings.autoCQ,
+		autoCrop:       appSettings.autoCrop,
 	}
 	if cfg.autoShutdown {
 		pInfo.Println("Auto-shutdown enabled via configuration.")

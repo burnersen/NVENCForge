@@ -97,8 +97,12 @@ jobs:
           # refresh what is there instead of failing on the second attempt.
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
+            # --draft=false is not cosmetic: deleting a tag turns its release
+            # into a draft, and a draft is invisible to everyone but the owner.
+            # A rerun therefore has to publish it again, or the release quietly
+            # disappears from the releases page.
             Write-Host "Release $tag already exists - refreshing its notes and asset."
-            gh release edit $tag --title $title --notes-file release-notes.md
+            gh release edit $tag --title $title --notes-file release-notes.md --draft=false
             gh release upload $tag NVENCForge.exe --clobber
           } else {
             gh release create $tag NVENCForge.exe --title $title --notes-file release-notes.md

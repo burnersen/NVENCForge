@@ -36,7 +36,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Deliberately NOT go-version-file: the "go 1.22" line in go.mod is
+          # the oldest toolchain the sources compile with, not the one a
+          # release should ship. Following it would hand users binaries built
+          # by a Go that no longer gets security fixes - and this program
+          # fetches its FFmpeg over HTTPS, so that TLS stack matters.
+          go-version: 'stable'
           cache: true
 
       # A tag that disagrees with appVersion would ship an exe announcing the
@@ -73,14 +78,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          $size = (Get-Item NVENCForge.exe).Length
-          Write-Host "Publishing $tag with NVENCForge.exe ($size bytes)."
+          $title = "NVENCForge $tag"
+          Write-Host "Publishing $tag with NVENCForge.exe ($((Get-Item NVENCForge.exe).Length) bytes)."
+
+          # The release text is the annotated tag message - one source, written
+          # once, at the moment the version is cut. A tag without one is a
+          # mistake worth stopping for, not something to paper over with an
+          # empty release.
           $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
           if ([string]::IsNullOrWhiteSpace($notes)) {
-            # A lightweight tag carries no message - let GitHub summarise the
-            # commits instead of publishing an empty release.
-            gh release create $tag NVENCForge.exe --title "NVENCForge $tag" --generate-notes
+            Write-Host "::error::Tag $tag has no annotation - the release notes come from it. Create it with 'git tag -a'."
+            exit 1
+          }
+          $notes | Out-File -FilePath release-notes.md -Encoding utf8
+
+          # gh release view exits non-zero when the release does not exist yet.
+          # Re-running a release (a corrected workflow, a retried build) has to
+          # refresh what is there instead of failing on the second attempt.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists - refreshing its notes and asset."
+            gh release edit $tag --title $title --notes-file release-notes.md
+            gh release upload $tag NVENCForge.exe --clobber
           } else {
-            $notes | Out-File -FilePath release-notes.md -Encoding utf8
-            gh release create $tag NVENCForge.exe --title "NVENCForge $tag" --notes-file release-notes.md
+            gh release create $tag NVENCForge.exe --title $title --notes-file release-notes.md
           }

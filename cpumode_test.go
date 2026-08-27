@@ -153,6 +153,9 @@ func TestCPUAutoCQScales(t *testing.T) {
 		if sc.saturationSlope <= 0 || sc.climbToleranceFactor <= 0 || sc.maxStepDown <= 0 {
 			t.Errorf("%s: slope/factor/stepDown must all be positive", sc.codecLabel)
 		}
+		if sc.minGainPerStep <= 0 {
+			t.Errorf("%s: minGainPerStep must be positive", sc.codecLabel)
+		}
 	}
 
 	// The measured anchors themselves (VMAF 96 sits at x265 CRF ~18; the SVT

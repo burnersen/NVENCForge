@@ -143,7 +143,7 @@ Before each encode, a short per-file analysis runs — typically well under a mi
 2. **Probe.** Those windows are test-encoded at two anchor quality levels using *exactly* the settings of the real encode, then scored with **VMAF** (Netflix's perceptual quality metric, 0–100, where ~95+ is visually transparent to most viewers).
 3. **Pick & verify.** The CQ that hits the target (default: VMAF 98) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
 
-Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum. On such files that routinely saves a third of the size at no visible cost.
+Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum. On such files that routinely saves a third of the size at no visible cost. And it never buys quality nobody can see: once one more CQ step gains too little VMAF to justify the space it costs, the search stops there.
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 

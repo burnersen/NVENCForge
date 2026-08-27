@@ -363,6 +363,52 @@ func TestAutoCQSaturated(t *testing.T) {
 	}
 }
 
+func TestAutoCQGainTooSmall(t *testing.T) {
+	cases := []struct {
+		name              string
+		sc                autoCQScale
+		cq                int
+		verified, vmafLow float64
+		want              bool
+	}{
+		// The real case that motivated the brake (2026-08-27, 50 fps source):
+		// anchor CQ26 = 97.12, pick 25 measured 97.40 → 0.28/step. The old code
+		// stepped on to CQ 24 for +0.35 VMAF at +15% file size.
+		{"h265 step does not pay", hevcAutoCQScale, 25, 97.40, 97.12, true},
+		{"h265 step pays", hevcAutoCQScale, 25, 97.60, 97.12, false},            // 0.48/step
+		{"h265 just below threshold", hevcAutoCQScale, 24, 97.70, 97.12, true},  // 0.29/step
+		{"h265 just above threshold", hevcAutoCQScale, 24, 97.76, 97.12, false}, // 0.32/step
+		// A saturated curve trips this test too — autoDetectCQ checks the
+		// saturation brake FIRST, so a dead curve keeps its own message and its
+		// plateau climb. This case only documents the overlap.
+		{"h265 saturated also true", hevcAutoCQScale, 24, 96.40, 96.37, true},
+		{"h265 pick at low anchor", hevcAutoCQScale, 26, 97.12, 97.12, false}, // guard: only below anchor
+		{"h265 pick above anchors", hevcAutoCQScale, 30, 94.73, 97.12, false},
+		// AV1: half the H.265 threshold, because one AV1 step is worth about
+		// half a VMAF step.
+		{"av1 step does not pay", av1AutoCQScale, 22, 95.80, 95.53, true}, // 0.135/step
+		{"av1 step pays", av1AutoCQScale, 22, 95.90, 95.53, false},        // 0.185/step
+		{"av1 pick at low anchor", av1AutoCQScale, 24, 95.53, 95.53, false},
+	}
+	for _, c := range cases {
+		if got := autoCQGainTooSmall(c.sc, c.cq, c.verified, c.vmafLow); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAutoCQMinGainAboveSaturation guards the ordering the two brakes rely on:
+// the thrift brake must be the wider net, otherwise it could never fire on a
+// curve the saturation brake lets through — which is exactly its purpose.
+func TestAutoCQMinGainAboveSaturation(t *testing.T) {
+	for _, sc := range []autoCQScale{hevcAutoCQScale, av1AutoCQScale, x265AutoCQScale, svtav1AutoCQScale} {
+		if sc.minGainPerStep <= sc.saturationSlope {
+			t.Errorf("%s: minGainPerStep %.2f must exceed saturationSlope %.2f",
+				sc.codecLabel, sc.minGainPerStep, sc.saturationSlope)
+		}
+	}
+}
+
 func TestAutoCQPlateauPick(t *testing.T) {
 	cases := []struct {
 		name              string

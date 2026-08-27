@@ -135,6 +135,14 @@ type autoCQScale struct {
 	// counts as saturated (a pre-compressed source whose score plateaus). It
 	// scales with the step width — one AV1 step is worth about half an H.265 step.
 	saturationSlope float64
+	// minGainPerStep: how much VMAF one CQ step below the low anchor has to buy
+	// before it is worth its price in file size. Where saturationSlope asks "is
+	// this curve dead", this asks the user question "does the next step pay for
+	// itself" — so it sits well above it. Measured 2026-08-27 on a 50 fps source:
+	// one H.265 step costs ~7% file size, and the user had already rejected
+	// +0.49 VMAF for +6.6% as invisible, so 0.30 is the conservative side of a
+	// trade he has already made. Scales with the step width like saturationSlope.
+	minGainPerStep float64
 	// climbToleranceFactor widens the plateau-climb tolerance on the finer AV1
 	// scale: one AV1 CQ step is worth about half a VMAF step, so the climb may
 	// spend proportionally more tolerance for the same file-size saving as H.265.
@@ -158,6 +166,7 @@ var hevcAutoCQScale = autoCQScale{
 	clampMin: 20, clampMax: 34,
 	maxStepDown:          3,
 	saturationSlope:      0.10,
+	minGainPerStep:       0.30,
 	climbToleranceFactor: 1.0,
 	buildOpts:            buildNVENCOptsWithCQ,
 	fallbackCQ:           func() int { return appSettings.targetCQ },
@@ -184,6 +193,7 @@ var av1AutoCQScale = autoCQScale{
 	clampMin: 16, clampMax: 44,
 	maxStepDown:          6,
 	saturationSlope:      0.05,
+	minGainPerStep:       0.15,
 	climbToleranceFactor: 2.0,
 	buildOpts:            buildAV1OptsWithCQ,
 	fallbackCQ:           func() int { return av1AutoCQFallbackCQ },
@@ -212,6 +222,7 @@ var x265AutoCQScale = autoCQScale{
 	clampMin: 12, clampMax: 28,
 	maxStepDown:          4,
 	saturationSlope:      0.08,
+	minGainPerStep:       0.24,
 	climbToleranceFactor: 1.25,
 	buildOpts:            buildX265OptsWithCQ,
 	fallbackCQ:           func() int { return appSettings.cpuTargetCRF },
@@ -242,6 +253,7 @@ var svtav1AutoCQScale = autoCQScale{
 	clampMin: 16, clampMax: 44,
 	maxStepDown:          5,
 	saturationSlope:      0.06,
+	minGainPerStep:       0.18,
 	climbToleranceFactor: 1.5,
 	buildOpts:            buildSVTAV1OptsWithCQ,
 	fallbackCQ:           func() int { return svtav1AutoCQFallbackCRF },
@@ -394,6 +406,21 @@ func autoCQSaturated(sc autoCQScale, cq int, verified, vmafLow float64) bool {
 		return false
 	}
 	return (verified-vmafLow)/float64(sc.anchorLow-cq) < sc.saturationSlope
+}
+
+// autoCQGainTooSmall reports whether stepping below the low anchor still buys
+// measurable quality, but too little to pay for the file size it costs. This is
+// NOT saturation: autoCQSaturated (a much lower threshold) asks whether the
+// curve is dead, and it is checked first. This one asks the question the user
+// actually cares about — is the next step worth its price? Below the low anchor
+// the anchor slope is provably too optimistic (measured 2026-08-27: it promised
+// VMAF 98.0 where the encode delivered 97.5), so every step taken there is an
+// extrapolation paid for in real bitrate.
+func autoCQGainTooSmall(sc autoCQScale, cq int, verified, vmafLow float64) bool {
+	if cq >= sc.anchorLow {
+		return false
+	}
+	return (verified-vmafLow)/float64(sc.anchorLow-cq) < sc.minGainPerStep
 }
 
 // autoCQPlateauPick returns the cheapest acceptable CQ on a curve whose
@@ -1059,6 +1086,19 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 			cq, predicted = satCQ, satVMAF
 			plateauLevel = math.Max(verified, vmafLow)
 			plateauFlat = true // saturation proven by the real sub-anchor measurement
+		case verified < target && autoCQGainTooSmall(sc, cq, verified, vmafLow):
+			// Thrift brake: the target IS still reachable further down, but below
+			// the low anchor each step buys so little VMAF that it does not pay for
+			// the bitrate it costs. Fall back to the low anchor — the last CQ whose
+			// step still earned its place, and the last one carrying a measured
+			// instead of an extrapolated score. Deliberately no plateauLevel: the
+			// target is NOT proven unreachable here, so the plateau climb (which
+			// may spend whole VMAF points on savings) must stay out of this case.
+			gainPerStep := (verified - vmafLow) / float64(sc.anchorLow-cq)
+			verifyNote = fmt.Sprintf(
+				" (CQ %d measured %.1f — each step below CQ %d buys only %.2f VMAF, not worth the size)",
+				cq, verified, sc.anchorLow, gainPerStep)
+			cq, predicted = sc.anchorLow, vmafLow
 		case verified < target:
 			stepped, pred, capped := autoCQStepDown(sc, cq, target, verified, slope)
 			switch {

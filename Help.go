@@ -181,6 +181,9 @@ CONVERSION OPTIONS
                  target that is out of reach. Two config keys
                  steer how thrifty it may be: "autoCQTolerance"
                  and "autoCQPlateauTolerance".
+                 It also stops on its own once one more step
+                 would gain too little quality to be worth the
+                 extra file size.
                  Works for H.265 and AV1 alike. Videos shorter
                  than 30 seconds skip the analysis. Turn it off
                  with -noautocq, or autoCQ=false in the config.

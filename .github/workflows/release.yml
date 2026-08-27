@@ -1,0 +1,86 @@
+# Turns a pushed version tag into a finished release: builds the exe exactly
+# the way the released exes have always been built, then publishes it as the
+# release asset. Runs on Windows for the same reason CI does - every source
+# file carries //go:build windows && amd64, so a Linux runner finds no
+# packages at all and would report success without building anything.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets a tag that was pushed before this workflow existed still be released,
+  # and gives a failed run a second attempt without having to move the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (for example v1.25.0)'
+        required: true
+
+# The default token is read-only; publishing a release and uploading its asset
+# both need write access to the repository contents.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # The annotated tag message becomes the release notes, and that
+          # annotation only exists in a clone that carries the tag objects.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag that disagrees with appVersion would ship an exe announcing the
+      # wrong version in its own startup header. Cheaper to catch here than to
+      # replace a published asset afterwards.
+      - name: Tag matches appVersion
+        run: |
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          $match = Select-String -Path main.go -Pattern '^const appVersion = "(.+)"' | Select-Object -First 1
+          if (-not $match) {
+            Write-Host "::error::Could not find appVersion in main.go"
+            exit 1
+          }
+          $inCode = $match.Matches[0].Groups[1].Value
+          if ("v$inCode" -ne $tag) {
+            Write-Host "::error::Tag $tag does not match appVersion $inCode in main.go"
+            exit 1
+          }
+          Write-Host "Tag $tag matches appVersion $inCode."
+
+      - name: go test
+        run: go test ./...
+
+      # -ldflags="-s -w" drops the debug and symbol tables: the same flags
+      # every released exe so far was built with, so the asset stays the size
+      # users are used to.
+      - name: Build
+        run: go build -ldflags="-s -w" -o NVENCForge.exe .
+
+      # gh is preinstalled on GitHub runners and signs in with the token this
+      # workflow already holds, so no personal access token is involved.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          $size = (Get-Item NVENCForge.exe).Length
+          Write-Host "Publishing $tag with NVENCForge.exe ($size bytes)."
+          $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            # A lightweight tag carries no message - let GitHub summarise the
+            # commits instead of publishing an empty release.
+            gh release create $tag NVENCForge.exe --title "NVENCForge $tag" --generate-notes
+          } else {
+            $notes | Out-File -FilePath release-notes.md -Encoding utf8
+            gh release create $tag NVENCForge.exe --title "NVENCForge $tag" --notes-file release-notes.md
+          }

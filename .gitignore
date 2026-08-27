@@ -17,3 +17,5 @@ SRTCleaner_config.txt
 # Logs and local test leftovers
 *.log
 output/
+NVENCForge_Config.ini.bak
+NVENCForge_Config.ini.bak-*

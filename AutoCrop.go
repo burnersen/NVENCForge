@@ -402,54 +402,94 @@ func runCropDetectWindow(ctx context.Context, path string, offsetSec float64) (c
 	return parseCropDetect(string(out))
 }
 
-// detectCropRect sucht die schwarzen Balken einer Datei.
+// cropSample ist eine Stichprobe samt ihrem Zeitpunkt.
 //
-// Rückgabe ist IMMER ein benutzbares Rechteck: findet sich nichts Verlässliches,
-// kommt das ungeschnittene Vollbild zurück. Die Erkennung darf einen Lauf nie
-// scheitern lassen — im Zweifel wird eben nicht geschnitten.
-func detectCropRect(ctx context.Context, path string, srcW, srcH int, durationSec float64) (cropRect, string) {
-	full := fullFrame(srcW, srcH)
-	if srcW <= 0 || srcH <= 0 {
-		return full, "source dimensions unknown"
-	}
+// Der Zeitpunkt gehört dazu, weil die Untertitel-Prüfung weiter unten genau
+// dort noch einmal hinsehen will: Eine Probe, die im Balken etwas gesehen hat,
+// ist die einzige Spur, die auf eingebrannten Text führt — ohne ihre Sekunde
+// müsste die Prüfung den ganzen Film absuchen.
+type cropSample struct {
+	offsetSec float64
+	rect      cropRect
+}
 
-	// Erst ALLE Proben einsammeln, dann entscheiden. Früher brach die Schleife
-	// ab, sobald eine Probe das volle Bild sah — unter der Vereinigungsregel
-	// war das richtig, unter der Mehrheitsregel wäre es das Gegenteil: eine
-	// einzelne Probe darf nicht mehr für alle sprechen.
+// collectCropSamples misst die Stichproben über die Laufzeit.
+//
+// Unbrauchbare Fenster (Schwarzblende, Lesefehler) werden übersprungen. Sie
+// zählen NICHT als "kein Balken", sondern gar nicht: Eine Schwarzblende weiß
+// nichts über das Bildformat des Films.
+func collectCropSamples(ctx context.Context, path string, srcW, srcH int, durationSec float64) []cropSample {
 	offsets := cropSampleOffsets(durationSec, cropDetectSamples)
-	samples := make([]cropRect, 0, len(offsets))
+	samples := make([]cropSample, 0, len(offsets))
 	for _, off := range offsets {
 		if ctx.Err() != nil {
-			return full, "cancelled"
+			return samples
 		}
 		r, ok := runCropDetectWindow(ctx, path, off)
 		if !ok {
-			// Unbrauchbares Fenster (Schwarzblende, Lesefehler): überspringen.
-			// Es zählt nicht als "kein Balken", sondern gar nicht.
 			continue
 		}
 		if !r.fitsInside(srcW, srcH) {
 			// Ein Vorschlag, der über den Bildrand hinausragt, ist kaputt.
 			continue
 		}
-		samples = append(samples, r)
+		samples = append(samples, cropSample{offsetSec: off, rect: r})
+	}
+	return samples
+}
+
+// rectsOf zieht die reinen Rechtecke aus den Proben — die Mehrheitsrechnung
+// braucht die Zeitpunkte nicht.
+func rectsOf(samples []cropSample) []cropRect {
+	rects := make([]cropRect, 0, len(samples))
+	for _, s := range samples {
+		rects = append(rects, s.rect)
+	}
+	return rects
+}
+
+// detectCropRect sucht die schwarzen Balken einer Datei.
+//
+// Rückgabe ist IMMER ein benutzbares Rechteck: findet sich nichts Verlässliches,
+// kommt das ungeschnittene Vollbild zurück. Die Erkennung darf einen Lauf nie
+// scheitern lassen — im Zweifel wird eben nicht geschnitten.
+//
+// Zwei Ausnahmen klammern die eigentliche Messung ein, beide aus demselben
+// Grund: Ein Untertitel, der im schwarzen Balken steht, wird mit dem Balken
+// weggeschnitten. Deshalb wird VOR der Messung nach Untertitelspuren gesehen,
+// die ihre Position selbst mitbringen, und NACH der Messung nach Text, der
+// fest im Balken klebt.
+func detectCropRect(ctx context.Context, path string, stats *VideoStats) (cropRect, string) {
+	full := fullFrame(stats.Width, stats.Height)
+	if stats.Width <= 0 || stats.Height <= 0 {
+		return full, "source dimensions unknown"
 	}
 
-	combined, why := symmetricCropFromSamples(samples, srcW, srcH)
+	// Ausnahme 1 — kostenlos, und deshalb ganz vorn: Sie erspart bei einem
+	// Blu-ray-Rip die komplette Suche.
+	if kind, found := pictureSubtitleKind(stats.SubCodecs); found {
+		return full, fmt.Sprintf("%s subtitles sit at fixed positions and would land outside the picture", kind)
+	}
+
+	samples := collectCropSamples(ctx, path, stats.Width, stats.Height, stats.DurationSec)
+	if ctx.Err() != nil {
+		return full, "cancelled"
+	}
+
+	combined, why := symmetricCropFromSamples(rectsOf(samples), stats.Width, stats.Height)
 	if why != "" {
 		return full, why
 	}
 
 	combined = combined.makeEven()
-	if !combined.fitsInside(srcW, srcH) {
+	if !combined.fitsInside(stats.Width, stats.Height) {
 		return full, "detected rectangle outside the frame"
 	}
-	if combined.isFullFrame(srcW, srcH) {
+	if combined.isFullFrame(stats.Width, stats.Height) {
 		return full, "no bars"
 	}
 
-	trimmed := combined.trimmedAreaPercent(srcW, srcH)
+	trimmed := combined.trimmedAreaPercent(stats.Width, stats.Height)
 	if trimmed < cropMinTrimPercent {
 		return full, fmt.Sprintf("bars too thin to matter (%.1f%%)", trimmed)
 	}
@@ -458,7 +498,263 @@ func detectCropRect(ctx context.Context, path string, srcW, srcH int, durationSe
 		// eine Fehlerkennung. Nicht schneiden.
 		return full, fmt.Sprintf("suspicious result, would remove %.0f%% — ignored", trimmed)
 	}
+
+	// Ausnahme 2 — kostet nur dann Zeit, wenn wirklich geschnitten würde.
+	if note, found := burnedInSubtitlesInBars(ctx, path, combined, samples, stats); found {
+		return full, note
+	}
 	return combined, ""
+}
+
+// ----------------------------------------------------------------------------
+// Ausnahme: Untertitel stehen im Balken
+// ----------------------------------------------------------------------------
+
+// Warum es diese Ausnahme gibt: Bei vielen Filmen steht der Untertitel nicht
+// IM Bild, sondern UNTER ihm — im schwarzen Balken. Das ist keine Schlamperei,
+// sondern Absicht: Dort verdeckt er nichts. Wird der Balken weggeschnitten,
+// verschwindet der Untertitel mit ihm.
+//
+// Zwei Bauarten müssen getrennt behandelt werden:
+//
+//  1. UNTERTITELSPUREN AUS BILDERN (Blu-ray PGS, DVD VobSub). Sie sind fertige
+//     Grafiken mit fester Position im Vollbild-Raster, oft unterhalb des
+//     Bildbereichs. Der Abspieler kann sie nicht neu setzen. Sie sind an der
+//     Spurliste erkennbar — das kostet keine Sekunde Suchzeit.
+//     Textspuren (SRT, ASS, mov_text) sind NICHT betroffen: Die setzt der
+//     Abspieler selbst, sie überstehen einen Schnitt unbeschadet.
+//
+//  2. FEST EINGEBRANNTE UNTERTITEL. Die stehen im Bild und lassen sich nur
+//     sehen, nicht abfragen. Sie zu erkennen ist Schätzarbeit — die Regeln
+//     dafür stehen bei looksLikeSubtitleLine und stripCarriesSubtitles.
+//
+// Der schwierige Teil ist nicht, Text im Balken zu FINDEN, sondern ihn von
+// einem Copyright-Logo zu unterscheiden. Genau so ein Logo hat in v1.21.1
+// einmal den halben Schnitt verhindert (siehe symmetricCropFromSamples), und
+// diese Ausnahme darf jene Lösung nicht wieder aufheben.
+const (
+	// subtitleMinBarHeightPx: Unter dieser Balkenhöhe wird gar nicht erst
+	// gesucht. In zwei Dutzend Pixel passt keine lesbare Zeile — was dort
+	// gefunden würde, wäre Rauschen.
+	subtitleMinBarHeightPx = 24
+
+	// subtitleLineMinWidthPercent: So breit muss der Fund mindestens sein,
+	// gemessen an der Bildbreite. Eine Untertitelzeile ist breit; ein Logo,
+	// ein Zeitstempel oder ein Kompressionsrest ist schmal.
+	subtitleLineMinWidthPercent = 12
+
+	// subtitleCenterTolerancePercent: So weit darf die Mitte des Fundes von der
+	// Bildmitte abweichen. Untertitel stehen mittig — das ist ihre auffälligste
+	// Eigenschaft und das beste Unterscheidungsmerkmal gegenüber einem Logo,
+	// das fast immer in einer Ecke klebt.
+	subtitleCenterTolerancePercent = 10
+
+	// subtitleHitsNeeded: So viele Fenster müssen eine Zeile zeigen, bevor der
+	// Schnitt abgesagt wird. ZWEI, nicht eines — und das ist der Kern:
+	// Untertitel kehren über den Film verteilt wieder, ein Copyright-Hinweis
+	// steht genau einmal da. Ein einzelner Fund kippt gar nichts.
+	subtitleHitsNeeded = 2
+
+	// subtitleProbeWindowSec ist die Länge eines Prüffensters. Vier Sekunden
+	// decken eine gesprochene Zeile bequem ab.
+	subtitleProbeWindowSec = 4.0
+)
+
+// pictureSubtitleKinds sind die Bild-Untertitel und ihre Klartextnamen. Der
+// Abgleich läuft über Teilzeichenketten, weil FFmpeg je nach Fassung
+// "hdmv_pgs_subtitle", "dvd_subtitle" oder "vobsub" schreibt.
+var pictureSubtitleKinds = []struct {
+	marker string
+	name   string
+}{
+	{"hdmv_pgs", "Blu-ray (PGS)"},
+	{"pgssub", "Blu-ray (PGS)"},
+	{"dvd_sub", "DVD (VobSub)"},
+	{"vobsub", "DVD (VobSub)"},
+	{"dvb_sub", "DVB"},
+	{"xsub", "XSUB"},
+}
+
+// pictureSubtitleKind nennt die erste gefundene Bild-Untertitelspur.
+func pictureSubtitleKind(subCodecs []string) (string, bool) {
+	for _, codec := range subCodecs {
+		lower := strings.ToLower(strings.TrimSpace(codec))
+		for _, kind := range pictureSubtitleKinds {
+			if strings.Contains(lower, kind.marker) {
+				return kind.name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// barStrip ist ein Streifen, den der Schnitt entfernen würde, mit seinem Namen
+// für die Meldung.
+type barStrip struct {
+	name string
+	rect cropRect
+}
+
+// barStripsOf liefert die waagerechten Streifen des geplanten Schnitts, den
+// unteren zuerst.
+//
+// Seitliche Balken (Pillarbox) bleiben absichtlich außen vor: Untertitel stehen
+// unter dem Bild, nicht daneben. Dort zu suchen würde nur Zeit kosten und die
+// Zahl der Fehlalarme erhöhen.
+func barStripsOf(crop cropRect, srcW, srcH int) []barStrip {
+	strips := make([]barStrip, 0, 2)
+	if bottomHeight := srcH - (crop.y + crop.h); bottomHeight >= subtitleMinBarHeightPx {
+		strips = append(strips, barStrip{
+			name: "bottom",
+			rect: cropRect{w: srcW, h: bottomHeight, x: 0, y: crop.y + crop.h},
+		})
+	}
+	if crop.y >= subtitleMinBarHeightPx {
+		strips = append(strips, barStrip{
+			name: "top",
+			rect: cropRect{w: srcW, h: crop.y, x: 0, y: 0},
+		})
+	}
+	return strips
+}
+
+// looksLikeSubtitleLine entscheidet, ob ein Fund im Balken eine Textzeile ist.
+//
+// Breit UND mittig — beides zusammen, sonst zählt es nicht. Ein Logo ist
+// entweder schmal oder sitzt außen, meistens beides.
+func looksLikeSubtitleLine(found cropRect, srcW int) bool {
+	if !found.valid() || srcW <= 0 {
+		return false
+	}
+	if found.w*100 < srcW*subtitleLineMinWidthPercent {
+		return false
+	}
+	offCentre := (found.x + found.w/2) - srcW/2
+	if offCentre < 0 {
+		offCentre = -offCentre
+	}
+	return offCentre*100 <= srcW*subtitleCenterTolerancePercent
+}
+
+// suspectOffsets nennt die Zeitpunkte, an denen die Balkenmessung in DIESEN
+// Streifen hineingeragt hat — dort stand also etwas, das nicht schwarz war.
+//
+// Diese Auskunft ist geschenkt: Die Proben sind längst gemessen. Sie macht die
+// Prüfung billig, denn ohne einen einzigen Verdacht wird gar nicht erst ein
+// zweites Mal in die Datei gesehen.
+func suspectOffsets(samples []cropSample, strip cropRect) []float64 {
+	stripTop := strip.y + cropEdgeTolerancePx
+	stripBottom := strip.y + strip.h - cropEdgeTolerancePx
+	offsets := make([]float64, 0, len(samples))
+	for _, s := range samples {
+		top := s.rect.y
+		bottom := s.rect.y + s.rect.h
+		if top < stripBottom && bottom > stripTop {
+			offsets = append(offsets, s.offsetSec)
+		}
+	}
+	return offsets
+}
+
+// midpointOffsets legt zusätzliche Zeitpunkte GENAU ZWISCHEN die vorhandenen
+// Proben.
+//
+// Warum zwischen und nicht irgendwo: So kann kein Fenster zweimal gezählt
+// werden. Würde derselbe Zeitpunkt ein zweites Mal geprüft, käme ein einzelnes
+// Logo auf zwei Treffer — und die Regel "erst beim zweiten Fund" wäre wertlos.
+// Zeitpunkte, die zu dicht beieinanderliegen, fallen aus demselben Grund weg.
+func midpointOffsets(samples []cropSample) []float64 {
+	mids := make([]float64, 0, len(samples))
+	for i := 1; i < len(samples); i++ {
+		gap := samples[i].offsetSec - samples[i-1].offsetSec
+		if gap < 2*subtitleProbeWindowSec {
+			continue
+		}
+		mids = append(mids, samples[i-1].offsetSec+gap/2)
+	}
+	return mids
+}
+
+// textLineInStrip prüft ein einzelnes Fenster: Steht in diesem Streifen etwas,
+// das wie eine Untertitelzeile aussieht?
+//
+// Der Streifen wird ausgeschnitten, BEVOR cropdetect ihn ansieht. Nur so kann
+// cropdetect die Lage des Textes melden — auf dem ganzen Bild würde es
+// schlicht den Bildinhalt umranden.
+func textLineInStrip(ctx context.Context, path string, offsetSec float64, strip cropRect, srcW int) bool {
+	args := []string{
+		"-hide_banner", "-nostats", "-nostdin",
+		"-ss", strconv.FormatFloat(offsetSec, 'f', 3, 64),
+		"-t", strconv.FormatFloat(subtitleProbeWindowSec, 'f', 3, 64),
+		"-i", path,
+		"-map", "0:V:0",
+		"-vf", strip.filterArg() + "," + cropDetectFilter(),
+		"-an", "-sn", "-f", "null", "-",
+	}
+	out, err := exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	found, ok := parseCropDetect(string(out))
+	if !ok {
+		// Ein reinschwarzes Fenster liefert unbrauchbare (auch negative) Maße.
+		// Genau das ist hier die gute Nachricht: nichts im Balken.
+		return false
+	}
+	return looksLikeSubtitleLine(found, srcW)
+}
+
+// stripCarriesSubtitles prüft EINEN Streifen in zwei Runden.
+//
+// Runde 1 sieht nur dort nach, wo die Balkenmessung schon etwas bemerkt hat.
+// Findet sich dabei keine Zeile, ist der Fall erledigt — ohne einen einzigen
+// zusätzlichen FFmpeg-Lauf, wenn es gar keinen Verdacht gab.
+//
+// Runde 2 startet erst nach dem ersten Fund und beantwortet die entscheidende
+// Frage: Kommt der Text wieder? Untertitel tun das, ein Copyright-Hinweis
+// nicht. Sie hört auf, sobald die Antwort feststeht — im Regelfall nach ein,
+// zwei Fenstern.
+func stripCarriesSubtitles(ctx context.Context, path string, strip barStrip, samples []cropSample, srcW int) bool {
+	hits := 0
+	for _, off := range suspectOffsets(samples, strip.rect) {
+		if ctx.Err() != nil {
+			return false
+		}
+		if textLineInStrip(ctx, path, off, strip.rect, srcW) {
+			hits++
+			if hits >= subtitleHitsNeeded {
+				return true
+			}
+		}
+	}
+	if hits == 0 {
+		return false
+	}
+	for _, off := range midpointOffsets(samples) {
+		if ctx.Err() != nil {
+			return false
+		}
+		if textLineInStrip(ctx, path, off, strip.rect, srcW) {
+			hits++
+			if hits >= subtitleHitsNeeded {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// burnedInSubtitlesInBars ist die zweite Ausnahme: Steht in einem der beiden
+// Balken fest eingebrannter Text, bleibt das Bild ungeschnitten.
+func burnedInSubtitlesInBars(ctx context.Context, path string, crop cropRect,
+	samples []cropSample, stats *VideoStats) (string, bool) {
+
+	for _, strip := range barStripsOf(crop, stats.Width, stats.Height) {
+		if stripCarriesSubtitles(ctx, path, strip, samples, stats.Width) {
+			return fmt.Sprintf("subtitles are burned into the %s bar", strip.name), true
+		}
+	}
+	return "", false
 }
 
 // ----------------------------------------------------------------------------

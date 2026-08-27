@@ -887,7 +887,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// und zwei Kopien derselben Regel laufen früher oder später auseinander.
 	crop := cropRect{}
 	if cfg.autoCrop {
-		detected, why := detectCropRect(ctx, filePath, stats.Width, stats.Height, stats.DurationSec)
+		detected, why := detectCropRect(ctx, filePath, stats)
 		switch {
 		case detected.isFullFrame(stats.Width, stats.Height):
 			if why == "" {

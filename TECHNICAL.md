@@ -228,6 +228,19 @@ Everything lives in `NVENCForge_Config.ini` next to the EXE (auto-created; inval
 
 CQ quality level, Auto-CQ (on/off, VMAF target, tolerance, plateau savings budget), bitrate caps (H.265 and AV1 separately), resolution cap, NVENC preset/lookahead/B-frames/AQ strength, CAS sharpening, AAC bitrates, auto-shutdown, extra filename characters — plus the [CPU mode](#cpu-depth) block: `encoder` (nvidia/cpu), `cpuPreset`, `cpuAV1Preset`, `cpuTargetCRF`, `cpuAV1TargetCRF` and `cpuThreads`.
 
+
+Six keys are new in **1.23.0**. They decide what comes out at the end, and until then they existed only as a command-line switch — so "always AV1" or "always MP4" had to be repeated on every single run. Each has a switch **and** a counter-switch, because a window can only ADD arguments, never take them away:
+
+| Key | Default | What it does | Switches |
+|---|---|---|---|
+| `codec` | `h265` | Video codec of the result. `av1` needs an RTX 40 series or newer, plays on fewer devices and takes its quality from `av1TargetCQ` | `-av1` / `-h265` |
+| `container` | `mkv` | `mp4` writes the widely playable file instead — but it holds no picture subtitles and only one audio track | `-mp4` / `-mkv` |
+| `bitDepth` | `10` | `8` is for older devices that refuse "Main 10"; it can show banding in dark gradients | `-8bit` / `-10bit` |
+| `audioMode` | `aac` | `copy` never re-encodes the sound — bit-perfect, but not every format fits into an MP4 | `-copyaudio` / `-aac` |
+| `keepResolution` | `false` | `true` never downscales, whatever `maxResolution` says | `-original` / `-downscale` |
+| `keepSource` | `false` | `true` leaves the original exactly where it is and ignores `retireMode` | `-keep` / `-nokeep` |
+
+`container=mp4` together with `codec=av1` is the one combination that cannot both be honoured: MP4 exists for maximum reach and AV1 works against exactly that, so the run stays on H.265 and says so.
 One key decides how the encoder **spends its bits** — and it turned out to be worth real money:
 
 | Key | Default | What it does |

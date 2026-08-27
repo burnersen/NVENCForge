@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.22.1"
+const appVersion = "1.23.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -976,6 +976,8 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	explicitBitrate := false
 	sawAutoCQFlag, sawNoAutoCQ := false, false
 	sawCropFlag, sawNoCropFlag := false, false
+	sawKeepFlag, sawNoKeepFlag := false, false
+	sawCPUFlag := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if strings.EqualFold(arg, "-shutdown") {
@@ -995,9 +997,21 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("Original resolution mode enabled: no downscaling.")
 			continue
 		}
+		// Gegenstück zu -orig, für den Fall keepResolution=true in der
+		// Konfigurationsdatei: verkleinern wie in maxResolution eingestellt.
+		if strings.EqualFold(arg, "-downscale") {
+			cfg.keepOriginal = false
+			continue
+		}
 		if strings.EqualFold(arg, "-copyaudio") || strings.EqualFold(arg, "-ca") {
 			cfg.copyAudio = true
 			pInfo.Println("Audio copy mode enabled: streams copied 1:1 (no AAC re-encode).")
+			continue
+		}
+		// Gegenstück zu -copyaudio, für den Fall audioMode=copy in der
+		// Konfigurationsdatei.
+		if strings.EqualFold(arg, "-aac") {
+			cfg.copyAudio = false
 			continue
 		}
 		if strings.EqualFold(arg, "-av1") {
@@ -1021,6 +1035,13 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		if strings.EqualFold(arg, "-cpu") {
 			cfg.cpu = true
+			sawCPUFlag = true
+			continue
+		}
+		// Gegenstück zu -cpu, für den Fall encoder=cpu in der
+		// Konfigurationsdatei: auf der Grafikkarte rechnen.
+		if strings.EqualFold(arg, "-gpu") || strings.EqualFold(arg, "-nvidia") {
+			cfg.cpu = false
 			continue
 		}
 		// -apple ist der alte Name aus 1.4.0 und bleibt gültig: er steckt in
@@ -1031,17 +1052,37 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			pInfo.Println("MP4 mode enabled: output as a widely playable MP4 (H.265/hvc1 + AAC + faststart).")
 			continue
 		}
+		// Gegenstück zu -mp4, für den Fall container=mp4 in der
+		// Konfigurationsdatei.
+		if strings.EqualFold(arg, "-mkv") {
+			cfg.mp4Mode = false
+			continue
+		}
 		if strings.EqualFold(arg, "-8bit") {
 			cfg.eightBit = true
 			pInfo.Println("8-bit mode enabled: encoding in 8 bit instead of 10 bit (for older devices).")
 			continue
 		}
+		// Gegenstück zu -8bit, für den Fall bitDepth=8 in der
+		// Konfigurationsdatei.
+		if strings.EqualFold(arg, "-10bit") {
+			cfg.eightBit = false
+			continue
+		}
 		if strings.EqualFold(arg, "-keep") {
 			cfg.keepSource = true
+			sawKeepFlag = true
 			// Seit 1.8.0 wandern Originale in den Unterordner "originals", nicht
 			// mehr in den Papierkorb — die Meldung sprach bis 1.9.0 noch vom
 			// Papierkorb und beschrieb damit einen Zustand, den es nicht mehr gibt.
 			pInfo.Println("Keep-source mode enabled: originals stay exactly where they are.")
+			continue
+		}
+		// Gegenstück zu -keep, für den Fall keepSource=true in der
+		// Konfigurationsdatei: Originale wieder wegräumen lassen.
+		if strings.EqualFold(arg, "-nokeep") {
+			cfg.keepSource = false
+			sawNoKeepFlag = true
 			continue
 		}
 		if strings.EqualFold(arg, "-autocq") {
@@ -1127,7 +1168,7 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	// before the codec-dependent CQ range and bitrate caps below are resolved.
 	if cfg.mp4Mode && cfg.av1 {
 		cfg.av1 = false
-		pWarn.Println("-mp4 forces H.265: AV1 does not play on iPhones and many TVs — the -av1 flag is ignored for this run.")
+		pWarn.Println("-mp4 forces H.265: AV1 does not play on iPhones and many TVs — AV1 is switched off for this run.")
 	}
 	// 8 Bit gilt für den ganzen Lauf. Gesetzt wird die Variable erst hier, weil
 	// alle Options-Bauer sie lesen und die Flags in beliebiger Reihenfolge
@@ -1137,9 +1178,9 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 	// -av1 stehen, deshalb erst hier — und deshalb wird der tatsächlich
 	// laufende Encoder auch erst jetzt gemeldet, genau einmal. Findet der
 	// GPU-Test später keine Karte, schaltet main() zusätzlich auf CPU um.
-	cpuModeActive = cfg.cpu || appSettings.encoder == encoderCPU
+	cpuModeActive = cfg.cpu
 	origin := ""
-	if cpuModeActive && !cfg.cpu {
+	if cpuModeActive && !sawCPUFlag {
 		origin = " (from configuration: encoder=cpu)"
 	}
 	switch {
@@ -1200,6 +1241,16 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		pInfo.Println("Auto-crop enabled via configuration: black bars are detected and cut off.")
 	case sawNoCropFlag && appSettings.autoCrop:
 		pInfo.Println("Auto-crop disabled for this run (-nocrop) — black bars are kept.")
+	}
+	// Keep-source. Die Meldung im Argument-Durchlauf oben läuft nur, wenn
+	// -keep wirklich genannt wurde. Kommt die Einstellung aus der
+	// Konfigurationsdatei, muss sie hier gesagt werden: Dass nichts
+	// weggeräumt wird, merkt man sonst erst, wenn die Platte voll ist.
+	switch {
+	case cfg.keepSource && !sawKeepFlag:
+		pInfo.Println("Keep-source enabled via configuration: originals stay exactly where they are.")
+	case sawNoKeepFlag && appSettings.keepSource:
+		pInfo.Println("Keep-source disabled for this run (-nokeep) — originals are moved away as configured.")
 	}
 	// AV1 reaches H.265 quality at ~25-30% less bitrate, so the AV1 mode has
 	// its own (lower) caps. An explicit -NNNN always wins.
@@ -2035,12 +2086,7 @@ func main() {
 	}
 
 	// parseArgs runs before the GPU probe so the AV1 flag can steer it.
-	cfg := &AppConfig{
-		maxBitrateKbps: appSettings.maxBitrate1080p,
-		autoShutdown:   appSettings.autoShutdown,
-		autoCQ:         appSettings.autoCQ,
-		autoCrop:       appSettings.autoCrop,
-	}
+	cfg := newAppConfig(appSettings)
 	if cfg.autoShutdown {
 		pInfo.Println("Auto-shutdown enabled via configuration.")
 	}

@@ -367,3 +367,134 @@ func TestCropDetectLimitIsScaledByBitDepth(t *testing.T) {
 			"würde anders geschnitten als bisher", got)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Ausnahme: Untertitel im Balken
+// ----------------------------------------------------------------------------
+
+// TestPictureSubtitlesAreRecognised sichert die kostenlose Ausnahme ab: Nur
+// Untertitel AUS BILDERN bringen ihre Position selbst mit. Text-Untertitel
+// setzt der Abspieler neu — würden sie den Schnitt ebenfalls verhindern, bliebe
+// Auto-Crop bei fast jedem Film wirkungslos.
+func TestPictureSubtitlesAreRecognised(t *testing.T) {
+	cases := []struct {
+		codecs []string
+		want   bool
+		why    string
+	}{
+		{[]string{"hdmv_pgs_subtitle"}, true, "Blu-ray-Untertitel sind Bilder mit fester Position"},
+		{[]string{"dvd_subtitle"}, true, "DVD-Untertitel ebenso"},
+		{[]string{"aac", "subrip"}, false, "SRT setzt der Abspieler selbst"},
+		{[]string{"mov_text"}, false, "MP4-Textspur ebenso"},
+		{[]string{"ass"}, false, "ASS ist Text"},
+		{[]string{"subrip", "HDMV_PGS_SUBTITLE"}, true, "Groß-/Kleinschreibung darf nichts ändern"},
+		{nil, false, "ohne Untertitel gibt es nichts zu schützen"},
+	}
+	for _, c := range cases {
+		if _, got := pictureSubtitleKind(c.codecs); got != c.want {
+			t.Errorf("pictureSubtitleKind(%v) = %v, erwartet %v — %s", c.codecs, got, c.want, c.why)
+		}
+	}
+}
+
+// TestSubtitleLineTellsTextFromLogo ist die Kernunterscheidung der zweiten
+// Ausnahme. Sie darf den Fall aus v1.21.2 nicht rückgängig machen: Ein
+// Copyright-Logo im Balken muss weiterhin überstimmt werden, eine Textzeile
+// dagegen den Schnitt aufhalten.
+func TestSubtitleLineTellsTextFromLogo(t *testing.T) {
+	const srcW = 1920
+
+	line := cropRect{w: 900, h: 60, x: 510, y: 0} // mittig, breit
+	if !looksLikeSubtitleLine(line, srcW) {
+		t.Error("mittige, breite Zeile wurde nicht als Untertitel erkannt")
+	}
+
+	logoCorner := cropRect{w: 300, h: 40, x: 1560, y: 0} // rechts außen
+	if looksLikeSubtitleLine(logoCorner, srcW) {
+		t.Error("Logo in der Ecke gilt als Untertitel — der Schnitt aus v1.21.2 wäre wieder blockiert")
+	}
+
+	narrowCentre := cropRect{w: 120, h: 40, x: 900, y: 0} // mittig, aber schmal
+	if looksLikeSubtitleLine(narrowCentre, srcW) {
+		t.Error("schmaler Fund in der Mitte gilt als Untertitel — zu empfindlich")
+	}
+
+	if looksLikeSubtitleLine(cropRect{}, srcW) {
+		t.Error("leeres Rechteck gilt als Untertitel")
+	}
+}
+
+// TestBarStripsSkipThinBars: In einem Streifen, in den keine Zeile passt, muss
+// gar nicht erst gesucht werden — jede Suche dort wäre verlorene Zeit und ein
+// Fehlalarm-Risiko.
+func TestBarStripsSkipThinBars(t *testing.T) {
+	// 1920x1080 mit 140 px Balken oben und unten.
+	strips := barStripsOf(cropRect{w: 1920, h: 800, x: 0, y: 140}, 1920, 1080)
+	if len(strips) != 2 {
+		t.Fatalf("%d Streifen, erwartet 2 (oben und unten)", len(strips))
+	}
+	if strips[0].name != "bottom" {
+		t.Errorf("erster Streifen ist %q — unten muss zuerst geprüft werden, dort stehen Untertitel", strips[0].name)
+	}
+	if strips[0].rect.y != 940 || strips[0].rect.h != 140 {
+		t.Errorf("unterer Streifen y=%d h=%d, erwartet y=940 h=140", strips[0].rect.y, strips[0].rect.h)
+	}
+
+	// Zwei Pixel Rand: dort passt keine Schrift hinein.
+	thin := barStripsOf(cropRect{w: 1920, h: 1076, x: 0, y: 2}, 1920, 1080)
+	if len(thin) != 0 {
+		t.Errorf("%d Streifen bei 2 px Rand, erwartet 0", len(thin))
+	}
+
+	// Pillarbox: seitliche Balken werden nicht abgesucht.
+	sides := barStripsOf(cropRect{w: 1440, h: 1080, x: 240, y: 0}, 1920, 1080)
+	if len(sides) != 0 {
+		t.Errorf("%d Streifen bei reinem Pillarbox, erwartet 0", len(sides))
+	}
+}
+
+// TestSuspectOffsetsOnlyWhereSomethingWasSeen: Die teure Prüfung darf nur dort
+// laufen, wo die Balkenmessung überhaupt etwas im Balken gesehen hat. Ohne
+// diesen Filter kostete jede Datei mit Balken zusätzliche Sekunden.
+func TestSuspectOffsetsOnlyWhereSomethingWasSeen(t *testing.T) {
+	// Schnitt: 1920x800 mittig in 1080 → unterer Streifen ab y=940.
+	strip := barStripsOf(cropRect{w: 1920, h: 800, x: 0, y: 140}, 1920, 1080)[0]
+
+	samples := []cropSample{
+		{offsetSec: 10, rect: cropRect{w: 1920, h: 800, x: 0, y: 140}}, // sauberer Balken
+		{offsetSec: 20, rect: cropRect{w: 1920, h: 940, x: 0, y: 140}}, // reicht bis y=1080: Fund im Balken
+		{offsetSec: 30, rect: cropRect{w: 1920, h: 800, x: 0, y: 140}}, // sauber
+	}
+	got := suspectOffsets(samples, strip.rect)
+	if len(got) != 1 || got[0] != 20 {
+		t.Errorf("Verdachtszeitpunkte %v, erwartet genau [20]", got)
+	}
+}
+
+// TestMidpointOffsetsCannotCountTwice sichert die Regel ab, an der die
+// Unterscheidung Logo/Untertitel hängt: Zweite Runde nur an NEUEN Zeitpunkten.
+// Ein zweimal geprüftes Fenster würde ein einzelnes Logo zum "wiederkehrenden"
+// Text machen.
+func TestMidpointOffsetsCannotCountTwice(t *testing.T) {
+	samples := []cropSample{
+		{offsetSec: 60}, {offsetSec: 120}, {offsetSec: 180},
+	}
+	mids := midpointOffsets(samples)
+	if len(mids) != 2 || mids[0] != 90 || mids[1] != 150 {
+		t.Fatalf("Zwischenzeitpunkte %v, erwartet [90 150]", mids)
+	}
+	for _, m := range mids {
+		for _, s := range samples {
+			if m == s.offsetSec {
+				t.Errorf("Zeitpunkt %.1f wird zweimal geprüft", m)
+			}
+		}
+	}
+
+	// Liegen die Proben dichter beieinander als zwei Fensterlängen, würden sich
+	// die Fenster überlappen — dann lieber gar keine zweite Runde.
+	dense := []cropSample{{offsetSec: 1}, {offsetSec: 4}}
+	if got := midpointOffsets(dense); len(got) != 0 {
+		t.Errorf("Zwischenzeitpunkte %v bei dicht liegenden Proben, erwartet keine", got)
+	}
+}

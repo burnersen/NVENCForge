@@ -180,12 +180,17 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-help` / `-h` / `-?` | Print the complete option list and exit — no download, no GPU probe |
 | `-NNNN` | Max target bitrate in kbps (e.g. `-10000`) |
 | `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
+| `-downscale` | Scale down as configured after all, even if `keepResolution=true` |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
+| `-aac` | Re-encode audio to AAC where needed, even if `audioMode=copy` |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
-| `-h265` | Force **H.265** when `-av1` appears earlier on the same command line (the later switch wins) |
+| `-h265` | Force **H.265** for this run — beats an earlier `-av1` on the command line *and* `codec=av1` in the config (the later switch wins) |
 | `-mp4` | Write an **MP4 that plays almost everywhere** (H.265/`hvc1` + AAC + faststart). *(`-apple` still works — it's the old name)* |
+| `-mkv` | Write an **MKV** after all, even if the config says `container=mp4` |
 | `-8bit` | Encode in **8 bit** instead of 10 bit, for older devices that reject "Main 10" |
+| `-10bit` | Encode in **10 bit** after all, even if the config says `bitDepth=8` |
 | `-cpu` | Encode on the **processor** — no NVIDIA card needed (libx265, or SVT-AV1 with `-av1`) |
+| `-gpu` | Encode on the **graphics card** after all, even if the config says `encoder=cpu` *(alias: `-nvidia`)* |
 | `-autocq` | Measure the CQ per file — **on by default**; set `autoCQ=false` in the config to disable |
 | `-noautocq` | Disable Auto-CQ for this run |
 | `-cq NN` | Force a fixed CQ (H.265 1–51, AV1 1–63) |
@@ -193,6 +198,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-crop` | Cut the black bars off letterboxed video — **off by default**, see [what it changes](#crop) |
 | `-nocrop` | Keep the black bars for this run |
 | `-keep` | Keep the originals exactly where they are |
+| `-nokeep` | Move the originals away as configured, even if the config says `keepSource=true` |
 | `-shutdown` | Shut the PC down 30 s after the batch finishes |
 | `-noshutdown` | Do **not** shut down, even if the config says `autoShutdown=true` |
 | `-json` | Report progress as **JSON lines on stdout** — for front-ends and scripts ([details](TECHNICAL.md#json-events)) |
@@ -235,7 +241,7 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 | Mode | What it's for |
 |---|---|
-| ✂️ **Auto-crop** (`-crop`, `-cropcheck`) | Cuts the black bars off letterboxed video. **Off by default, and what it does for you flips with Auto-CQ:** at a fixed CQ a quarter of the frame in bars makes the file ~6 % smaller and the encode 19 % faster; with Auto-CQ on, files come out *larger* — because the bars had been flattering the quality measurement, so letterboxed sources were quietly landing below the target you set. Bars are found from nine samples across the film and the **majority decides**, so a logo flashing up inside a bar no longer holds the cut back. The cut is always **symmetric** — letterbox sits centred, so taking more off the top than the bottom is always wrong. If the samples genuinely disagree (a film that changes aspect ratio part-way, like IMAX scenes), nothing is cut at all. Bars on the sides or on all four edges work the same way. Run `-cropcheck` first: it draws the proposed cut on the full frame and converts nothing. |
+| âï¸ **Auto-crop** (`-crop`, `-cropcheck`) | Cuts the black bars off letterboxed video. **Off by default, and what it does for you flips with Auto-CQ:** at a fixed CQ a quarter of the frame in bars makes the file ~6 % smaller and the encode 19 % faster; with Auto-CQ on, files come out *larger* â because the bars had been flattering the quality measurement, so letterboxed sources were quietly landing below the target you set. Bars are found from nine samples across the film and the **majority decides**, so a logo flashing up inside a bar no longer holds the cut back. The cut is always **symmetric** â letterbox sits centred, so taking more off the top than the bottom is always wrong. If the samples genuinely disagree (a film that changes aspect ratio part-way, like IMAX scenes), nothing is cut at all. Bars on the sides or on all four edges work the same way. **Subtitles are the exception:** a file carrying picture subtitles (Blu-ray PGS, DVD VobSub) is never cut — those have a fixed position and are usually drawn into the lower bar — and burned-in subtitles are looked for inside the bars themselves: a wide, centred line that returns at a second point in the film calls the cut off, while a one-off copyright notice does not. Text subtitle tracks (SRT, ASS, mov_text) are unaffected, the player places those itself. Run `-cropcheck` first: it draws the proposed cut on the full frame and converts nothing. |
 | 🔮 **AV1** (`-av1`) | Switches to `av1_nvenc` (RTX 40+). Reaches H.265 quality at noticeably smaller sizes; Auto-CQ measures it on its own calibrated scale. 10-bit and HDR pass-through included. H.265 stays the default. **[Details →](TECHNICAL.md#av1-depth)** |
 | 📱 **MP4** (`-mp4`) and **8-bit** (`-8bit`) | An `.mp4` tagged `hvc1` with AAC and faststart — what the iOS Photos app, smart TVs and browsers actually accept. An already-converted file is repackaged losslessly, not encoded twice. `-8bit` is the rescue for older devices that reject 10-bit. **[Details →](TECHNICAL.md#mp4-depth)** |
 | 💻 **CPU mode** (`-cpu`) | Encodes on the processor (libx265, or SVT-AV1 with `-av1`) so the tool works without an NVIDIA card. Everything else stays identical. It's not a quality upgrade — at the default preset it lands where your GPU already is. **[Details and the honest numbers →](TECHNICAL.md#cpu-depth)** |
@@ -251,6 +257,8 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 Everything lives in `NVENCForge_Config.ini` next to the EXE — auto-created, and **you don't have to touch it at all.** The defaults are the measured ones. An invalid value is reset individually in the file with a warning, leaving your comments and everything else untouched. Settings added by a newer version are filled in automatically at their proper place, so an old config file never quietly misses a feature — your previous file is kept as `.bak`.
 
 The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
+
+**Since 1.23.0 the basic decisions live there too** — `codec`, `container`, `bitDepth`, `audioMode`, `keepResolution` and `keepSource`. Those used to exist only as a command-line switch, so "always AV1" or "always MP4" had to be repeated on every run. Each of them has a switch *and* a counter-switch (`-av1`/`-h265`, `-mp4`/`-mkv`, `-8bit`/`-10bit`, `-copyaudio`/`-aac`, `-original`/`-downscale`, `-keep`/`-nokeep`), so a single run can go either way.
 
 The three worth knowing about:
 

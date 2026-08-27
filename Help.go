@@ -79,21 +79,31 @@ CONVERSION OPTIONS
                  Example:  NVENCForge.exe -10000 video.mp4
   -original      Keep the original resolution (no downscaling);
                  the bitrate cap is raised automatically. (alias: -orig)
+                 Set keepResolution=true in the config file to make
+                 this the permanent behaviour.
+  -downscale     Scale down as configured after all, even when
+                 keepResolution=true stands in the config file.
+                 Counterpart to -original, for front-ends: a window
+                 can only ADD arguments, never take them away.
   -copyaudio     Copy all audio tracks 1:1 (no AAC re-encode).
                  Use this for plain viewing when you want the
                  original sound untouched. (alias: -ca)
+                 Set audioMode=copy in the config file to make this
+                 the permanent behaviour.
+  -aac           Re-encode to AAC where the target needs it after
+                 all, even when audioMode=copy stands in the config
+                 file. Counterpart to -copyaudio.
   -av1           Encode AV1 instead of H.265 (needs an RTX 40
                  series GPU or newer). Same quality at roughly
                  25-30% smaller files; output is ".av1.mkv".
                  Note: current Apple TV models have no AV1
                  hardware decoding - H.265 stays the default.
-  -h265          Force H.265 even when "-av1" appears earlier on the
-                 same command line - the later switch wins. Useful
-                 for a "Send to" shortcut that carries -av1: instead
-                 of editing the shortcut, append -h265 for one run.
-                 Note this is NOT a config override: the config file
-                 has no setting that turns AV1 on. AV1 comes from the
-                 -av1 switch alone.
+  -h265          Force H.265 for this run. It beats an earlier
+                 "-av1" on the same command line AND codec=av1 in
+                 the config file - the later switch wins. Useful for
+                 a "Send to" shortcut that carries -av1: instead of
+                 editing the shortcut, append -h265 for one run.
+                 (alias: -hevc)
   -mp4           Write a ".mp4" instead of ".mkv" - the container
                  nearly every device can open: iPhone/iPad (imports
                  into the Photos app), smart TVs, tablets, browsers.
@@ -114,6 +124,10 @@ CONVERSION OPTIONS
                  always uses H.265 (an existing ".av1.mkv" is
                  skipped with a hint - re-run -mp4 on the original
                  source). (alias: -apple, the old name)
+                 Set container=mp4 in the config file to make this
+                 the permanent behaviour.
+  -mkv           Write a ".mkv" after all, even when container=mp4
+                 stands in the config file. Counterpart to -mp4.
   -8bit          Encode in 8 bit instead of 10 bit. Only needed for
                  devices that cannot decode the "Main 10" profile -
                  some older TVs, beamers and Android phones show a
@@ -124,6 +138,10 @@ CONVERSION OPTIONS
                  every mode (H.265, AV1, -cpu, -mp4). Repackaging
                  an already converted file cannot change its bit
                  depth - that needs a real conversion.
+                 Set bitDepth=8 in the config file to make this the
+                 permanent behaviour.
+  -10bit         Encode in 10 bit after all, even when bitDepth=8
+                 stands in the config file. Counterpart to -8bit.
   -cpu           Encode on the processor instead of the graphics
                  card - NO Nvidia card required (libx265, or
                  SVT-AV1 when combined with -av1). Everything else
@@ -167,6 +185,10 @@ CONVERSION OPTIONS
                  with -noautocq, or autoCQ=false in the config.
   -noautocq      Disable Auto-CQ for this run (overrides the
                  autoCQ=true config default).
+  -gpu           Encode on the graphics card after all, even when
+                 encoder=cpu stands in the config file. Counterpart
+                 to -cpu, for front-ends: a window can only ADD
+                 arguments, never take them away. (alias: -nvidia)
   -cq NN         Force a fixed CQ for this run only: skips Auto-CQ
                  and ignores the configured CQ. The scale depends
                  on the codec (H.265 1-51; AV1 1-63 with -av1).
@@ -201,6 +223,17 @@ CONVERSION OPTIONS
                  cut at all, because those scenes really are taller.
                  Bars on the sides, or on all four edges, are
                  handled the same way.
+                 Subtitles are the exception, in two ways.
+                 Picture subtitles (Blu-ray PGS, DVD VobSub) come
+                 with their own fixed position and are usually
+                 drawn INTO the lower bar, so a file carrying such
+                 a track is never cut. Burned-in subtitles are
+                 looked for inside the bars themselves: a wide,
+                 centred line that returns at a second point in
+                 the film calls the cut off, while a copyright
+                 notice - it shows up once - does not. Text
+                 subtitle tracks (SRT, ASS, mov_text) are not
+                 affected, the player places those itself.
                  Cutting moves the scaling onto the processor,
                  because the graphics card's scaler cannot crop.
                  Decoding stays on the card.
@@ -219,6 +252,11 @@ CONVERSION OPTIONS
                  successful conversion they are NOT moved at all.
                  The output lives in its own folder, so nothing is
                  overwritten. Use this if you want both files.
+                 Set keepSource=true in the config file to make this
+                 the permanent behaviour.
+  -nokeep        Move the originals away as retireMode says after
+                 all, even when keepSource=true stands in the config
+                 file. Counterpart to -keep.
   -shutdown      Shut the PC down 30 s after the batch finishes
                  ("shutdown /a" cancels it).
   -noshutdown    Do not shut down, even when the config file says
@@ -474,12 +512,17 @@ func printConsoleHelp() {
 
 	section("OPTIONS")
 	option("-original, -orig", "keep the source resolution (no downscale to 1080p)")
+	option("-downscale", "scale down as configured, even if keepResolution=true")
 	option("-copyaudio, -ca", "copy all audio tracks 1:1 (no AAC re-encode)")
+	option("-aac", "re-encode audio to AAC where needed, even if audioMode=copy")
 	option("-av1", "encode AV1 instead of H.265 (needs an RTX 40 or newer)")
-	option("-h265", "force H.265 when -av1 appears earlier on the command line")
+	option("-h265", "force H.265 for this run - beats -av1 and codec=av1")
 	option("-mp4", "write a .mp4 that plays almost everywhere, instead of .mkv")
+	option("-mkv", "write a .mkv, even if the config says container=mp4")
 	option("-8bit", "encode in 8 bit for older devices that reject 10 bit")
+	option("-10bit", "encode in 10 bit, even if the config says bitDepth=8")
 	option("-cpu", "encode on the processor - no Nvidia card needed, slower")
+	option("-gpu", "encode on the graphics card, even if the config says encoder=cpu")
 	option("-cq NN", "force a fixed quality (H.265 1-51, AV1 1-63; lower = better)")
 	option("-noautocq", "switch the automatic quality search off for this run")
 	option("-autocq", "switch it on for this run (it is already on by default)")
@@ -488,6 +531,7 @@ func printConsoleHelp() {
 	option("-nocrop", "keep the black bars for this run")
 	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
 	option("-keep", "leave the originals exactly where they are")
+	option("-nokeep", "move the originals away, even if the config says keepSource=true")
 	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")
 	option("-noshutdown", "do not shut down, even if the config says autoShutdown=true")
 	option("-json", "report progress as JSON lines - for front-ends and scripts")

@@ -39,6 +39,31 @@ type AppConfig struct {
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 
+// newAppConfig baut den Startzustand eines Laufs aus der Konfigurationsdatei.
+//
+// Das ist die eine Stelle, an der die Datei auf den Lauf trifft. Sie steht
+// bewusst VOR dem Auswerten der Befehlszeile: Ein Flag überstimmt die Datei,
+// niemals umgekehrt. Seit 1.23.0 gilt das auch für die Grundentscheidungen
+// (Codec, Container, Bittiefe, Ton, Auflösung, Umgang mit dem Original) —
+// vorher waren die nur als Flag zu haben und ließen sich nicht festlegen.
+//
+// Eigene Funktion, damit eine Prüfung diesen Zustand ohne main() ansehen kann.
+func newAppConfig(s AppSettings) *AppConfig {
+	return &AppConfig{
+		maxBitrateKbps: s.maxBitrate1080p,
+		autoShutdown:   s.autoShutdown,
+		autoCQ:         s.autoCQ,
+		autoCrop:       s.autoCrop,
+		av1:            s.codec == codecAV1,
+		cpu:            s.encoder == encoderCPU,
+		mp4Mode:        s.container == containerMP4,
+		copyAudio:      s.audioMode == audioModeCopy,
+		eightBit:       s.bitDepth == bitDepth8,
+		keepSource:     s.keepSource,
+		keepOriginal:   s.keepResolution,
+	}
+}
+
 // ----------------------------------------------------------------------------
 // AppSettings hält die aus NVENCForge_Config.ini geladenen Encoder-Parameter.
 // Wird in main() via loadOrCreateAppConfig() EINMAL befüllt, danach nur lesend.
@@ -75,6 +100,12 @@ type AppSettings struct {
 	gpuDecodeMaxMbit       int
 	retireMode             string
 	autoCrop               bool
+	codec                  string
+	container              string
+	audioMode              string
+	bitDepth               int
+	keepSource             bool
+	keepResolution         bool
 }
 
 var appSettings = defaultAppSettings()
@@ -111,6 +142,12 @@ func defaultAppSettings() AppSettings {
 		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
 		retireMode:             retireModeFolder,
 		autoCrop:               false,
+		codec:                  codecH265,
+		container:              containerMKV,
+		audioMode:              audioModeAAC,
+		bitDepth:               bitDepth10,
+		keepSource:             false,
+		keepResolution:         false,
 	}
 }
 
@@ -156,6 +193,32 @@ const (
 
 	// originalsFolderName ist das Gegenstück zum Ausgabeordner "output".
 	originalsFolderName = "originals"
+)
+
+// Die Grundentscheidungen eines Laufs — was hinten herauskommt.
+//
+// Sie waren bis 1.23.0 nur als Flags zu haben (-av1, -mp4, -8bit, -copyaudio,
+// -orig, -keep) und ließen sich deshalb nicht dauerhaft festlegen. Wer immer
+// dasselbe wollte, musste es bei jedem Aufruf mitgeben — und eine Oberfläche
+// konnte nicht anzeigen, was denn nun gilt, weil es nirgends stand.
+//
+// Jede dieser Einstellungen hat ein Flag UND ein Gegen-Flag: Ein Aufruf muss
+// sie in beide Richtungen überstimmen können, sonst gewinnt die Datei immer
+// gegen das, was im Fenster eingestellt ist.
+const (
+	codecH265 = "h265"
+	codecAV1  = "av1"
+
+	containerMKV = "mkv"
+	containerMP4 = "mp4"
+
+	audioModeAAC  = "aac"
+	audioModeCopy = "copy"
+
+	// Bittiefe der Ausgabe. 10 Bit ist der Auslieferungszustand: HEVC Main10
+	// zeigt in dunklen Verläufen keine Streifen. 8 Bit ist für alte Geräte da.
+	bitDepth10 = 10
+	bitDepth8  = 8
 )
 
 // cpuModeActive gilt für den ganzen Lauf: gesetzt durch das Flag -cpu, den
@@ -275,6 +338,12 @@ func defaultConfigStrings() map[string]string {
 		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
 		"retireMode":             d.retireMode,
 		"autoCrop":               strconv.FormatBool(d.autoCrop),
+		"codec":                  d.codec,
+		"container":              d.container,
+		"audioMode":              d.audioMode,
+		"bitDepth":               strconv.Itoa(d.bitDepth),
+		"keepSource":             strconv.FormatBool(d.keepSource),
+		"keepResolution":         strconv.FormatBool(d.keepResolution),
 	}
 }
 
@@ -544,6 +613,47 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
+		case "codec":
+			// AV1 gab es bis 1.23.0 nur als Flag -av1. Ein Schlüssel dafür
+			// fehlte, und wer immer AV1 wollte, musste es jedes Mal mitgeben.
+			if c := strings.ToLower(val); c == codecH265 || c == codecAV1 {
+				s.codec = c
+			} else {
+				bad(key, val)
+			}
+		case "container":
+			if c := strings.ToLower(val); c == containerMKV || c == containerMP4 {
+				s.container = c
+			} else {
+				bad(key, val)
+			}
+		case "audioMode":
+			if m := strings.ToLower(val); m == audioModeAAC || m == audioModeCopy {
+				s.audioMode = m
+			} else {
+				bad(key, val)
+			}
+		case "bitDepth":
+			// Nur die beiden Werte, die der Encoder wirklich kennt. Eine freie
+			// Zahl anzunehmen hieße, einen Tippfehler bis zum FFmpeg-Aufruf
+			// durchzureichen, wo er als unverständlicher Fehler ankommt.
+			if n, e := strconv.Atoi(val); e == nil && (n == bitDepth10 || n == bitDepth8) {
+				s.bitDepth = n
+			} else {
+				bad(key, val)
+			}
+		case "keepSource":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.keepSource = b
+			} else {
+				bad(key, val)
+			}
+		case "keepResolution":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.keepResolution = b
+			} else {
+				bad(key, val)
+			}
 		case "gpuDecodeMaxMbit":
 			// Obergrenze 500 statt "beliebig": ein Tippfehler darf nicht dazu
 			// führen, dass die Schutzgrenze faktisch wegfällt. 1 = praktisch aus.
@@ -654,6 +764,49 @@ func buildDefaultConfigText() string {
 1080 is Full HD. Set 2160 to keep 4K material at 4K.
 The -original option ignores this for a single run.`)
 
+	configEntry("keepResolution", d.keepResolution, "true, false",
+		`Keep the resolution of the source instead of scaling it down to
+maxResolution. A 4K film then stays 4K, whatever maxResolution says.
+Expect much bigger files and longer encodes - and check that the
+device you play on can handle 4K at all.
+The -original option does this for a single run, -downscale undoes it.`)
+
+	configEntry("codec", d.codec, "h265, av1",
+		`Which video codec the result is encoded in.
+"h265" is the safe choice - every current phone, TV and player handles
+it, and it is what this program is tuned for.
+"av1" reaches the same picture at roughly 25-30 % less bitrate, but it
+encodes slower, plays back on fewer devices, and on the graphics card
+it needs an RTX 40 series or newer. Its quality is steered by
+av1TargetCQ, not targetCQ.
+The -av1 option switches a single run over, -h265 back.`)
+
+	configEntry("container", d.container, "mkv, mp4",
+		`Which kind of file the result is written into.
+"mkv" holds everything: several audio tracks, subtitles of any kind,
+chapters.
+"mp4" is what phones, TVs and Apple devices play without complaint -
+but it cannot store picture subtitles (those tracks are dropped), and
+it takes only ONE audio and one subtitle track, so a source with
+several opens a chooser.
+The -mp4 option switches a single run over, -mkv back.`)
+
+	configEntry("bitDepth", d.bitDepth, "10, 8",
+		`How finely colour is graded in the output.
+10 keeps dark gradients smooth (HEVC Main10) and is what current
+devices expect.
+8 is for older hardware that cannot play Main10 - a night sky can show
+visible bands in 8 bit.
+The -8bit option switches a single run over, -10bit back.`)
+
+	configEntry("audioMode", d.audioMode, "aac, copy",
+		`What happens to the sound.
+"aac" re-encodes to AAC where the target file needs it and copies the
+track 1:1 where it does not.
+"copy" never re-encodes: the original sound goes in untouched. That
+keeps it bit-perfect - but not every audio format fits into an MP4.
+The -copyaudio option switches a single run over, -aac back.`)
+
 	configEntry("autoCrop", d.autoCrop, "true, false",
 		`Cut off the black bars of letterboxed video (a 21:9 film inside a
 16:9 frame, for example).
@@ -672,6 +825,15 @@ because letterbox and pillarbox sit centred. Where the samples
 genuinely disagree - a film that changes aspect ratio part-way,
 like the IMAX scenes in some blockbusters - nothing is cut at all.
 Bars on the sides or on all four edges work the same way.
+Subtitles are an exception. A subtitle that sits in the black bar
+below the picture would be cut away with it, and for picture
+subtitles (Blu-ray PGS, DVD VobSub) that placement is how they are
+built - so a file carrying such a track is never cut. Burned-in
+subtitles are searched for inside the bars: a wide, centred line
+that shows up at a second point in the film calls the cut off, while
+a copyright notice appearing once does not. Text subtitle tracks
+(SRT, ASS, mov_text) are not affected - the player places those
+itself.
 No automatic detection is perfect, and a wrong cut is not visible
 in the result, only in what is missing from it.
 Use -cropcheck first: it writes a picture showing where the cut would
@@ -699,12 +861,20 @@ the recycle bin on its own when a drive runs low on space, which is
 how originals used to vanish unnoticed.
 The -keep option always wins and leaves the original where it is.`)
 
+	configEntry("keepSource", d.keepSource, "true, false",
+		`Leave the original exactly where it is after a successful conversion,
+instead of moving it away as retireMode says.
+Both files then exist side by side - the result lives in its own
+"output" folder, so nothing is ever overwritten. Keep an eye on your
+free space with this switched on.
+The -keep option does this for a single run, -nokeep undoes it.`)
+
 	configEntry("encoder", d.encoder, "nvidia, cpu",
 		`Which encoder to use. "nvidia" uses the graphics card (fast).
 "cpu" uses the processor instead - runs on any machine, but takes
-roughly 40 minutes per hour of 1080p video. The -cpu option switches
-a single run over. Without an Nvidia card, NVENCForge offers CPU
-mode by itself at startup.`)
+roughly 40 minutes per hour of 1080p video. Without an Nvidia card,
+NVENCForge offers CPU mode by itself at startup.
+The -cpu option switches a single run over, -gpu back.`)
 
 	heading("PART 2  -  expert settings\nThese are measured, well-tested values. You can safely ignore\nthis entire section - it is here for people who want to tinker.")
 

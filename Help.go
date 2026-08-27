@@ -171,8 +171,9 @@ CONVERSION OPTIONS
                  costs a minute or two per file and replaces all
                  guesswork about "which CQ should I use".
                  The target is "autoCQTargetVMAF" in the config
-                 file (default 96 of 100 - at that level the
-                 result is indistinguishable in normal viewing).
+                 file (default 98 of 100 - high enough that fine
+                 texture survives even on smooth, evenly lit
+                 close-ups, where a 96 can still look soft).
                  Sources that were already heavily compressed
                  cannot reach the target at all. NVENCForge then
                  measures how far they CAN go and picks the most

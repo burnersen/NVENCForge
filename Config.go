@@ -129,9 +129,9 @@ func defaultAppSettings() AppSettings {
 		av1MaxBitrate1080p:     6000,
 		av1MaxBitrateOriginal:  13000,
 		autoCQ:                 true,
-		autoCQTargetVMAF:       96,
+		autoCQTargetVMAF:       98,
 		autoCQTolerance:        0.5,
-		autoCQPlateauTolerance: 2.5,
+		autoCQPlateauTolerance: 1.5,
 		encoder:                encoderNvidia,
 		cpuPreset:              "fast",
 		cpuAV1Preset:           6,
@@ -842,9 +842,11 @@ for a single run, -nocrop off.`)
 
 	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
 		`How much visible quality the automatic search aims for, on a scale
-where 100 is identical to the source. 96 is indistinguishable in
-normal viewing; 97 holds up even in a direct side-by-side
-comparison; below 94 you start to see it. Higher = bigger files.`)
+where 100 is identical to the source. 98 is the default because the
+scale turns forgiving below it: on smooth, evenly lit close-ups a
+result scoring 96 can already look soft, while fine texture still
+survives at 98. Lower values save real space on busy material;
+below 94 the loss shows on anything. Higher = bigger files.`)
 
 	configEntry("audioKbpsPerChannel", d.audioKbpsPerChannel, "more than 32",
 		`Audio quality when a track has to be re-encoded to AAC, per channel.

@@ -29,7 +29,7 @@ Before each encode, NVENCForge runs a short per-file analysis (typically well un
 
 1. **Scan.** The source's bitrate profile is read without decoding, and a few short sample windows are placed on the demanding scenes — the hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels with *exactly* the settings of the real encode, and each result is scored with **VMAF** (a perceptual video-quality metric developed by Netflix, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 96) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
+3. **Pick & verify.** From the two anchor scores the CQ that hits the quality target (default: VMAF 98) is derived — and then confirmed with one more real measurement. If the verification misses, the pick is corrected. No blind trust in interpolation.
 
 Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that is already gone. Instead of pointlessly escalating to expensive quality levels, Auto-CQ detects the plateau and climbs to cheaper CQ levels that provably stay near the reachable maximum — every candidate is confirmed by a real VMAF measurement, and on such sources the file often shrinks by a third or more at no visible cost.
 
@@ -38,9 +38,9 @@ Tuning knobs in `NVENCForge_Config.ini`:
 | Key | Default | Meaning |
 |---|---|---|
 | `autoCQ` | `true` | Auto-CQ as the startup default (off = classic fixed `targetCQ`) |
-| `autoCQTargetVMAF` | `96` | The quality target of the search (70–99) |
+| `autoCQTargetVMAF` | `98` | The quality target of the search (70–99) |
 | `autoCQTolerance` | `0.5` | May land up to this far below the target when that saves a CQ step → smaller files; `0` = exact targeting |
-| `autoCQPlateauTolerance` | `2.5` | Extra savings budget when the target is provably unreachable (pre-compressed sources): the pick may drop up to this many VMAF points below the measured maximum, each step confirmed by a real measurement. The full budget applies only where the measured curve is flat (plateau noise) — a target merely grazed on a steep curve spends at most `autoCQTolerance`; `0` = keep the conservative pick |
+| `autoCQPlateauTolerance` | `1.5` | Extra savings budget when the target is provably unreachable (pre-compressed sources): the pick may drop up to this many VMAF points below the measured maximum, each step confirmed by a real measurement. The full budget applies only where the measured curve is flat (plateau noise) — a target merely grazed on a steep curve spends at most `autoCQTolerance`; `0` = keep the conservative pick |
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level. Auto-CQ works for both H.265 and AV1 — each on its own VMAF-calibrated CQ scale — and needs an FFmpeg build with `libvmaf` — the automatically downloaded build has it.
 

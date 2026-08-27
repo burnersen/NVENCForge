@@ -114,9 +114,9 @@ func TestResetInvalidConfigLines(t *testing.T) {
 		"maxResolution=1080",         // reset to default
 		"nvencPreset=p5",             // reset to default
 		"autoCQ=true",                // reset to default
-		"autoCQTargetVMAF=96",        // reset to default
+		"autoCQTargetVMAF=98",        // reset to default
 		"autoCQTolerance=0.5",        // reset to default
-		"autoCQPlateauTolerance=2.5", // reset to default
+		"autoCQPlateauTolerance=1.5", // reset to default
 		"unknownKey=keepme",          // unknown key untouched
 	} {
 		if !strings.Contains(got, want) {

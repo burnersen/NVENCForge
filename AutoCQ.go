@@ -33,7 +33,7 @@ import (
 // anchor CQ values with EXACTLY the settings of the real encode, measure
 // VMAF against the identically filtered source, interpolate the CQ that
 // should hit the configured quality target (autoCQTargetVMAF minus the
-// space-saving autoCQTolerance, defaults 96 and 0.5), then confirm the
+// space-saving autoCQTolerance, defaults 98 and 0.5), then confirm the
 // pick with one verification measurement. A saturated
 // curve (pre-compressed source, target unreachable) falls back to the
 // cheapest CQ on the measured plateau instead of chasing the target; on
@@ -167,11 +167,12 @@ var hevcAutoCQScale = autoCQScale{
 // av1AutoCQFallbackCQ is the CQ the AV1 Auto-CQ search falls back to when its
 // analysis cannot run (clip too short, unknown frame rate, libvmaf missing). It
 // is deliberately NOT av1TargetCQ: that value (32 ≈ VMAF 94) is a lean manual-
-// mode setting, too far below the VMAF target (default 96) for a graceful fallback. 24
-// equals the low anchor (≈ VMAF 96), so an unmeasurable AV1 clip lands near the
-// search intent instead of visibly softer, while manual AV1 mode keeps its own
-// av1TargetCQ. H.265 needs no such constant — its manual targetCQ (26) already
-// sits near the target.
+// mode setting, too far below the VMAF target (default 98) for a graceful fallback. 24
+// equals the low anchor (≈ VMAF 96), so an unmeasurable AV1 clip lands in the
+// neighbourhood of the search intent instead of visibly softer, while manual AV1
+// mode keeps its own av1TargetCQ. H.265 needs no such constant — its manual
+// targetCQ (26) IS the low anchor of the search and therefore lands at the top
+// of the measured range, not below the target.
 const av1AutoCQFallbackCQ = 24
 
 // av1AutoCQScale mirrors it on the wider av1_nvenc scale. The numbers come from

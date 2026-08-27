@@ -141,7 +141,7 @@ Before each encode, a short per-file analysis runs — typically well under a mi
 
 1. **Scan.** The bitrate profile is read *without decoding*, and short sample windows are placed on the demanding scenes. The hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels using *exactly* the settings of the real encode, then scored with **VMAF** (Netflix's perceptual quality metric, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** The CQ that hits the target (default: VMAF 96) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
+3. **Pick & verify.** The CQ that hits the target (default: VMAF 98) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
 
 Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum. On such files that routinely saves a third of the size at no visible cost.
 
@@ -264,7 +264,7 @@ The three worth knowing about:
 
 | Key | Default | In one line |
 |---|---|---|
-| `autoCQTargetVMAF` | `96` | The quality target Auto-CQ aims for |
+| `autoCQTargetVMAF` | `98` | The quality target Auto-CQ aims for |
 | `retireMode` | `folder` | Where originals go: an `originals` folder next to the source (instant, nothing deleted), or `recyclebin` |
 | `gpuDecode` | `true` | Decode on the GPU; bit-identical, just faster. Sources above `gpuDecodeMaxMbit` (50) use the CPU on purpose |
 

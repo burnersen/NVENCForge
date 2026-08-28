@@ -66,16 +66,24 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, no dependencies. It deliberately uses its **own** copy rather than whatever happens to be in your `PATH` — every quality value in this tool was measured against a known build. Want your own instead? Put `ffmpeg.exe` and `ffprobe.exe` next to the EXE; a local copy always wins and nothing is downloaded.
 
-**Some real numbers** from 12 mixed 4K HDR test files on an RTX 5070 Ti, run with `-original -copyaudio` (original 4K resolution kept, audio copied 1:1, so every saved megabyte comes from the video encode alone):
+**Some real numbers** — not a curated test set, but nine files straight out of everyday use on an RTX 5070 Ti, 4 h 50 min of source material in total, all with default settings (VMAF target 97, 45 % cost cap, anything above 1080p downscaled to 1080p).
 
-| Source | Before | After | Saved |
-|---|---|---|---|
-| 400 Mbit/s HEVC 4K demo | 1 435 MB | 65 MB | **−96 %** |
-| HDR10+ / Dolby Vision sample | 510 MB | 107 MB | **−79 %** |
-| DTS:X IMAX 4K clip | 383 MB | 129 MB | **−66 %** |
-| **Whole batch (12 files)** | **5.4 GB** | **0.9 GB** | **−4 481 MB in 2:58 min** |
+| Source material | What Auto-CQ decided | Before | After | Saved |
+|---|---|---|---|---|
+| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 — target hit, VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
+| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 — target hit, VMAF 96.7, after stepping down from CQ 31 | 3 157 MB | 758 MB | **−76 %** |
+| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 — cost cap: CQ 30 would have spent 50 % of the source | 3 375 MB | 1 331 MB | **−61 %** |
+| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 — cost cap: CQ 30 = 46 %, CQ 31 = 41 % | 2 956 MB | 1 289 MB | **−56 %** |
+| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 — cost cap | 1 060 MB | 444 MB | **−58 %** |
+| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 — cost cap: CQ 30 = 48 %, CQ 31 = 43 % | 1 154 MB | 500 MB | **−57 %** |
+| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 — cost cap | 401 MB | 183 MB | **−54 %** |
+| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 — cost cap: CQ 30 would have spent 51 % of the source | 284 MB | 118 MB | **−58 %** |
+| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 — VMAF plateaus at ~90.9, cap deliberately left alone | 248 MB | 157 MB | **−37 %** |
+| **Whole batch (9 files)** | | **15 519 MB** | **5 785 MB** | **−9 734 MB (−62 %)** |
 
-A reality check on these figures: the −96 % case is a best case, a short clip with an absurdly high source bitrate, and most of that saving comes from the source being wildly inefficient, not from magic. Typical, already-compressed material shrinks far less, and some files get skipped or remuxed entirely because re-encoding wouldn't help. That skip logic is a feature, not a shortcoming. The encoder is CQ-based (constant quality) in every mode: the size shrinks to whatever the chosen quality level needs. In the default mode (no flags) material above 1080p is also downscaled to 1080p.
+Look at the second half of that table: seven of these nine files never reached VMAF 97 — and that is the tool working, not failing. They are 60 fps web sources that had already been squeezed hard, where hitting the target would have cost 46–51 % of the source's own bitrate. The cost cap stopped the search there and traded a few VMAF points for roughly a third of the file size. The last row is the opposite decision: that source was compressed so hard that even CQ 34 would still spend 47 % of it, so the cap was left alone on purpose — enforcing it would have cost picture quality without saving anything. Every one of those decisions is spelled out in the log while it runs.
+
+A reality check on these figures: the encoder is CQ-based (constant quality) in every mode, so a file shrinks to whatever the measured quality level needs. Bulky or inefficiently encoded sources give up a lot, already-lean ones give up little, and some get skipped or repackaged entirely because re-encoding wouldn't help them at all. That skip logic is a feature, not a shortcoming. In the default mode (no flags) material above 1080p is also downscaled to 1080p — that is where the −76 % row comes from.
 
 > **A word of honesty:** NVENCForge re-encodes, and re-encoding is lossy. It shines on bulky, already-compressed or inefficient files where the space saving is worth a quality hit you won't notice in normal playback. It is **not** an archival tool: keep untouched masters of anything irreplaceable. Originals are moved aside into an `originals` folder, never deleted — but treat that as a safety net, not a backup.
 

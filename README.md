@@ -70,16 +70,16 @@ On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, n
 
 | Source material | Auto-CQ | Before | After | Saved |
 |---|---|---|---|---|
-| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 · target reached · VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
-| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 · target reached · VMAF 96.7 | 3 157 MB | 758 MB | **−76 %** |
-| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 · cost cap · VMAF 89.5 | 3 375 MB | 1 331 MB | **−61 %** |
-| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 · cost cap · VMAF 89.7 | 2 956 MB | 1 289 MB | **−56 %** |
-| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 · cost cap · VMAF 91.6 | 1 060 MB | 444 MB | **−58 %** |
-| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 · cost cap · VMAF 92.8 | 1 154 MB | 500 MB | **−57 %** |
-| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 · cost cap · VMAF 92.3 | 401 MB | 183 MB | **−54 %** |
-| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 · cost cap · VMAF 93.7 | 284 MB | 118 MB | **−58 %** |
-| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 · quality plateau · VMAF 90.3 | 248 MB | 157 MB | **−37 %** |
-| **Whole batch (9 files)** | | **15 519 MB** | **5 785 MB** | **−9 734 MB (−62 %)** |
+| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 · target reached · VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
+| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 · target reached · VMAF 96.7 | 3 157 MB | 758 MB | **−76 %** |
+| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 · cost cap · VMAF 89.5 | 3 375 MB | 1 331 MB | **−61 %** |
+| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 · cost cap · VMAF 89.7 | 2 956 MB | 1 289 MB | **−56 %** |
+| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 · cost cap · VMAF 91.6 | 1 060 MB | 444 MB | **−58 %** |
+| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 · cost cap · VMAF 92.8 | 1 154 MB | 500 MB | **−57 %** |
+| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 · cost cap · VMAF 92.3 | 401 MB | 183 MB | **−54 %** |
+| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 · cost cap · VMAF 93.7 | 284 MB | 118 MB | **−58 %** |
+| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 · quality plateau · VMAF 90.3 | 248 MB | 157 MB | **−37 %** |
+| **Whole batch (9 files)** | | **15 519 MB** | **5 785 MB** | **−9 734 MB (−62 %)** |
 
 **Reading the middle column.** *CQ* is the quality dial: the lower the number, the more bits the encoder spends. Most tools make you pick one value for everything; NVENCForge measures the right one for each file, scored with *VMAF* (a 0–100 picture-quality score, where 100 means identical to the source). Three things can end that search, and the log always names the one that did:
 
@@ -173,7 +173,7 @@ This tool's defaults aren't taste — they're what came out of real measurements
 
 | What | Result | Measured |
 |---|---|---|
-| **Encoder bit distribution** (`aqStrength` 8 → 2, plus one more B-frame) | **8–28 % smaller files at the same quality and the same encode time**, across four real sources | 15 Aug 2026 |
+| **Encoder bit distribution** (`aqStrength` 8 → 2, plus one more B-frame) | **8–28 % smaller files at the same quality and the same encode time**, across four real sources | 15 Aug 2026 |
 | **GPU downscaling** replacing the CPU path | 4K→1080p in **29 s instead of 35 s**, and *closer* to the source than before (VMAF 97.62 vs 97.32 for the old CPU bicubic) | 6 Aug 2026 |
 | **GPU vs CPU encoding** at equal file size | NVENC `p5` and libx265 `fast` land at the **same quality per byte** — NVENC four times faster | 25 Jul 2026 |
 
@@ -209,7 +209,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-gpu` | Encode on the **graphics card** after all, even if the config says `encoder=cpu` *(alias: `-nvidia`)* |
 | `-autocq` | Measure the CQ per file — **on by default**; set `autoCQ=false` in the config to disable |
 | `-noautocq` | Disable Auto-CQ for this run |
-| `-cq NN` | Force a fixed CQ (H.265 1–51, AV1 1–63) |
+| `-cq NN` | Force a fixed CQ (H.265 1–51, AV1 1–63) |
 | `-cropcheck` | Show where black bars **would** be cut — writes a picture, converts nothing |
 | `-crop` | Cut the black bars off letterboxed video — **off by default**, see [what it changes](#crop) |
 | `-nocrop` | Keep the black bars for this run |
@@ -257,7 +257,7 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 | Mode | What it's for |
 |---|---|
-| âï¸ **Auto-crop** (`-crop`, `-cropcheck`) | Cuts the black bars off letterboxed video. **Off by default, and what it does for you flips with Auto-CQ:** at a fixed CQ a quarter of the frame in bars makes the file ~6 % smaller and the encode 19 % faster; with Auto-CQ on, files come out *larger* â because the bars had been flattering the quality measurement, so letterboxed sources were quietly landing below the target you set. Bars are found from nine samples across the film and the **majority decides**, so a logo flashing up inside a bar no longer holds the cut back. The cut is always **symmetric** â letterbox sits centred, so taking more off the top than the bottom is always wrong. If the samples genuinely disagree (a film that changes aspect ratio part-way, like IMAX scenes), nothing is cut at all. Bars on the sides or on all four edges work the same way. **Subtitles are the exception:** a file carrying picture subtitles (Blu-ray PGS, DVD VobSub) is never cut — those have a fixed position and are usually drawn into the lower bar — and burned-in subtitles are looked for inside the bars themselves: a wide, centred line that returns at a second point in the film calls the cut off, while a one-off copyright notice does not. Text subtitle tracks (SRT, ASS, mov_text) are unaffected, the player places those itself. Run `-cropcheck` first: it draws the proposed cut on the full frame and converts nothing. |
+| âï¸ **Auto-crop** (`-crop`, `-cropcheck`) | Cuts the black bars off letterboxed video. **Off by default, and what it does for you flips with Auto-CQ:** at a fixed CQ a quarter of the frame in bars makes the file ~6 % smaller and the encode 19 % faster; with Auto-CQ on, files come out *larger* â because the bars had been flattering the quality measurement, so letterboxed sources were quietly landing below the target you set. Bars are found from nine samples across the film and the **majority decides**, so a logo flashing up inside a bar no longer holds the cut back. The cut is always **symmetric** â letterbox sits centred, so taking more off the top than the bottom is always wrong. If the samples genuinely disagree (a film that changes aspect ratio part-way, like IMAX scenes), nothing is cut at all. Bars on the sides or on all four edges work the same way. **Subtitles are the exception:** a file carrying picture subtitles (Blu-ray PGS, DVD VobSub) is never cut — those have a fixed position and are usually drawn into the lower bar — and burned-in subtitles are looked for inside the bars themselves: a wide, centred line that returns at a second point in the film calls the cut off, while a one-off copyright notice does not. Text subtitle tracks (SRT, ASS, mov_text) are unaffected, the player places those itself. Run `-cropcheck` first: it draws the proposed cut on the full frame and converts nothing. |
 | 🔮 **AV1** (`-av1`) | Switches to `av1_nvenc` (RTX 40+). Reaches H.265 quality at noticeably smaller sizes; Auto-CQ measures it on its own calibrated scale. 10-bit and HDR pass-through included. H.265 stays the default. **[Details →](TECHNICAL.md#av1-depth)** |
 | 📱 **MP4** (`-mp4`) and **8-bit** (`-8bit`) | An `.mp4` tagged `hvc1` with AAC and faststart — what the iOS Photos app, smart TVs and browsers actually accept. An already-converted file is repackaged losslessly, not encoded twice. `-8bit` is the rescue for older devices that reject 10-bit. **[Details →](TECHNICAL.md#mp4-depth)** |
 | 💻 **CPU mode** (`-cpu`) | Encodes on the processor (libx265, or SVT-AV1 with `-av1`) so the tool works without an NVIDIA card. Everything else stays identical. It's not a quality upgrade — at the default preset it lands where your GPU already is. **[Details and the honest numbers →](TECHNICAL.md#cpu-depth)** |

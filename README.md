@@ -66,22 +66,28 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, no dependencies. It deliberately uses its **own** copy rather than whatever happens to be in your `PATH` — every quality value in this tool was measured against a known build. Want your own instead? Put `ffmpeg.exe` and `ffprobe.exe` next to the EXE; a local copy always wins and nothing is downloaded.
 
-**Some real numbers** — not a curated test set, but nine files straight out of everyday use on an RTX 5070 Ti, 4 h 50 min of source material in total, all with default settings (VMAF target 97, 45 % cost cap, anything above 1080p downscaled to 1080p).
+**Some real numbers** — not a curated test set, but nine files straight out of everyday use on an RTX 5070 Ti, 4 h 50 min of source material in total, all with default settings (anything above 1080p downscaled to 1080p).
 
-| Source material | What Auto-CQ decided | Before | After | Saved |
+| Source material | Auto-CQ | Before | After | Saved |
 |---|---|---|---|---|
-| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 — target hit, VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
-| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 — target hit, VMAF 96.7, after stepping down from CQ 31 | 3 157 MB | 758 MB | **−76 %** |
-| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 — cost cap: CQ 30 would have spent 50 % of the source | 3 375 MB | 1 331 MB | **−61 %** |
-| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 — cost cap: CQ 30 = 46 %, CQ 31 = 41 % | 2 956 MB | 1 289 MB | **−56 %** |
-| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 — cost cap | 1 060 MB | 444 MB | **−58 %** |
-| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 — cost cap: CQ 30 = 48 %, CQ 31 = 43 % | 1 154 MB | 500 MB | **−57 %** |
-| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 — cost cap | 401 MB | 183 MB | **−54 %** |
-| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 — cost cap: CQ 30 would have spent 51 % of the source | 284 MB | 118 MB | **−58 %** |
-| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 — VMAF plateaus at ~90.9, cap deliberately left alone | 248 MB | 157 MB | **−37 %** |
+| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 · target reached · VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
+| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 · target reached · VMAF 96.7 | 3 157 MB | 758 MB | **−76 %** |
+| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 · cost cap · VMAF 89.5 | 3 375 MB | 1 331 MB | **−61 %** |
+| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 · cost cap · VMAF 89.7 | 2 956 MB | 1 289 MB | **−56 %** |
+| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 · cost cap · VMAF 91.6 | 1 060 MB | 444 MB | **−58 %** |
+| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 · cost cap · VMAF 92.8 | 1 154 MB | 500 MB | **−57 %** |
+| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 · cost cap · VMAF 92.3 | 401 MB | 183 MB | **−54 %** |
+| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 · cost cap · VMAF 93.7 | 284 MB | 118 MB | **−58 %** |
+| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 · quality plateau · VMAF 90.3 | 248 MB | 157 MB | **−37 %** |
 | **Whole batch (9 files)** | | **15 519 MB** | **5 785 MB** | **−9 734 MB (−62 %)** |
 
-Look at the second half of that table: seven of these nine files never reached VMAF 97 — and that is the tool working, not failing. They are 60 fps web sources that had already been squeezed hard, where hitting the target would have cost 46–51 % of the source's own bitrate. The cost cap stopped the search there and traded a few VMAF points for roughly a third of the file size. The last row is the opposite decision: that source was compressed so hard that even CQ 34 would still spend 47 % of it, so the cap was left alone on purpose — enforcing it would have cost picture quality without saving anything. Every one of those decisions is spelled out in the log while it runs.
+**Reading the middle column.** *CQ* is the quality dial: the lower the number, the more bits the encoder spends. Most tools make you pick one value for everything; NVENCForge measures the right one for each file, scored with *VMAF* (a 0–100 picture-quality score, where 100 means identical to the source). Three things can end that search, and the log always names the one that did:
+
+- **target reached** — the measured CQ hits the quality target, 97 by default.
+- **cost cap** — reaching the target would have cost more than 45 % of the source's own bitrate, so the search stopped one step earlier. That limit is a setting of yours (`autoCQMaxSourcePercent`), and `0` switches it off.
+- **quality plateau** — the file was already compressed so hard that extra bits stopped buying picture. Here the cap was deliberately *not* applied: even CQ 34 would still spend 47 % of that source, so enforcing a limit would have cost quality without saving anything.
+
+So seven of these nine files stayed below the quality target **on purpose**. Take the 64-minute row: hitting VMAF 97 would have meant CQ 30 and half of the source's bitrate, so the search settled on CQ 32 at 38 % — a few VMAF points traded for a third of the file size. Set the cap to `0` and those same files chase the target instead, and come out bigger.
 
 A reality check on these figures: the encoder is CQ-based (constant quality) in every mode, so a file shrinks to whatever the measured quality level needs. Bulky or inefficiently encoded sources give up a lot, already-lean ones give up little, and some get skipped or repackaged entirely because re-encoding wouldn't help them at all. That skip logic is a feature, not a shortcoming. In the default mode (no flags) material above 1080p is also downscaled to 1080p — that is where the −76 % row comes from.
 

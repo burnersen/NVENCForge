@@ -141,11 +141,11 @@ Before each encode, a short per-file analysis runs — typically well under a mi
 
 1. **Scan.** The bitrate profile is read *without decoding*, and short sample windows are placed on the demanding scenes. The hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels using *exactly* the settings of the real encode, then scored with **VMAF** (Netflix's perceptual quality metric, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** The CQ that hits the target (default: VMAF 98) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
+3. **Pick & verify.** The CQ that hits the target (default: VMAF 97) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
 
 Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum. On such files that routinely saves a third of the size at no visible cost. And it never buys quality nobody can see: once one more CQ step gains too little VMAF to justify the space it costs, the search stops there.
 
-Grainy or very busy films are the opposite case — the target *is* reachable there, just expensive: film grain is random detail, so the encoder has to pay for it frame after frame while VMAF rewards it like real picture content. If that bothers you, `autoCQMaxSourcePercent` puts a spending limit on the search (`40` = never use more than 40 % of the source bitrate). It's off by default, and whenever it steps in, the log says so. Files that were already compressed hard are deliberately left alone — they need a *bigger* share of their own bitrate, not a smaller one, so a limit they can't meet would only cost picture quality without saving anything.
+Grainy or very busy films are the opposite case — the target *is* reachable there, just expensive: film grain is random detail, so the encoder has to pay for it frame after frame while VMAF rewards it like real picture content. That is what `autoCQMaxSourcePercent` is for: it puts a spending limit on the search — `45` by default, meaning the search never uses more than 45 % of the source bitrate. Whenever it steps in, the log says so, and `0` switches it off. Files that were already compressed hard are deliberately left alone — they need a *bigger* share of their own bitrate, not a smaller one, so a limit they can't meet would only cost picture quality without saving anything.
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 
@@ -266,8 +266,8 @@ The three worth knowing about:
 
 | Key | Default | In one line |
 |---|---|---|
-| `autoCQTargetVMAF` | `98` | The quality target Auto-CQ aims for |
-| `autoCQMaxSourcePercent` | `0` (off) | Spending limit for Auto-CQ, as a share of the source bitrate. `40` keeps grainy films from costing half the original; already-compressed sources are left alone |
+| `autoCQTargetVMAF` | `97` | The quality target Auto-CQ aims for |
+| `autoCQMaxSourcePercent` | `45` | Spending limit for Auto-CQ, as a share of the source bitrate. Keeps grainy films from costing half the original; already-compressed sources are left alone, `0` switches it off |
 | `retireMode` | `folder` | Where originals go: an `originals` folder next to the source (instant, nothing deleted), or `recyclebin` |
 | `gpuDecode` | `true` | Decode on the GPU; bit-identical, just faster. Sources above `gpuDecodeMaxMbit` (50) use the CPU on purpose |
 

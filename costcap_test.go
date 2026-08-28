@@ -159,7 +159,7 @@ func TestAutoCQCostCapTarget(t *testing.T) {
 		return dir
 	}
 
-	t.Run("off by default", func(t *testing.T) {
+	t.Run("switched off with 0", func(t *testing.T) {
 		budget, err := autoCQCostCapTarget(sc, newDir(), buckets, windows, testSampleSec, 0, 26)
 		if err == nil {
 			t.Fatal("a disabled cap must say why it did nothing")

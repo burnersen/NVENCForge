@@ -130,10 +130,10 @@ func defaultAppSettings() AppSettings {
 		av1MaxBitrate1080p:     6000,
 		av1MaxBitrateOriginal:  13000,
 		autoCQ:                 true,
-		autoCQTargetVMAF:       98,
+		autoCQTargetVMAF:       97,
 		autoCQTolerance:        0.5,
 		autoCQPlateauTolerance: 1.5,
-		autoCQMaxSourcePercent: 0,
+		autoCQMaxSourcePercent: 45,
 		encoder:                encoderNvidia,
 		cpuPreset:              "fast",
 		cpuAV1Preset:           6,
@@ -854,11 +854,13 @@ for a single run, -nocrop off.`)
 
 	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
 		`How much visible quality the automatic search aims for, on a scale
-where 100 is identical to the source. 98 is the default because the
-scale turns forgiving below it: on smooth, evenly lit close-ups a
-result scoring 96 can already look soft, while fine texture still
-survives at 98. Lower values save real space on busy material;
-below 94 the loss shows on anything. Higher = bigger files.`)
+where 100 is identical to the source. 97 is the default: below it the
+scale turns forgiving fast - on smooth, evenly lit close-ups a result
+scoring 96 can already look soft. It works hand in hand with
+"autoCQMaxSourcePercent", which caps what an expensive file may cost,
+so the target itself does not have to be lowered for grainy material.
+Lower values save real space on busy material; below 94 the loss shows
+on anything. Higher = bigger files.`)
 
 	configEntry("audioKbpsPerChannel", d.audioKbpsPerChannel, "more than 32",
 		`Audio quality when a track has to be re-encoded to AAC, per channel.
@@ -940,10 +942,11 @@ Every candidate is verified by a real measurement, never estimated.
 		`Spending limit for the quality search, as a percentage of what
 the source itself uses. Grainy or very busy films can otherwise
 cost more than half the original bitrate for quality nobody sees.
-With 40 the search stops at the best setting that still fits into
-40% of the source rate and says so in the log. The chosen setting
-is confirmed by a real measurement. 0 switches the limit off, and
-that is the default - the quality target then always wins.
+45 is the default: the search stops at the best setting that still
+fits into 45% of the source rate and says so in the log. The chosen
+setting is confirmed by a real measurement. Lower values save more
+and cost more picture; 0 switches the limit off entirely, and the
+quality target then always wins.
 Files that were ALREADY compressed hard are left alone: they need
 a bigger share of their own bitrate, not a smaller one, so a limit
 they cannot meet would only cost picture without saving anything.

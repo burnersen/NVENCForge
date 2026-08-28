@@ -171,9 +171,9 @@ CONVERSION OPTIONS
                  costs a minute or two per file and replaces all
                  guesswork about "which CQ should I use".
                  The target is "autoCQTargetVMAF" in the config
-                 file (default 98 of 100 - high enough that fine
+                 file (default 97 of 100 - high enough that fine
                  texture survives even on smooth, evenly lit
-                 close-ups, where a 96 can still look soft).
+                 close-ups, where a 96 can already look soft).
                  Sources that were already heavily compressed
                  cannot reach the target at all. NVENCForge then
                  measures how far they CAN go and picks the most
@@ -187,9 +187,9 @@ CONVERSION OPTIONS
                  Grainy or very busy films are the opposite case:
                  there the target IS reachable, but only at a
                  price. "autoCQMaxSourcePercent" puts a spending
-                 limit on the search (e.g. 40 = never use more
-                 than 40% of the source bitrate). It is off by
-                 default, and the log says whenever it steps in.
+                 limit on the search (45 by default = never use
+                 more than 45% of the source bitrate). The log
+                 says whenever it steps in, 0 turns it off.
                  Sources that were already compressed hard are
                  left alone - they need a bigger share of their
                  own bitrate, so a limit they cannot meet would

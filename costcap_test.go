@@ -207,15 +207,42 @@ func TestAutoCQCostCapTarget(t *testing.T) {
 		}
 	})
 
-	t.Run("stays inside the clamp range", func(t *testing.T) {
-		// 10 % of the source is out of reach on this curve; the cap has to
-		// stop at the clamp ceiling instead of running off the scale.
+	t.Run("an unreachable cap keeps out of it", func(t *testing.T) {
+		// 10 % of the source is out of reach even at the clamp ceiling on this
+		// curve. Clamping there would give the worst picture the scale allows
+		// AND still miss the cap, so the cap has to stay out altogether.
 		budget, err := autoCQCostCapTarget(sc, newDir(), buckets, windows, testSampleSec, 10, 26)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if budget.pick != sc.clampMax {
-			t.Errorf("got CQ %d, want the clamp ceiling %d", budget.pick, sc.clampMax)
+		if !budget.unreachable {
+			t.Error("cap must report itself unreachable")
+		}
+		if budget.fires(26) {
+			t.Errorf("an unreachable cap must not move the pick, got CQ %d", budget.pick)
+		}
+		if budget.thriftiestKbps <= budget.capKbps {
+			t.Errorf("thriftiest estimate %.0f should exceed the cap %.0f",
+				budget.thriftiestKbps, budget.capKbps)
+		}
+	})
+
+	t.Run("never runs past the clamp ceiling", func(t *testing.T) {
+		// A cap met exactly AT the clamp ceiling is the one case where the
+		// rounding up could still push the pick past the end of the scale.
+		dir := t.TempDir()
+		writeSampleFile(t, dir, sc.anchorLow, 6625, testSampleSec)
+		writeSampleFile(t, dir, sc.anchorHigh, 3690, testSampleSec)
+		// CQ 34 costs about 2056 kbit/s on this curve, i.e. 17.1 % of 12004.
+		budget, err := autoCQCostCapTarget(sc, dir, buckets, windows, testSampleSec, 17.2, 26)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if budget.unreachable {
+			t.Fatal("a cap the clamp ceiling meets must count as reachable")
+		}
+		if budget.pick > sc.clampMax {
+			t.Errorf("got CQ %d, must never exceed the clamp ceiling %d", budget.pick, sc.clampMax)
 		}
 	})
 
@@ -254,6 +281,58 @@ func TestAutoCQCostCapTarget(t *testing.T) {
 
 // TestAutoCQCostCapAV1Scale guards the cap on the wider AV1 scale: the same
 // budget has to land on a different CQ there, and still inside its clamp range.
+// TestAutoCQCostCapAgainstRealLibrary is the regression that matters most: it
+// replays four sources measured on 2026-08-28 from a real library, at the same
+// 35 % cap, and pins down WHICH of them the cap may touch.
+//
+// The two thin sources are the reason the reachability check exists. Already
+// compressed hard, they need a HIGHER share of their own bitrate than the fat
+// ones — one of them sits at 53 % from CQ 26 through CQ 30 and would still be
+// near 52 % at the clamp ceiling. Capping those clamps the picture to the worst
+// the scale allows and misses the cap anyway. The fat sources drop below 20 %
+// over the same span, so there the cap does real work.
+func TestAutoCQCostCapAgainstRealLibrary(t *testing.T) {
+	sc := hevcAutoCQScale
+	windows := [][2]float64{{100, 8}}
+	cases := []struct {
+		name              string
+		sourceKbps        float64
+		kbpsLow, kbpsHigh float64 // measured samples at CQ 26 and CQ 30
+		wantUnreachable   bool
+		wantFires         bool
+	}{
+		{"thin 60 fps at 2.8 Mbit", 2819, 1498, 1485, true, false},
+		{"thin 30 fps at 3.7 Mbit", 3667, 1831, 1686, true, false},
+		{"fat 25 fps at 12 Mbit", 11969, 4230, 2393, false, true},
+		{"fat 50 fps at 11 Mbit", 11006, 6625, 3690, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSampleFile(t, dir, sc.anchorLow, c.kbpsLow, testSampleSec)
+			writeSampleFile(t, dir, sc.anchorHigh, c.kbpsHigh, testSampleSec)
+			buckets := []bitrateBucket{
+				{startSec: 96, kbps: c.sourceKbps},
+				{startSec: 104, kbps: c.sourceKbps},
+			}
+			budget, err := autoCQCostCapTarget(sc, dir, buckets, windows, testSampleSec, 35, sc.anchorLow)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if budget.unreachable != c.wantUnreachable {
+				t.Errorf("unreachable: got %v, want %v (thriftiest %.0f vs cap %.0f)",
+					budget.unreachable, c.wantUnreachable, budget.thriftiestKbps, budget.capKbps)
+			}
+			if got := budget.fires(sc.anchorLow); got != c.wantFires {
+				t.Errorf("fires: got %v, want %v (pick CQ %d)", got, c.wantFires, budget.pick)
+			}
+			if c.wantFires && budget.pick > sc.clampMax {
+				t.Errorf("pick CQ %d ran past the clamp ceiling %d", budget.pick, sc.clampMax)
+			}
+		})
+	}
+}
+
 func TestAutoCQCostCapAV1Scale(t *testing.T) {
 	sc := av1AutoCQScale
 	windows := [][2]float64{{100, 8}}

@@ -190,6 +190,10 @@ CONVERSION OPTIONS
                  limit on the search (e.g. 40 = never use more
                  than 40% of the source bitrate). It is off by
                  default, and the log says whenever it steps in.
+                 Sources that were already compressed hard are
+                 left alone - they need a bigger share of their
+                 own bitrate, so a limit they cannot meet would
+                 only cost picture without saving anything.
                  Works for H.265 and AV1 alike. Videos shorter
                  than 30 seconds skip the analysis. Turn it off
                  with -noautocq, or autoCQ=false in the config.

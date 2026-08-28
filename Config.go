@@ -943,7 +943,11 @@ cost more than half the original bitrate for quality nobody sees.
 With 40 the search stops at the best setting that still fits into
 40% of the source rate and says so in the log. The chosen setting
 is confirmed by a real measurement. 0 switches the limit off, and
-that is the default - the quality target then always wins.`)
+that is the default - the quality target then always wins.
+Files that were ALREADY compressed hard are left alone: they need
+a bigger share of their own bitrate, not a smaller one, so a limit
+they cannot meet would only cost picture without saving anything.
+The log says whenever that happens.`)
 
 	group("AV1 mode (-av1, needs an RTX 40 series card or newer)")
 

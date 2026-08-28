@@ -502,6 +502,12 @@ type autoCQCostCap struct {
 	capKbps    float64 // the ceiling itself
 	pickKbps   float64 // estimated bitrate of the INCOMING pick
 	sourceKbps float64 // source rate at the sample windows
+	// thriftiestKbps is what the scale's clamp ceiling would still cost, and
+	// unreachable says that even THAT stays above the cap — the source is
+	// already compressed too hard for the cap to be met. The pick is then left
+	// alone; see the reasoning in autoCQCostCapTarget.
+	thriftiestKbps float64
+	unreachable    bool
 }
 
 // fires reports whether the cap actually moves the pick.
@@ -554,6 +560,24 @@ func autoCQCostCapTarget(sc autoCQScale, tmpDir string, buckets []bitrateBucket,
 	budget.pickKbps = autoCQEstimateKbps(sc, kbpsLow, rate, pick)
 	if budget.pickKbps <= budget.capKbps {
 		return budget, nil // the target fits the budget — nothing to do
+	}
+	// Reachability first. A cap that cannot be met even at the thriftiest CQ
+	// the scale allows must not interfere at all: the search would clamp to
+	// that CQ — the worst picture the setting can produce — and STILL miss the
+	// cap. Worse picture, no saving, which is the exact opposite of the point.
+	//
+	// This is not a corner case. Measured 2026-08-28 across a real library:
+	// sources that are already compressed hard need a HIGHER share of their
+	// own bitrate, not a lower one, because there is nothing left to squeeze
+	// out. One 60 fps source at 2.8 Mbit/s stayed at 53 % of itself from CQ 26
+	// all the way down to CQ 30, and would still sit near 52 % at the clamp
+	// ceiling. A fat 12 Mbit/s source drops to under 20 % over the same span.
+	// Without this check a cap tuned for the fat sources quietly wrecks the
+	// thin ones.
+	budget.thriftiestKbps = autoCQEstimateKbps(sc, kbpsLow, rate, sc.clampMax)
+	if budget.thriftiestKbps > budget.capKbps {
+		budget.unreachable = true
+		return budget, nil
 	}
 	// Ceiling, not rounding: the CQ has to land ON or BELOW the cap, and half
 	// a step over it would defeat the whole purpose.
@@ -1381,6 +1405,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// makes several CQ steps measure the same size and the same score, which
 	// is precisely the false plateau the saturation brake must never see
 	// (measured 2026-07-27) — capping the SEARCH keeps every step honest.
+	costCapNote := ""
 	if budget, cerr := autoCQCostCapTarget(sc, tmpDir, profile, windows,
 		sampleSec, appSettings.autoCQMaxSourcePercent, cq); cerr != nil {
 		// A cap that cannot be worked out must never fail the analysis; the
@@ -1389,6 +1414,14 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		if debugMode && appSettings.autoCQMaxSourcePercent > 0 {
 			pDetail.Printf("Auto-CQ cost cap detail: %v\n", cerr)
 		}
+	} else if budget.unreachable {
+		// Say it out loud. Silence here would look like the cap simply did not
+		// apply, and the user would have no way to tell an unreachable cap from
+		// a file that was already cheap enough.
+		costCapNote = fmt.Sprintf(
+			"  · note: the %.4g%% cost cap was left alone — this source is already compressed so hard that even CQ %d would still spend %.0f%% of it, so capping would cost picture without saving anything",
+			appSettings.autoCQMaxSourcePercent, sc.clampMax,
+			budget.sharePct(budget.thriftiestKbps))
 	} else if budget.fires(cq) {
 		capped := budget.pick
 		score, merr := measure(capped)
@@ -1435,6 +1468,9 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	}
 	if gapNote != "" {
 		fmt.Println(pterm.Gray(gapNote))
+	}
+	if costCapNote != "" {
+		fmt.Println(pterm.Gray(costCapNote))
 	}
 	// An unreachable target on a cap-limited source says something about the
 	// configured ceiling, not about the material. Without this line the plateau

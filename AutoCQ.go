@@ -423,6 +423,150 @@ func autoCQGainTooSmall(sc autoCQScale, cq int, verified, vmafLow float64) bool 
 	return (verified-vmafLow)/float64(sc.anchorLow-cq) < sc.minGainPerStep
 }
 
+// autoCQSampleKbps returns the video bitrate of a finished sample encode in
+// kbit/s. The sample file holds exactly the analysis windows and nothing else
+// (no audio, no subtitles, "-an -sn"), so its size over their total length is
+// the rate the real encode produces on this very material — measured, not
+// modelled, and free: the file is already on disk from the quality search.
+func autoCQSampleKbps(tmpDir string, cq int, sampleSec float64) (float64, error) {
+	if sampleSec <= 0 {
+		return 0, errors.New("sample window length unknown")
+	}
+	info, err := os.Stat(filepath.Join(tmpDir, fmt.Sprintf("sample_cq%d.mkv", cq)))
+	if err != nil {
+		return 0, err
+	}
+	return float64(info.Size()) * 8 / 1000 / sampleSec, nil
+}
+
+// autoCQWindowSourceKbps returns the source bitrate AT THE SAMPLE WINDOWS,
+// averaged over them.
+//
+// The cost cap compares an encode of these windows against the source, and
+// that comparison only holds when both sides describe the same seconds of
+// film. With bitrate-guided placement the windows sit deliberately on the
+// heaviest scenes, where the source runs well above its own average — judging
+// them against the whole-file average would fire the cap on material that is
+// not expensive at all. A window overlapping two buckets is weighted by the
+// share it covers of each. Returns 0 when no profile exists; the caller then
+// skips the cap instead of guessing.
+func autoCQWindowSourceKbps(buckets []bitrateBucket, windows [][2]float64, bucketLen float64) float64 {
+	if len(buckets) == 0 || len(windows) == 0 || bucketLen <= 0 {
+		return 0
+	}
+	var weighted, seconds float64
+	for _, w := range windows {
+		start, length := w[0], w[1]
+		if length <= 0 {
+			continue
+		}
+		for _, b := range buckets {
+			if b.kbps <= 0 {
+				continue
+			}
+			overlap := math.Min(start+length, b.startSec+bucketLen) - math.Max(start, b.startSec)
+			if overlap <= 0 {
+				continue
+			}
+			weighted += b.kbps * overlap
+			seconds += overlap
+		}
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return weighted / seconds
+}
+
+// autoCQBitrateRate derives the decay constant of the bitrate-over-CQ curve
+// from the two anchor samples. Bitrate falls close to exponentially with CQ,
+// so one constant describes the whole curve. Returns 0 when the two samples
+// do not form a falling curve (measurement noise on flat material) — the
+// caller must then leave the pick alone rather than extrapolate from nonsense.
+func autoCQBitrateRate(sc autoCQScale, kbpsLow, kbpsHigh float64) float64 {
+	if kbpsLow <= 0 || kbpsHigh <= 0 || kbpsLow <= kbpsHigh || sc.anchorHigh <= sc.anchorLow {
+		return 0
+	}
+	return math.Log(kbpsLow/kbpsHigh) / float64(sc.anchorHigh-sc.anchorLow)
+}
+
+// autoCQEstimateKbps evaluates that curve at one CQ.
+func autoCQEstimateKbps(sc autoCQScale, kbpsLow, rate float64, cq int) float64 {
+	return kbpsLow * math.Exp(-rate*float64(cq-sc.anchorLow))
+}
+
+// autoCQCostCap is what the cost cap worked out, kept together so the caller
+// can both act on it and explain it in one line.
+type autoCQCostCap struct {
+	pick       int     // the CQ the cap asks for (equals the incoming pick when it does not fire)
+	capKbps    float64 // the ceiling itself
+	pickKbps   float64 // estimated bitrate of the INCOMING pick
+	sourceKbps float64 // source rate at the sample windows
+}
+
+// fires reports whether the cap actually moves the pick.
+func (c autoCQCostCap) fires(pick int) bool { return c.pick > pick }
+
+// sharePct expresses a bitrate as a share of what the source spends.
+func (c autoCQCostCap) sharePct(kbps float64) float64 {
+	if c.sourceKbps <= 0 {
+		return 0
+	}
+	return kbps / c.sourceKbps * 100
+}
+
+// autoCQCostCapTarget answers one question: does reaching the quality target
+// cost more of the source bitrate than the user allows, and if so, which CQ
+// still fits?
+//
+// The model comes free from the two anchor samples the quality search already
+// encoded. Verified on a 50 fps source (2026-08-28): anchors CQ 26 = 6625 and
+// CQ 30 = 3690 kbit/s predict CQ 28 at 4942 kbit/s against 5008 measured — an
+// error of 1.3 %, far inside what a ceiling decision needs.
+//
+// The result never falls below the incoming pick: the cap may save space, it
+// may never spend it. And it never leaves the scale's clamp range, where even
+// easy material visibly degrades.
+func autoCQCostCapTarget(sc autoCQScale, tmpDir string, buckets []bitrateBucket,
+	windows [][2]float64, sampleSec, percent float64, pick int) (autoCQCostCap, error) {
+
+	budget := autoCQCostCap{pick: pick}
+	if percent <= 0 || len(windows) == 0 {
+		return budget, errors.New("cost cap disabled")
+	}
+	budget.sourceKbps = autoCQWindowSourceKbps(buckets, windows, windows[0][1])
+	if budget.sourceKbps <= 0 {
+		return budget, errors.New("no source bitrate profile for the sample windows")
+	}
+	kbpsLow, err := autoCQSampleKbps(tmpDir, sc.anchorLow, sampleSec)
+	if err != nil {
+		return budget, fmt.Errorf("sample size at CQ %d: %w", sc.anchorLow, err)
+	}
+	kbpsHigh, err := autoCQSampleKbps(tmpDir, sc.anchorHigh, sampleSec)
+	if err != nil {
+		return budget, fmt.Errorf("sample size at CQ %d: %w", sc.anchorHigh, err)
+	}
+	rate := autoCQBitrateRate(sc, kbpsLow, kbpsHigh)
+	if rate <= 0 {
+		return budget, errors.New("bitrate does not fall between the anchors")
+	}
+	budget.capKbps = budget.sourceKbps * percent / 100
+	budget.pickKbps = autoCQEstimateKbps(sc, kbpsLow, rate, pick)
+	if budget.pickKbps <= budget.capKbps {
+		return budget, nil // the target fits the budget — nothing to do
+	}
+	// Ceiling, not rounding: the CQ has to land ON or BELOW the cap, and half
+	// a step over it would defeat the whole purpose.
+	needed := int(math.Ceil(float64(sc.anchorLow) + math.Log(kbpsLow/budget.capKbps)/rate))
+	if needed > sc.clampMax {
+		needed = sc.clampMax
+	}
+	if needed > pick {
+		budget.pick = needed
+	}
+	return budget, nil
+}
+
 // autoCQPlateauPick returns the cheapest acceptable CQ on a curve whose
 // reachable quality tops out below the search target. Base case is the low
 // anchor (its measurement IS the plateau, minus noise); the user tolerance
@@ -920,6 +1064,9 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	placement := "fixed positions"
 	var profileErr error
 	gapNote := ""
+	// The profile outlives the placement decision: the cost cap needs it again
+	// at the end, to read the source rate at exactly the sampled seconds.
+	var profile []bitrateBucket
 	if buckets, videoPackets, perr := probeSourceBitrateBuckets(ctx, filePath, stats.DurationSec, windows[0][1]); perr != nil {
 		if ctx.Err() != nil {
 			_ = spinner.Stop()
@@ -927,6 +1074,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		}
 		profileErr = perr
 	} else {
+		profile = buckets
 		if gw := autoCQGuidedWindows(buckets, stats.DurationSec, len(windows), windows[0][1]); gw != nil {
 			windows, placement = gw, "bitrate-guided"
 		}
@@ -1217,6 +1365,59 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 					plateauLevel, target, rung)
 				break
 			}
+		}
+	}
+
+	// Cost cap (INI key autoCQMaxSourcePercent, off by default): the quality
+	// target counts only as long as reaching it stays within a share of what
+	// the source itself spends. Grainy or very busy material can push Auto-CQ
+	// into picks that cost more than half the source rate for VMAF nobody sees
+	// — measured 2026-08-28 on a 50 fps source: CQ 26 spends 55 % of the
+	// source, CQ 29 only 36 %.
+	//
+	// It runs LAST, after every quality mechanism has had its say, because it
+	// is not a quality argument at all: it is the user's budget overruling the
+	// result. And it deliberately does NOT touch -maxrate. An encoder ceiling
+	// makes several CQ steps measure the same size and the same score, which
+	// is precisely the false plateau the saturation brake must never see
+	// (measured 2026-07-27) — capping the SEARCH keeps every step honest.
+	if budget, cerr := autoCQCostCapTarget(sc, tmpDir, profile, windows,
+		sampleSec, appSettings.autoCQMaxSourcePercent, cq); cerr != nil {
+		// A cap that cannot be worked out must never fail the analysis; the
+		// file simply keeps the quality-driven pick, as in every version
+		// before this one.
+		if debugMode && appSettings.autoCQMaxSourcePercent > 0 {
+			pDetail.Printf("Auto-CQ cost cap detail: %v\n", cerr)
+		}
+	} else if budget.fires(cq) {
+		capped := budget.pick
+		score, merr := measure(capped)
+		switch {
+		case merr != nil && ctx.Err() != nil:
+			return fail("cost cap measurement", merr)
+		case merr != nil:
+			// Anchors and search were fine, only the confirming measurement
+			// failed. Keep the capped pick with an estimated score: the cap is
+			// the point of this step, and dropping it here would hand back
+			// exactly the oversized file it exists to prevent.
+			pDetail.Printf("Auto-CQ cost cap detail: %v\n", merr)
+			predicted = vmafLow + slope*float64(capped-sc.anchorLow)
+			verifyNote = fmt.Sprintf(
+				" (cost cap %.0f%%: CQ %d would spend %.0f%% of the source, using CQ %d — measurement failed, estimate kept)",
+				appSettings.autoCQMaxSourcePercent, cq, budget.sharePct(budget.pickKbps), capped)
+			cq = capped
+		default:
+			// Report what the capped encode really costs, not what the model
+			// predicted — the sample for it now exists.
+			realShare := budget.sharePct(budget.pickKbps)
+			if realKbps, kerr := autoCQSampleKbps(tmpDir, capped, sampleSec); kerr == nil {
+				realShare = budget.sharePct(realKbps)
+			}
+			verifyNote = fmt.Sprintf(
+				" (cost cap %.0f%%: CQ %d would spend %.0f%% of the source — CQ %d measured %.1f at %.0f%%)",
+				appSettings.autoCQMaxSourcePercent, cq, budget.sharePct(budget.pickKbps),
+				capped, score, realShare)
+			cq, predicted = capped, score
 		}
 	}
 

@@ -184,6 +184,12 @@ CONVERSION OPTIONS
                  It also stops on its own once one more step
                  would gain too little quality to be worth the
                  extra file size.
+                 Grainy or very busy films are the opposite case:
+                 there the target IS reachable, but only at a
+                 price. "autoCQMaxSourcePercent" puts a spending
+                 limit on the search (e.g. 40 = never use more
+                 than 40% of the source bitrate). It is off by
+                 default, and the log says whenever it steps in.
                  Works for H.265 and AV1 alike. Videos shorter
                  than 30 seconds skip the analysis. Turn it off
                  with -noautocq, or autoCQ=false in the config.

@@ -90,6 +90,7 @@ type AppSettings struct {
 	autoCQTargetVMAF       float64
 	autoCQTolerance        float64
 	autoCQPlateauTolerance float64
+	autoCQMaxSourcePercent float64
 	encoder                string
 	cpuPreset              string
 	cpuAV1Preset           int
@@ -132,6 +133,7 @@ func defaultAppSettings() AppSettings {
 		autoCQTargetVMAF:       98,
 		autoCQTolerance:        0.5,
 		autoCQPlateauTolerance: 1.5,
+		autoCQMaxSourcePercent: 0,
 		encoder:                encoderNvidia,
 		cpuPreset:              "fast",
 		cpuAV1Preset:           6,
@@ -328,6 +330,7 @@ func defaultConfigStrings() map[string]string {
 		"autoCQTargetVMAF":       strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
 		"autoCQTolerance":        strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 		"autoCQPlateauTolerance": strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
+		"autoCQMaxSourcePercent": strconv.FormatFloat(d.autoCQMaxSourcePercent, 'f', -1, 64),
 		"encoder":                d.encoder,
 		"cpuPreset":              d.cpuPreset,
 		"cpuAV1Preset":           strconv.Itoa(d.cpuAV1Preset),
@@ -552,6 +555,15 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "autoCQPlateauTolerance":
 			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 10 {
 				s.autoCQPlateauTolerance = fv
+			} else {
+				bad(key, val)
+			}
+		// 0 switches the cap off. The lower bound of 10 is deliberate: below
+		// that a re-encode cannot hold quality on any material, so a typo like
+		// "4" instead of "40" is rejected instead of quietly ruining a batch.
+		case "autoCQMaxSourcePercent":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && (fv == 0 || (fv >= 10 && fv <= 100)) {
+				s.autoCQMaxSourcePercent = fv
 			} else {
 				bad(key, val)
 			}
@@ -923,6 +935,15 @@ compressed (streaming rips, for example). Their quality tops out
 below the target no matter what, so chasing it only wastes space.
 Every candidate is verified by a real measurement, never estimated.
 0 restores the old, more cautious behaviour.`)
+
+	configEntry("autoCQMaxSourcePercent", d.autoCQMaxSourcePercent, "0, or 10 to 100",
+		`Spending limit for the quality search, as a percentage of what
+the source itself uses. Grainy or very busy films can otherwise
+cost more than half the original bitrate for quality nobody sees.
+With 40 the search stops at the best setting that still fits into
+40% of the source rate and says so in the log. The chosen setting
+is confirmed by a real measurement. 0 switches the limit off, and
+that is the default - the quality target then always wins.`)
 
 	group("AV1 mode (-av1, needs an RTX 40 series card or newer)")
 

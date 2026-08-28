@@ -50,7 +50,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.25.0"
+const appVersion = "1.26.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1675,6 +1675,11 @@ func printActiveSettings(cfg *AppConfig) {
 		}
 		addQuality("Quality target", target)
 		addQuality("Plateau tolerance", fmt.Sprintf("%.4g VMAF", s.autoCQPlateauTolerance))
+		// Only worth a line when it is armed: at 0 (the default) the cap
+		// changes nothing, and an "off" row would just pad the list.
+		if s.autoCQMaxSourcePercent > 0 {
+			addQuality("Cost cap", fmt.Sprintf("%.4g%% of source bitrate", s.autoCQMaxSourcePercent))
+		}
 	}
 
 	// Die encoder-eigenen Regler unterscheiden sich je Backend: NVENC-Preset,

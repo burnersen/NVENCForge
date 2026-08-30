@@ -199,6 +199,13 @@ CONVERSION OPTIONS
                  with -noautocq, or autoCQ=false in the config.
   -noautocq      Disable Auto-CQ for this run (overrides the
                  autoCQ=true config default).
+  -cqcheck       Run the Auto-CQ search, report the CQ it would
+                 pick for every file - and convert nothing.
+                 Useful to see the pick and the anchor measurements
+                 without paying for the encode afterwards. Files
+                 that would only be remuxed say so instead: no CQ
+                 search runs for them. Switches the search on by
+                 itself, so -autocq is not needed alongside it.
   -gpu           Encode on the graphics card after all, even when
                  encoder=cpu stands in the config file. Counterpart
                  to -cpu, for front-ends: a window can only ADD
@@ -541,6 +548,7 @@ func printConsoleHelp() {
 	option("-cq NN", "force a fixed quality (H.265 1-51, AV1 1-63; lower = better)")
 	option("-noautocq", "switch the automatic quality search off for this run")
 	option("-autocq", "switch it on for this run (it is already on by default)")
+	option("-cqcheck", "show which CQ the search would pick - converts nothing")
 	option("-cropcheck", "show where black bars would be cut - converts nothing")
 	option("-crop", "cut black bars off letterboxed video (see -help for what it costs)")
 	option("-nocrop", "keep the black bars for this run")

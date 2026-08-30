@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.29.0"
+const appVersion = "1.30.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1236,6 +1236,14 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 			sawCropFlag = true
 			continue
 		}
+		// -cqcheck zeigt nur, welches CQ die Analyse für jede Datei wählen
+		// würde. Wie -cropcheck schaltet es die zugehörige Suche mit ein,
+		// weil ohne sie nichts zu zeigen wäre.
+		if strings.EqualFold(arg, "-cqcheck") {
+			cfg.cqCheckOnly = true
+			cfg.autoCQ = true
+			continue
+		}
 		if strings.EqualFold(arg, "-cq") {
 			// Two-token flag: the CQ value follows as its own argument. The
 			// valid upper bound depends on the codec (H.265 1-51, AV1 1-63),
@@ -1339,6 +1347,12 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		autoCQCodec = "AV1"
 	}
 	switch {
+	case cfg.cqCheckOnly:
+		// Der Prüfmodus sieht aus wie ein normaler Lauf, konvertiert aber
+		// absichtlich nichts — das muss vor dem ersten Nichts-passiert-Moment
+		// gesagt sein, genau wie beim Crop-Prüfmodus.
+		pInfo.Printf("CQ check only (%s): the Auto-CQ search runs and reports its pick — no file is converted.\n",
+			autoCQCodec)
 	case cfg.autoCQ && sawAutoCQFlag:
 		pInfo.Printf("Auto-CQ mode enabled: CQ per file via sampled VMAF measurement (%s).\n", autoCQCodec)
 	case cfg.autoCQ:

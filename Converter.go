@@ -972,6 +972,17 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	switch {
 	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" && !cfg.mp4Mode &&
 		!doScale && bitrateKbps <= effCfg.maxBitrateKbps && allAudioSafeAAC(stats.AudioStreams):
+		// Der Prüfmodus darf die Quelle NICHT anfassen — auch nicht durch das
+		// Umbenennen hier. Die Prüfung steht in diesem Zweig und nicht hinter
+		// dem switch, weil dieser Fall sein Ergebnis sofort ausführt und
+		// zurückkehrt, statt nur doConvert/doRemux zu setzen.
+		if cfg.cqCheckOnly {
+			pInfo.Printf("%s CQ check: already %s-MKV (%d kbps) — no CQ search runs for it.\n",
+				pterm.LightMagenta("›"), codecLabel, bitrateKbps)
+			fmt.Println()
+			result.Skipped = true
+			return result
+		}
 		newPath := filepath.Join(dir, base+outSuffix+ext)
 		if _, statErr := os.Stat(newPath); statErr == nil {
 			fmt.Println(pterm.Gray(fmt.Sprintf(
@@ -1000,6 +1011,17 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		doRemux = true
 	default:
 		doConvert = true
+	}
+
+	// -cqcheck: Dateien, die ohnehin nur umgepackt würden, durchlaufen gar
+	// keine CQ-Suche. Das muss dastehen — sonst sieht der Prüfmodus hier aus,
+	// als wäre die Analyse fehlgeschlagen.
+	if cfg.cqCheckOnly && !doConvert {
+		pInfo.Printf("%s CQ check: this file would only be remuxed — no CQ search runs for it.\n",
+			pterm.LightMagenta("›"))
+		fmt.Println()
+		result.Skipped = true
+		return result
 	}
 
 	printDavinciAudioInfo(stats.AudioStreams, cfg.copyAudio)
@@ -1032,6 +1054,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, doScale, scale); ok {
 				nvencOpts = scale.buildOpts(cq, maxBR, bufBR, gopSize)
 				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
+			}
+			// Die Suche hat gerade gemeldet, was sie wählen würde — im
+			// Prüfmodus ist damit alles getan. Auch ein Fehlschlag endet hier:
+			// die Analyse hat stattgefunden, ihr Ergebnis steht oben.
+			if cfg.cqCheckOnly {
+				fmt.Println()
+				result.Skipped = true
+				return result
 			}
 		}
 	}

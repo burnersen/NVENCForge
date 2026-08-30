@@ -918,6 +918,14 @@ func autoCQWindowPrep(fpsNum, fpsDen int) string {
 	return fmt.Sprintf("setpts=PTS-STARTPTS,fps=%d/%d", fpsNum, fpsDen)
 }
 
+// autoCQNoteText macht aus dem angehängten Begründungstext (Form " (…)") eine
+// eigenständige Zeile: das führende Leerzeichen und die umschließenden
+// Klammern fallen weg. Die Notizen selbst behalten ihre Klammerform, weil sie
+// an mehr als einer Stelle gebaut werden — umgeformt wird erst bei der Ausgabe.
+func autoCQNoteText(note string) string {
+	return strings.Trim(strings.TrimSpace(note), "()")
+}
+
 // autoCQVMAFThreads returns the libvmaf worker thread count (all cores).
 func autoCQVMAFThreads() int {
 	if n := runtime.NumCPU(); n > 1 {
@@ -1458,8 +1466,18 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if ctx.Err() != nil {
 		return 0, false
 	}
-	pOK.Printf("Auto-CQ: CQ %d → predicted VMAF %.1f (target %.4g)%s\n",
-		cq, predicted, target, verifyNote)
+	// Die Kopfzeile nennt NUR die Entscheidung. Bis 1.29.0 stand die
+	// Begründung mit im selben Satz, und die enthält oft eine zweite CQ-Zahl
+	// (den verworfenen Wunschwert) — ein Nutzer im Doom9-Forum fragte
+	// daraufhin zu Recht "and what is the CQ used?". Die Begründung steht
+	// jetzt als eigene graue Zeile darunter, wie die Anker auch. Aus
+	// demselben Grund fällt "predicted" weg: in den meisten Zweigen ist der
+	// Wert eine echte Messung, und wo er hochgerechnet ist, sagt das die
+	// Begründungszeile ("interpolated value kept", "estimate kept").
+	pOK.Printf("Auto-CQ: using CQ %d (VMAF %.1f, target %.4g)\n", cq, predicted, target)
+	if note := autoCQNoteText(verifyNote); note != "" {
+		fmt.Println(pterm.Gray("  · " + note))
+	}
 	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
 		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,
 		formatDuration(time.Since(analysisStart).Seconds()))))

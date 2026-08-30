@@ -36,6 +36,7 @@ type AppConfig struct {
 	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
 	autoCrop       bool     // -crop: schwarze Balken erkennen und wegschneiden (Voreinstellung aus)
 	cropCheckOnly  bool     // -cropcheck: nur das Kontrollbild schreiben, NICHT konvertieren
+	cqCheckOnly    bool     // -cqcheck: nur die Auto-CQ-Suche zeigen, NICHT konvertieren
 	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 

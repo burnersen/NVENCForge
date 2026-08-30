@@ -201,7 +201,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 | `-aac` | Re-encode audio to AAC where needed, even if `audioMode=copy` |
 | `-av1` | Encode **AV1** instead of H.265 (RTX 40+) → `.av1.mkv` |
 | `-h265` | Force **H.265** for this run — beats an earlier `-av1` on the command line *and* `codec=av1` in the config (the later switch wins) |
-| `-mp4` | Write an **MP4 that plays almost everywhere** (H.265/`hvc1` + AAC + faststart). *(`-apple` still works — it's the old name)* |
+| `-mp4` | Write an **MP4 that plays almost everywhere** (H.265 tagged `hvc1` + AAC + faststart). Works with `-av1` too, tagged `av01` — fewer devices play that. *(`-apple` still works — it's the old name)* |
 | `-mkv` | Write an **MKV** after all, even if the config says `container=mp4` |
 | `-8bit` | Encode in **8 bit** instead of 10 bit, for older devices that reject "Main 10" |
 | `-10bit` | Encode in **10 bit** after all, even if the config says `bitDepth=8` |

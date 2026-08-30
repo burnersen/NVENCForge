@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.30.0"
+const appVersion = "1.31.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1169,7 +1169,7 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		// unbrauchbar machen würde.
 		if strings.EqualFold(arg, "-mp4") || strings.EqualFold(arg, "-apple") {
 			cfg.mp4Mode = true
-			pInfo.Println("MP4 mode enabled: output as a widely playable MP4 (H.265/hvc1 + AAC + faststart).")
+			pInfo.Println("MP4 mode enabled: output as a widely playable MP4 (AAC + faststart; H.265 is re-tagged hvc1).")
 			continue
 		}
 		// Gegenstück zu -mp4, für den Fall container=mp4 in der
@@ -1290,13 +1290,16 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		rest = append(rest, arg)
 	}
-	// -mp4 exists for maximum reach, and AV1 works against exactly that: the iOS
-	// Photos app cannot decode it at all and many TVs and older phones can't
-	// either. So the MP4 output is always H.265 (hvc1). -av1 is overridden here,
-	// before the codec-dependent CQ range and bitrate caps below are resolved.
+	// -mp4 gibt es für maximale Reichweite, und AV1 arbeitet dem teilweise
+	// entgegen: ältere iPhones, Fernseher und Browser können es nicht dekodieren.
+	// Bis 1.30.0 schaltete diese Stelle AV1 deshalb stillschweigend ab — wer
+	// beides ausdrücklich wählte, bekam H.265 und musste den Grund im Protokoll
+	// suchen. Das war bevormundend und technisch überholt: AV1 in MP4 ist ein
+	// regulärer Fall, FFmpeg kennzeichnet die Spur als "av01" (gemessen, 8 und
+	// 10 Bit), und Geräte ab etwa 2023 spielen sie ab. Jetzt entscheidet der
+	// Nutzer, und das Programm sagt nur, worauf er sich einlässt.
 	if cfg.mp4Mode && cfg.av1 {
-		cfg.av1 = false
-		pWarn.Println("-mp4 forces H.265: AV1 does not play on iPhones and many TVs — AV1 is switched off for this run.")
+		pWarn.Println("AV1 in an MP4: current devices play it, but older iPhones, TVs and browsers cannot — add -h265 if the file has to run everywhere.")
 	}
 	// 8 Bit gilt für den ganzen Lauf. Gesetzt wird die Variable erst hier, weil
 	// alle Options-Bauer sie lesen und die Flags in beliebiger Reihenfolge
@@ -1688,9 +1691,11 @@ func printActiveSettings(cfg *AppConfig) {
 		cqVal = s.av1TargetCQ
 		bfVal = "n/a (AV1)"
 	}
-	// -mp4 keeps H.265 but repackages the result as a widely playable MP4 (hvc1).
+	// -mp4 ändert nur die Verpackung, nicht den Codec: angehängt statt gesetzt,
+	// damit hier "AV1 (MP4)" stehen kann. Solange -mp4 AV1 abschaltete, war die
+	// feste Zeichenkette "H.265 (MP4)" richtig — jetzt wäre sie eine Lüge.
 	if cfg != nil && cfg.mp4Mode {
-		videoCodec = "H.265 (MP4)"
+		videoCodec += " (MP4)"
 		codecActive = true
 	}
 	// 8 Bit ist die Ausnahme und muss deshalb sichtbar sein — sonst wundert man
@@ -1771,6 +1776,17 @@ func printActiveSettings(cfg *AppConfig) {
 	if bitrateActive {
 		primary = append(primary,
 			entry{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", true})
+	}
+	// Das Schneiden schrieb bis 1.30.0 nur eine Info-Zeile weit oben und fehlte
+	// in dieser Übersicht — ausgerechnet dort, wo man nachsieht, ob eine
+	// Einstellung angekommen ist. Wie beim Abschalten nur im eingeschalteten
+	// Zustand: ein "off" wäre für die meisten Läufe reines Rauschen.
+	if cfg != nil && cfg.cropCheckOnly {
+		primary = append(primary,
+			entry{"Black bars", "check only — writes a preview, converts nothing", "yellow", true})
+	} else if cfg != nil && cfg.autoCrop {
+		primary = append(primary,
+			entry{"Black bars", "detected and cut off", "cyan", true})
 	}
 	if autoShutdown {
 		// Nur wenn eingeschaltet, dafür dann prominent: dass sich der PC gleich

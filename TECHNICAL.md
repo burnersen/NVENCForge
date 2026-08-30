@@ -80,7 +80,9 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 - **Container & audio.** The iOS gallery won't accept MKV at all, and only plays **AAC** audio. `-mp4` delivers MP4 with `+faststart` — so playback starts immediately instead of after a seek to the end of the file — and re-encodes non-AAC tracks (AC3/DTS/…) to AAC where needed.
 - **Tracks.** MP4 carries several audio tracks just fine, but not every player lets you switch, and every extra track costs space. With more than one audio or subtitle track you are **asked which ones to keep** (no answer within 30 seconds keeps them all). Text subtitles go in as `mov_text`; picture subtitles from Blu-rays cannot be stored in MP4 at all and are reported instead of silently dropped.
 
-A fresh source is encoded to H.265 as usual and then packaged. A file you **already converted** (`.h265.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept. AV1 plays on neither iPhones nor most TVs, so `-mp4` always uses H.265 (an existing `.av1.mkv` is skipped with a hint to re-run `-mp4` on the original source).
+A fresh source is encoded as usual and then packaged. A file you **already converted** (`.h265.mkv` or `.av1.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept.
+
+`-mp4` works with `-av1` as well: the track is marked **`av01`**, which is the regular way AV1 travels in an MP4. Be aware of what you get, though — current phones, TVs and browsers play it, older ones (including every iPhone before the 15 Pro) cannot. NVENCForge says so once and then does as told; add `-h265` when the file has to run everywhere. *(Up to 1.30.0 `-mp4` switched AV1 off instead — that was a decision the program had no business making.)*
 
 > `-apple`, the flag's original name, still works — existing "Send to" shortcuts keep running.
 
@@ -244,7 +246,7 @@ Six keys are new in **1.23.0**. They decide what comes out at the end, and until
 | `keepResolution` | `false` | `true` never downscales, whatever `maxResolution` says | `-original` / `-downscale` |
 | `keepSource` | `false` | `true` leaves the original exactly where it is and ignores `retireMode` | `-keep` / `-nokeep` |
 
-`container=mp4` together with `codec=av1` is the one combination that cannot both be honoured: MP4 exists for maximum reach and AV1 works against exactly that, so the run stays on H.265 and says so.
+`container=mp4` together with `codec=av1` is honoured — the result is an MP4 with an `av01` track. It reaches fewer devices than H.265 would, so the run warns once; `-h265` overrides it for a single run.
 One key decides how the encoder **spends its bits** — and it turned out to be worth real money:
 
 | Key | Default | What it does |

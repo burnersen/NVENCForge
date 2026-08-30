@@ -111,6 +111,10 @@ CONVERSION OPTIONS
                  DaVinci refuse the "hev1" tag FFmpeg sets by
                  default), audio becomes AAC where needed and
                  "+faststart" is added so playback starts at once.
+                 Works with -av1 too: the track is marked "av01".
+                 Current devices play it, older iPhones, TVs and
+                 browsers do not - add -h265 if the file has to
+                 run everywhere.
                  A fresh source is encoded as usual and then
                  repackaged; a file you ALREADY converted
                  (".h265.mkv") is only repackaged - no second

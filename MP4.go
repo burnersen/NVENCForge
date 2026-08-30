@@ -296,8 +296,15 @@ func writeCompatMP4(ctx context.Context, srcMKV string, stats *VideoStats, sel m
 	args = append(args, mp4MuxArgs(stats.VideoCodec)...)
 	args = append(args, outMP4)
 
+	// Der Tag steht nur dann in der Zeile, wenn er auch gesetzt wird: Bei AV1
+	// heißt das Kennzeichen "av01" und kommt vom Muxer selbst — "hvc1" zu
+	// melden wäre schlicht falsch (siehe mp4MuxArgs).
+	tagNote := "AAC + faststart"
+	if len(mp4MuxArgs(stats.VideoCodec)) > 2 {
+		tagNote = "hvc1 + " + tagNote
+	}
 	pterm.NewStyle(pterm.FgLightMagenta, pterm.Bold).
-		Println("  >> MP4 (hvc1 + AAC + faststart, lossless video copy)")
+		Println("  >> MP4 (" + tagNote + ", lossless video copy)")
 	// Reines Umpacken — ein Größenvergleich meldete hier "+0 MB larger".
 	return runFFmpeg(ctx, args, stats.DurationSec, 1, 1, 0)
 }
@@ -387,11 +394,13 @@ func convertedMKVToMP4(ctx context.Context, cfg *AppConfig, filePath string) Pro
 		result.FailedAt = time.Now()
 		return result
 	}
+	// AV1 wird mit umgepackt statt abgewiesen. Bis 1.30.0 blieb die Datei hier
+	// liegen, und der Rat "nimm die ORIGINALQUELLE" ging ins Leere: Wer eine
+	// fertige AV1-Datei in eine MP4 legen will, hat die Quelle oft gar nicht
+	// mehr. Das Umpacken selbst ist verlustfrei und dauert Sekunden — die Frage,
+	// ob das Zielgerät AV1 kann, gehört dem Nutzer, nicht dem Programm.
 	if strings.EqualFold(stats.VideoCodec, "av1") {
-		pWarn.Println("  Skipped: AV1 does not play on iPhones and most TVs — re-run -mp4 on the ORIGINAL source.")
-		fmt.Println()
-		result.Skipped = true
-		return result
+		pWarn.Println("  Note: AV1 in an MP4 — current devices play it, older iPhones and TVs do not.")
 	}
 	// -8bit kann hier nichts ausrichten: dieser Weg packt nur um, er rechnet das
 	// Bild nicht neu. Ohne Hinweis sähe die 10-Bit-Datei wie ein Fehler aus.

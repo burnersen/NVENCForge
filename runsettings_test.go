@@ -150,29 +150,49 @@ func TestMP4FlagStillReaches(t *testing.T) {
 	}
 }
 
-// TestMP4FromTheConfigFileStillForcesH265 hält eine Wechselwirkung fest, die
-// seit 1.23.0 überhaupt erst entstehen kann: Beide Werte lassen sich jetzt
-// gemeinsam in die Konfigurationsdatei schreiben.
+// TestMP4AndAV1SurviveTogether hält den Fall fest, der bis 1.30.0 falsch lief:
+// Wer AV1 UND MP4 wählte, bekam H.265 — das Programm schaltete AV1 ab und
+// begründete das nur mit einer Zeile im Protokoll. Gemeldet wurde es von einem
+// Nutzer, dem genau das an seinen Dateien auffiel.
 //
-// MP4 gibt es für maximale Abspielbarkeit — AV1 arbeitet genau dagegen (iPhones
-// und viele Fernseher können es nicht). Deshalb gewinnt hier MP4, und der Lauf
-// bleibt bei H.265. Das galt bisher für das FLAG -av1; es muss genauso für den
-// Schlüssel codec=av1 gelten, sonst käme aus derselben Einstellung je nach
-// Herkunft etwas anderes heraus.
-func TestMP4FromTheConfigFileStillForcesH265(t *testing.T) {
+// Beides gehört zusammen: AV1 in MP4 ist ein regulärer Fall (Kennzeichen
+// "av01"), und die Entscheidung, ob das Zielgerät ihn abspielt, gehört dem
+// Nutzer. Geprüft wird über BEIDE Wege — aus der Konfigurationsdatei und über
+// die Schalter —, denn aus derselben Einstellung darf nicht je nach Herkunft
+// etwas anderes herauskommen.
+func TestMP4AndAV1SurviveTogether(t *testing.T) {
 	s := defaultAppSettings()
 	s.codec = codecAV1
 	s.container = containerMP4
 	withSettings(t, s)
 
-	cfg := newAppConfig(s)
-	cfg.parseArgs(nil)
-
-	if cfg.av1 {
-		t.Error("container=mp4 zusammen mit codec=av1 lässt AV1 stehen — die MP4 wäre auf iPhones nicht abspielbar")
+	fromFile := newAppConfig(s)
+	fromFile.parseArgs(nil)
+	if !fromFile.av1 {
+		t.Error("codec=av1 zusammen mit container=mp4 verliert AV1")
 	}
-	if !cfg.mp4Mode {
+	if !fromFile.mp4Mode {
 		t.Error("container=mp4 ging dabei verloren")
+	}
+
+	plain := defaultAppSettings()
+	withSettings(t, plain)
+	fromFlags := newAppConfig(plain)
+	fromFlags.parseArgs([]string{"-av1", "-mp4"})
+	if !fromFlags.av1 {
+		t.Error("-av1 zusammen mit -mp4 verliert AV1")
+	}
+	if !fromFlags.mp4Mode {
+		t.Error("-mp4 ging dabei verloren")
+	}
+
+	// Der Ausweg muss weiter offen stehen: Wer eine überall abspielbare Datei
+	// braucht, hebt AV1 mit -h265 auf.
+	withSettings(t, s)
+	overridden := newAppConfig(s)
+	overridden.parseArgs([]string{"-h265"})
+	if overridden.av1 {
+		t.Error("-h265 hebt codec=av1 im MP4-Modus nicht auf")
 	}
 }
 

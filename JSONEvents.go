@@ -201,6 +201,24 @@ type eventStage struct {
 	Stage string `json:"stage"` // analyze | encode | remux | mp4
 }
 
+// eventCQ meldet das Ergebnis der Auto-CQ-Suche für eine Datei.
+//
+// Es gibt dieses Ereignis, damit eine Oberfläche den gewählten Wert anzeigen
+// kann, ohne die Bildschirmzeile mitzulesen und zu zerlegen. Dass das nötig
+// ist, hat sich gezeigt: Die Ergebniszeile wurde in 1.30.0 umgeschrieben — ein
+// Textleser hätte den Umbau stillschweigend nicht überlebt.
+//
+// Target ist das Suchziel (Ziel-VMAF minus Toleranz), also der Wert, an dem
+// sich VMAF messen lassen muss.
+type eventCQ struct {
+	Ev     string  `json:"ev"` // "cq"
+	Index  int     `json:"index"`
+	CQ     int     `json:"cq"`
+	VMAF   float64 `json:"vmaf"`
+	Target float64 `json:"target"`
+	Note   string  `json:"note"` // Begründung im Klartext, ohne Klammern
+}
+
 // eventProgress ist die einzige Ereignisart, die häufig kommt (rund zehnmal je
 // Sekunde, im selben Takt wie die Bildschirmanzeige).
 type eventProgress struct {
@@ -258,6 +276,22 @@ func emitStage(stage string) {
 		Ev:    "stage",
 		Index: int(jsonCurrentIndex.Load()),
 		Stage: stage,
+	})
+}
+
+// emitCQ meldet die getroffene CQ-Wahl. Wie emitStage holt sich die Funktion
+// die Dateinummer selbst, damit der Aufruf tief in der Suche eine Zeile bleibt.
+func emitCQ(cq int, vmaf, target float64, note string) {
+	if !jsonMode {
+		return
+	}
+	emitEvent(eventCQ{
+		Ev:     "cq",
+		Index:  int(jsonCurrentIndex.Load()),
+		CQ:     cq,
+		VMAF:   vmaf,
+		Target: target,
+		Note:   note,
 	})
 }
 

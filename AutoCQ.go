@@ -396,6 +396,24 @@ func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) (in
 	return stepped, predicted, capped
 }
 
+// autoCQFinalStepPick entscheidet, welcher CQ nach der zweiten Messung gilt —
+// die letzte Station des gedeckelten Step-Downs.
+//
+// Zwei Ausgänge, und beide müssen ankommen: Ist der berechnete Schritt gleich
+// dem schon gemessenen (die Klemmgrenze ist erreicht), zählt der MESSWERT
+// dort. Geht es noch eine Stufe tiefer, zählt diese Stufe mit ihrer Schätzung —
+// die Messung hat den Wert darüber ja gerade widerlegt.
+//
+// Die Funktion existiert, damit genau diese Entscheidung ohne FFmpeg prüfbar
+// ist: sie war von 1.6.1 bis 1.30.0 falsch, und ohne eigene Funktion ließ sich
+// das nicht absichern.
+func autoCQFinalStepPick(stepped, final int, remeasured, finalPred float64) (int, float64) {
+	if final == stepped {
+		return stepped, remeasured
+	}
+	return final, finalPred
+}
+
 // autoCQSaturated reports whether the verification measurement below the
 // low anchor exposes a saturated VMAF curve: the measured gain per CQ step
 // from the anchor down to the pick stays under the scale's saturationSlope. The
@@ -1317,6 +1335,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				default:
 					localSlope := (verified - remeasured) / float64(cq-stepped)
 					final, finalPred, _ := autoCQStepDown(sc, stepped, target, remeasured, localSlope)
+					// Nur die Notiz hängt vom Zweig ab — sie braucht das noch
+					// nicht überschriebene cq. Der Pick selbst wird DANACH
+					// gesetzt, ein einziges Mal für beide Fälle: von 1.6.1 bis
+					// 1.30.0 stand die Zuweisung in beiden Zweigen doppelt, ein
+					// Umbau verlor dabei das else, und im Fall "es geht noch
+					// eine Stufe tiefer" blieb der interpolierte CQ stehen —
+					// obwohl zwei Messungen ihn bereits widerlegt hatten.
 					if final == stepped {
 						// Same proven-unreachable case as the direct clamp-floor
 						// branch above: allow the (small-budget) climb. The pick
@@ -1324,13 +1349,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 						// interpolated CQ would pair the floor's score and note
 						// with a pick whose own measurement already fell below
 						// the climb budget.
-						cq, predicted = stepped, remeasured
 						verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", remeasured)
 						plateauLevel = remeasured
+					} else {
 						verifyNote = fmt.Sprintf(" (CQ %d = %.1f, CQ %d = %.1f, stepped down to CQ %d)",
 							cq, verified, stepped, remeasured, final)
-						cq, predicted = final, finalPred
 					}
+					cq, predicted = autoCQFinalStepPick(stepped, final, remeasured, finalPred)
 				}
 			default:
 				verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d)", cq, verified, stepped)
@@ -1475,9 +1500,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// Wert eine echte Messung, und wo er hochgerechnet ist, sagt das die
 	// Begründungszeile ("interpolated value kept", "estimate kept").
 	pOK.Printf("Auto-CQ: using CQ %d (VMAF %.1f, target %.4g)\n", cq, predicted, target)
-	if note := autoCQNoteText(verifyNote); note != "" {
-		fmt.Println(pterm.Gray("  · " + note))
+	noteText := autoCQNoteText(verifyNote)
+	if noteText != "" {
+		fmt.Println(pterm.Gray("  · " + noteText))
 	}
+	// Dieselbe Auskunft noch einmal für eine Oberfläche — als Ereignis, nicht
+	// als Text zum Zerlegen.
+	emitCQ(cq, predicted, target, noteText)
 	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
 		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,
 		formatDuration(time.Since(analysisStart).Seconds()))))

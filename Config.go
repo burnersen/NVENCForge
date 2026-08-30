@@ -1028,10 +1028,11 @@ falls back to the processor automatically.`)
 
 	configEntry("gpuDecodeMaxMbit", d.gpuDecodeMaxMbit, "1 to 500",
 		`Safety limit for the option above: sources above this bitrate
-are always unpacked on the processor. Extreme-bitrate video has
-been known to crash display drivers, and no fallback can catch
-that - it has to be avoided beforehand. Typical 4K sources run at
-10-30 Mbit/s, so the default costs you nothing.`)
+are always unpacked on the processor. On very heavy 4K remuxes,
+NVDEC hung here and the driver reset itself (TDR) - once that
+happens no fallback can repair the run, so the limit avoids it
+beforehand. Typical 4K sources run at 10-30 Mbit/s, so the
+default costs you nothing. Raise it if your card copes.`)
 
 	group("Everything else")
 

@@ -403,9 +403,10 @@ CONFIGURATION
                  picture, because the decoding step is defined
                  exactly by the codec standard. A decoder error
                  falls back to the CPU automatically. Sources above
-                 "gpuDecodeMaxMbit" (default 100) always stay on the
-                 CPU: extreme-bitrate HEVC has crashed display
-                 drivers, and no fallback can catch that.
+                 "gpuDecodeMaxMbit" (default 50) always stay on the
+                 CPU: very heavy 4K remuxes have caused NVDEC to
+                 hang and the driver to reset (TDR) on this setup,
+                 which no fallback can catch after the fact.
     "casStrength" set to 0 skips the sharpening pass after the
                  downscale entirely. That is the single most
                  expensive filter step, so turning it off speeds

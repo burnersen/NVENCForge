@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -50,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.28.0"
+const appVersion = "1.29.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -575,6 +576,118 @@ type nvencProbe struct {
 	lookahead  int
 }
 
+// ----------------------------------------------------------------------------
+// Startprobleme von FFmpeg gegen echte Encoder-Fehler abgrenzen
+//
+// Anlass ist ein gemeldeter Fall aus dem Doom9-Forum (2026-08-30): auf
+// Windows 10 v1607 starb der Probelauf des CPU-Encoders mit 0xC0000139, weil
+// der heruntergeladene FFmpeg-Build eine Systemfunktion braucht, die es dort
+// noch nicht gibt. Das Programm meldete daraufhin "libx265 fehlt in diesem
+// FFmpeg-Build" und riet, ffmpeg.exe zu löschen und neu zu laden — der
+// Downloader holte denselben Build wieder, und der Melder drehte sich im
+// Kreis. Der Fehler lag also nicht im Encoder, sondern eine Ebene tiefer:
+// FFmpeg lief auf diesem Rechner überhaupt nicht.
+// ----------------------------------------------------------------------------
+
+// Windows bricht einen Prozess, den es selbst nicht ausführen kann, mit einem
+// NTSTATUS-Code ab; diese Codes liegen alle oberhalb dieser Grenze. FFmpeg
+// dagegen beendet sich bei eigenen Fehlern mit kleinen Werten (üblicherweise
+// 1). Ein Exit-Code oberhalb der Grenze heißt deshalb: nicht das Programm hat
+// abgelehnt, sondern Windows hat es gar nicht erst laufen lassen.
+const winNTStatusFailureBase uint32 = 0xC0000000
+
+// Die NTSTATUS-Codes, die bei einem für das System zu neuen FFmpeg-Build
+// wirklich vorkommen. Für alles andere wird nur die Zahl gezeigt, statt einen
+// Namen zu raten.
+var winNTStatusNames = map[uint32]string{
+	0xC000007B: "STATUS_INVALID_IMAGE_FORMAT (32-bit / 64-bit mismatch)",
+	0xC0000135: "STATUS_DLL_NOT_FOUND (a required system library is missing)",
+	0xC0000139: "STATUS_ENTRYPOINT_NOT_FOUND (a system function is missing in this Windows version)",
+}
+
+// ntStatusFromExitCode entscheidet allein anhand des Exit-Codes, ob Windows
+// den Prozess abgebrochen hat. Getrennt von ntStatusExitCode gehalten, weil so
+// die eigentliche Regel ohne echten Prozess prüfbar bleibt.
+//
+// Negative Codes bedeuten "durch ein Signal beendet" (etwa der eigene Abbruch
+// über Strg+C) und sind kein Systemproblem. Die Umdeutung nach uint32 ist
+// verlustfrei: dieses Programm wird nur als 64-Bit gebaut, dort passt jeder
+// NTSTATUS-Wert ohne Überlauf in ein int.
+func ntStatusFromExitCode(code int) (uint32, bool) {
+	if code < 0 || code > math.MaxUint32 {
+		return 0, false
+	}
+	status := uint32(code)
+	if status < winNTStatusFailureBase {
+		return 0, false
+	}
+	return status, true
+}
+
+// ntStatusExitCode zieht denselben Befund aus einem Fehler, wie ihn
+// exec.Command liefert. Alles, was kein beendeter Prozess ist (FFmpeg gar
+// nicht gefunden, Zeitlimit abgelaufen), zählt hier nicht als Systemabbruch —
+// diese Fälle haben ihre eigenen, bereits vorhandenen Meldungen.
+func ntStatusExitCode(err error) (uint32, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return ntStatusFromExitCode(exitErr.ExitCode())
+}
+
+// describeNTStatus schreibt den Abbruchcode so auf, dass er sich suchen lässt:
+// die Zahl immer, den Namen nur, wenn er wirklich bekannt ist.
+func describeNTStatus(status uint32) string {
+	if name, ok := winNTStatusNames[status]; ok {
+		return fmt.Sprintf("Windows stopped FFmpeg with exit code 0x%08X — %s", status, name)
+	}
+	return fmt.Sprintf("Windows stopped FFmpeg with exit code 0x%08X", status)
+}
+
+// ffmpegStartFailure klärt nach einem fehlgeschlagenen Probelauf, ob FFmpeg
+// auf diesem Rechner überhaupt startet. Rückgabe "" heißt: FFmpeg läuft, der
+// Fehler kam wirklich vom Encoder — der Aufrufer bleibt bei seiner eigenen
+// Meldung.
+//
+// Der eindeutige Fall wird am Exit-Code erkannt und kostet nichts. Bleibt er
+// unklar, folgt eine Gegenprobe mit dem billigsten Aufruf, den FFmpeg kennt.
+// Beides läuft NUR im Fehlerfall, im Normalbetrieb wird hier nichts gestartet.
+func ffmpegStartFailure(probeErr error) string {
+	if status, ok := ntStatusExitCode(probeErr); ok {
+		return describeNTStatus(status)
+	}
+	version := exec.Command(ffmpegPath, "-hide_banner", "-version")
+	version.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+	if err := version.Run(); err != nil {
+		if status, ok := ntStatusExitCode(err); ok {
+			return describeNTStatus(status)
+		}
+		return fmt.Sprintf("FFmpeg does not even answer 'ffmpeg -version' (%v)", err)
+	}
+	return ""
+}
+
+// reportFFmpegStartFailure erklärt einen Systemabbruch und beendet das
+// Programm. Ohne lauffähiges FFmpeg ist jeder weitere Schritt sinnlos, auch
+// der Wechsel auf den Prozessor.
+//
+// Bewusst OHNE den Rat, ffmpeg.exe zu löschen: der Downloader holt denselben
+// Build wieder. Genau dieser Rat war es, der den Melder im Kreis schickte.
+func reportFFmpegStartFailure(reason string) {
+	fmt.Println()
+	pFatal.Println("FFmpeg cannot run on this system.")
+	pterm.Println(pterm.Gray("  " + reason))
+	fmt.Println()
+	pInfo.Println("This is not a missing codec: the FFmpeg build itself does not start here.")
+	pInfo.Println("Such builds are usually made for a newer Windows than the one installed.")
+	pInfo.Println("Downloading it again will NOT help — it is the same build every time.")
+	pInfo.Println("Put an older FFmpeg (ffmpeg.exe + ffprobe.exe) next to NVENCForge.exe instead;")
+	pInfo.Println("a local copy is always used before the downloaded one.")
+	waitForEnter()
+	os.Exit(1)
+}
+
 // checkHardwareCapabilities probes with the SAME flags the real encode uses, so a
 // card that passes here cannot fail later on every file.
 //
@@ -620,6 +733,13 @@ func checkHardwareCapabilities() error {
 		lookahead:  appSettings.nvencLookahead,
 	}
 	if _, err := tryEncode(configured); err != nil {
+		// Hat Windows FFmpeg abgewiesen, ist keine Einstellung schuld. Das
+		// Abklappern der Kartenmerkmale wären dann nur ein Dutzend weiterer
+		// Fehlstarts — mit Meldungen ("GPU does not support Temporal AQ"),
+		// die über die Karte gar nichts aussagen.
+		if _, systemLevel := ntStatusExitCode(err); systemLevel {
+			return err
+		}
 		if err := probeNVENCFeatures(tryEncode); err != nil {
 			return err
 		}
@@ -2104,6 +2224,13 @@ func main() {
 	// (Send-to über Nacht) nicht ewig an der Rückfrage stehen bleiben.
 	if !cpuModeActive {
 		if err := checkHardwareCapabilities(); err != nil {
+			// Ein FFmpeg, das gar nicht startet, sieht hier aus wie eine
+			// fehlende Grafikkarte. Die Rückfrage würde dann auf den
+			// Prozessor führen, wo derselbe Fehler als fehlender Codec
+			// gemeldet würde — zwei falsche Fährten hintereinander.
+			if reason := ffmpegStartFailure(err); reason != "" {
+				reportFFmpegStartFailure(reason)
+			}
 			fmt.Println()
 			pWarn.Println("No compatible Nvidia GPU found (NVENC unavailable).")
 			// Always show the underlying FFmpeg error: a bad ffmpeg build (e.g.
@@ -2129,6 +2256,12 @@ func main() {
 		// Im CPU-Modus wird der Encoder geprüft, der wirklich läuft — eine
 		// fehlende Bibliothek soll einmal hier auffallen, nicht bei jeder Datei.
 		if err := checkCPUEncoderCapability(cfg.av1); err != nil {
+			// Erst klären, ob FFmpeg überhaupt läuft: sonst wird ein
+			// Systemproblem als fehlende Bibliothek gemeldet, und der Rat
+			// unten schickt in eine Schleife (Doom9, 2026-08-30).
+			if reason := ffmpegStartFailure(err); reason != "" {
+				reportFFmpegStartFailure(reason)
+			}
 			fmt.Println()
 			pFatal.Println("The CPU encoder is not available in this FFmpeg build.")
 			pFatal.Println("Delete ffmpeg.exe next to NVENCForge.exe and restart to download a complete build.")
@@ -2138,6 +2271,9 @@ func main() {
 		}
 	case cfg.av1:
 		if err := checkAV1Capability(); err != nil {
+			if reason := ffmpegStartFailure(err); reason != "" {
+				reportFFmpegStartFailure(reason)
+			}
 			fmt.Println()
 			pFatal.Println("AV1 encoding not available on this GPU (requires RTX 40 series or newer).")
 			pFatal.Println("Run without -av1 to encode H.265, or add -cpu to encode AV1 on the processor.")

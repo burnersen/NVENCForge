@@ -729,3 +729,42 @@ func TestAutoCQCapLimitsQuality(t *testing.T) {
 		t.Error("unparsable maxrate must not report a cap limit")
 	}
 }
+
+// TestAutoCQClimbWorthIt uses the two opposite cases of the 2026-08-28 library
+// measurement. Both sources are thin, both hold the VMAF floor when the climb
+// goes from CQ 30 to CQ 34 — only the file size tells them apart: the
+// squeezed-dry one shrinks by about 1 %, the one with room left by about 8 %.
+// That is the whole reason this check exists instead of a smaller tolerance,
+// which would have blocked the second case along with the first.
+func TestAutoCQClimbWorthIt(t *testing.T) {
+	// Sample bitrates in kbit/s = the measured share of the source bitrate.
+	const (
+		dryPickKbps  = 0.527 * 2819 // thin 60 fps source at CQ 30
+		dryRungKbps  = 0.522 * 2819 // same source at CQ 34
+		roomPickKbps = 0.460 * 3667 // thin 30 fps source at CQ 30
+		roomRungKbps = 0.423 * 3667 // same source at CQ 34
+	)
+	cases := []struct {
+		name       string
+		pick, rung float64
+		minSave    float64
+		wantWorth  bool
+		wantSaved  float64
+	}{
+		{"a squeezed-dry source does not earn the climb", dryPickKbps, dryRungKbps, 5, false, 0.949},
+		{"a source with room left earns it", roomPickKbps, roomRungKbps, 5, true, 8.043},
+		{"a disabled check lets every rung pass", dryPickKbps, dryRungKbps, 0, true, 0},
+		{"an unmeasurable pick lets every rung pass", 0, dryRungKbps, 5, true, 0},
+		{"an unmeasurable rung passes as well", dryPickKbps, 0, 5, true, 0},
+		{"a rung that is not smaller is refused", dryPickKbps, dryPickKbps * 1.02, 5, false, -2},
+	}
+	for _, c := range cases {
+		saved, worth := autoCQClimbWorthIt(c.pick, c.rung, c.minSave)
+		if worth != c.wantWorth {
+			t.Errorf("%s: worth %v, want %v (saved %.2f%%)", c.name, worth, c.wantWorth, saved)
+		}
+		if math.Abs(saved-c.wantSaved) > 0.01 {
+			t.Errorf("%s: saved %.3f%%, want %.3f%%", c.name, saved, c.wantSaved)
+		}
+	}
+}

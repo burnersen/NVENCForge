@@ -71,86 +71,88 @@ func newAppConfig(s AppSettings) *AppConfig {
 // ----------------------------------------------------------------------------
 
 type AppSettings struct {
-	targetCQ               int
-	maxBitrate1080p        int64
-	maxBitrateOriginal     int64
-	maxResolution          int
-	nvencPreset            string
-	nvencLookahead         int
-	bFrames                int
-	aqStrength             int
-	casStrength            float64
-	audioKbpsPerChannel    int
-	fallbackAudioBitrate   int
-	autoShutdown           bool
-	extraFilenameChars     string
-	av1TargetCQ            int
-	av1MaxBitrate1080p     int64
-	av1MaxBitrateOriginal  int64
-	autoCQ                 bool
-	autoCQTargetVMAF       float64
-	autoCQTolerance        float64
-	autoCQPlateauTolerance float64
-	autoCQMaxSourcePercent float64
-	encoder                string
-	cpuPreset              string
-	cpuAV1Preset           int
-	cpuTargetCRF           int
-	cpuAV1TargetCRF        int
-	cpuThreads             int
-	gpuDecode              bool
-	gpuDecodeMaxMbit       int
-	retireMode             string
-	autoCrop               bool
-	codec                  string
-	container              string
-	audioMode              string
-	bitDepth               int
-	keepSource             bool
-	keepResolution         bool
+	targetCQ                    int
+	maxBitrate1080p             int64
+	maxBitrateOriginal          int64
+	maxResolution               int
+	nvencPreset                 string
+	nvencLookahead              int
+	bFrames                     int
+	aqStrength                  int
+	casStrength                 float64
+	audioKbpsPerChannel         int
+	fallbackAudioBitrate        int
+	autoShutdown                bool
+	extraFilenameChars          string
+	av1TargetCQ                 int
+	av1MaxBitrate1080p          int64
+	av1MaxBitrateOriginal       int64
+	autoCQ                      bool
+	autoCQTargetVMAF            float64
+	autoCQTolerance             float64
+	autoCQPlateauTolerance      float64
+	autoCQPlateauMinSavePercent float64
+	autoCQMaxSourcePercent      float64
+	encoder                     string
+	cpuPreset                   string
+	cpuAV1Preset                int
+	cpuTargetCRF                int
+	cpuAV1TargetCRF             int
+	cpuThreads                  int
+	gpuDecode                   bool
+	gpuDecodeMaxMbit            int
+	retireMode                  string
+	autoCrop                    bool
+	codec                       string
+	container                   string
+	audioMode                   string
+	bitDepth                    int
+	keepSource                  bool
+	keepResolution              bool
 }
 
 var appSettings = defaultAppSettings()
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		targetCQ:               26,
-		maxBitrate1080p:        8000,
-		maxBitrateOriginal:     22000,
-		maxResolution:          1080,
-		nvencPreset:            "p5",
-		nvencLookahead:         32,
-		bFrames:                5,
-		aqStrength:             2,
-		casStrength:            0.4,
-		audioKbpsPerChannel:    96,
-		fallbackAudioBitrate:   128,
-		autoShutdown:           false,
-		extraFilenameChars:     "",
-		av1TargetCQ:            32,
-		av1MaxBitrate1080p:     6000,
-		av1MaxBitrateOriginal:  13000,
-		autoCQ:                 true,
-		autoCQTargetVMAF:       97,
-		autoCQTolerance:        0.5,
-		autoCQPlateauTolerance: 1.5,
-		autoCQMaxSourcePercent: 45,
-		encoder:                encoderNvidia,
-		cpuPreset:              "fast",
-		cpuAV1Preset:           6,
-		cpuTargetCRF:           18,
-		cpuAV1TargetCRF:        32,
-		cpuThreads:             0,
-		gpuDecode:              true,
-		gpuDecodeMaxMbit:       gpuDecodeDefaultMaxMbit,
-		retireMode:             retireModeFolder,
-		autoCrop:               false,
-		codec:                  codecH265,
-		container:              containerMKV,
-		audioMode:              audioModeAAC,
-		bitDepth:               bitDepth10,
-		keepSource:             false,
-		keepResolution:         false,
+		targetCQ:                    26,
+		maxBitrate1080p:             8000,
+		maxBitrateOriginal:          22000,
+		maxResolution:               1080,
+		nvencPreset:                 "p5",
+		nvencLookahead:              32,
+		bFrames:                     5,
+		aqStrength:                  2,
+		casStrength:                 0.4,
+		audioKbpsPerChannel:         96,
+		fallbackAudioBitrate:        128,
+		autoShutdown:                false,
+		extraFilenameChars:          "",
+		av1TargetCQ:                 32,
+		av1MaxBitrate1080p:          6000,
+		av1MaxBitrateOriginal:       13000,
+		autoCQ:                      true,
+		autoCQTargetVMAF:            97,
+		autoCQTolerance:             0.5,
+		autoCQPlateauTolerance:      1.5,
+		autoCQPlateauMinSavePercent: 5,
+		autoCQMaxSourcePercent:      45,
+		encoder:                     encoderNvidia,
+		cpuPreset:                   "fast",
+		cpuAV1Preset:                6,
+		cpuTargetCRF:                18,
+		cpuAV1TargetCRF:             32,
+		cpuThreads:                  0,
+		gpuDecode:                   true,
+		gpuDecodeMaxMbit:            gpuDecodeDefaultMaxMbit,
+		retireMode:                  retireModeFolder,
+		autoCrop:                    false,
+		codec:                       codecH265,
+		container:                   containerMKV,
+		audioMode:                   audioModeAAC,
+		bitDepth:                    bitDepth10,
+		keepSource:                  false,
+		keepResolution:              false,
 	}
 }
 
@@ -312,42 +314,43 @@ type invalidSetting struct{ key, val string }
 func defaultConfigStrings() map[string]string {
 	d := defaultAppSettings()
 	return map[string]string{
-		"targetCQ":               strconv.Itoa(d.targetCQ),
-		"maxBitrate1080p":        strconv.FormatInt(d.maxBitrate1080p, 10),
-		"maxBitrateOriginal":     strconv.FormatInt(d.maxBitrateOriginal, 10),
-		"maxResolution":          strconv.Itoa(d.maxResolution),
-		"nvencPreset":            d.nvencPreset,
-		"nvencLookahead":         strconv.Itoa(d.nvencLookahead),
-		"bFrames":                strconv.Itoa(d.bFrames),
-		"aqStrength":             strconv.Itoa(d.aqStrength),
-		"casStrength":            strconv.FormatFloat(d.casStrength, 'g', -1, 64),
-		"audioKbpsPerChannel":    strconv.Itoa(d.audioKbpsPerChannel),
-		"fallbackAudioBitrate":   strconv.Itoa(d.fallbackAudioBitrate),
-		"autoShutdown":           strconv.FormatBool(d.autoShutdown),
-		"av1TargetCQ":            strconv.Itoa(d.av1TargetCQ),
-		"av1MaxBitrate1080p":     strconv.FormatInt(d.av1MaxBitrate1080p, 10),
-		"av1MaxBitrateOriginal":  strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
-		"autoCQ":                 strconv.FormatBool(d.autoCQ),
-		"autoCQTargetVMAF":       strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
-		"autoCQTolerance":        strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
-		"autoCQPlateauTolerance": strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
-		"autoCQMaxSourcePercent": strconv.FormatFloat(d.autoCQMaxSourcePercent, 'f', -1, 64),
-		"encoder":                d.encoder,
-		"cpuPreset":              d.cpuPreset,
-		"cpuAV1Preset":           strconv.Itoa(d.cpuAV1Preset),
-		"cpuTargetCRF":           strconv.Itoa(d.cpuTargetCRF),
-		"cpuAV1TargetCRF":        strconv.Itoa(d.cpuAV1TargetCRF),
-		"cpuThreads":             strconv.Itoa(d.cpuThreads),
-		"gpuDecode":              strconv.FormatBool(d.gpuDecode),
-		"gpuDecodeMaxMbit":       strconv.Itoa(d.gpuDecodeMaxMbit),
-		"retireMode":             d.retireMode,
-		"autoCrop":               strconv.FormatBool(d.autoCrop),
-		"codec":                  d.codec,
-		"container":              d.container,
-		"audioMode":              d.audioMode,
-		"bitDepth":               strconv.Itoa(d.bitDepth),
-		"keepSource":             strconv.FormatBool(d.keepSource),
-		"keepResolution":         strconv.FormatBool(d.keepResolution),
+		"targetCQ":                    strconv.Itoa(d.targetCQ),
+		"maxBitrate1080p":             strconv.FormatInt(d.maxBitrate1080p, 10),
+		"maxBitrateOriginal":          strconv.FormatInt(d.maxBitrateOriginal, 10),
+		"maxResolution":               strconv.Itoa(d.maxResolution),
+		"nvencPreset":                 d.nvencPreset,
+		"nvencLookahead":              strconv.Itoa(d.nvencLookahead),
+		"bFrames":                     strconv.Itoa(d.bFrames),
+		"aqStrength":                  strconv.Itoa(d.aqStrength),
+		"casStrength":                 strconv.FormatFloat(d.casStrength, 'g', -1, 64),
+		"audioKbpsPerChannel":         strconv.Itoa(d.audioKbpsPerChannel),
+		"fallbackAudioBitrate":        strconv.Itoa(d.fallbackAudioBitrate),
+		"autoShutdown":                strconv.FormatBool(d.autoShutdown),
+		"av1TargetCQ":                 strconv.Itoa(d.av1TargetCQ),
+		"av1MaxBitrate1080p":          strconv.FormatInt(d.av1MaxBitrate1080p, 10),
+		"av1MaxBitrateOriginal":       strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
+		"autoCQ":                      strconv.FormatBool(d.autoCQ),
+		"autoCQTargetVMAF":            strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		"autoCQTolerance":             strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
+		"autoCQPlateauTolerance":      strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
+		"autoCQPlateauMinSavePercent": strconv.FormatFloat(d.autoCQPlateauMinSavePercent, 'f', -1, 64),
+		"autoCQMaxSourcePercent":      strconv.FormatFloat(d.autoCQMaxSourcePercent, 'f', -1, 64),
+		"encoder":                     d.encoder,
+		"cpuPreset":                   d.cpuPreset,
+		"cpuAV1Preset":                strconv.Itoa(d.cpuAV1Preset),
+		"cpuTargetCRF":                strconv.Itoa(d.cpuTargetCRF),
+		"cpuAV1TargetCRF":             strconv.Itoa(d.cpuAV1TargetCRF),
+		"cpuThreads":                  strconv.Itoa(d.cpuThreads),
+		"gpuDecode":                   strconv.FormatBool(d.gpuDecode),
+		"gpuDecodeMaxMbit":            strconv.Itoa(d.gpuDecodeMaxMbit),
+		"retireMode":                  d.retireMode,
+		"autoCrop":                    strconv.FormatBool(d.autoCrop),
+		"codec":                       d.codec,
+		"container":                   d.container,
+		"audioMode":                   d.audioMode,
+		"bitDepth":                    strconv.Itoa(d.bitDepth),
+		"keepSource":                  strconv.FormatBool(d.keepSource),
+		"keepResolution":              strconv.FormatBool(d.keepResolution),
 	}
 }
 
@@ -556,6 +559,16 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "autoCQPlateauTolerance":
 			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 10 {
 				s.autoCQPlateauTolerance = fv
+			} else {
+				bad(key, val)
+			}
+		// 0 schaltet die Gegenrechnung ab (Verhalten vor 1.32.0). Nach oben
+		// bei 50 abgeriegelt: eine einzelne CQ-Sprosse spart real nie die
+		// Hälfte, ein höherer Wert wäre also ein Aus-Schalter durch die
+		// Hintertür statt einer Einstellung.
+		case "autoCQPlateauMinSavePercent":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 50 {
+				s.autoCQPlateauMinSavePercent = fv
 			} else {
 				bad(key, val)
 			}
@@ -938,6 +951,14 @@ compressed (streaming rips, for example). Their quality tops out
 below the target no matter what, so chasing it only wastes space.
 Every candidate is verified by a real measurement, never estimated.
 0 restores the old, more cautious behaviour.`)
+
+	configEntry("autoCQPlateauMinSavePercent", d.autoCQPlateauMinSavePercent, "0 to 50",
+		`How much smaller the file actually has to get before that extra
+allowance may be spent, in percent. A source that is already
+squeezed dry hardly shrinks any further, and giving up picture for
+a file that stays the same size helps nobody. Measured on such a
+source: four CQ steps cost 0.7 VMAF and saved 1 % of the size.
+0 spends the allowance no matter how little it buys.`)
 
 	configEntry("autoCQMaxSourcePercent", d.autoCQMaxSourcePercent, "0, or 10 to 100",
 		`Spending limit for the quality search, as a percentage of what

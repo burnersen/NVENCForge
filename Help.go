@@ -182,9 +182,12 @@ CONVERSION OPTIONS
                  cannot reach the target at all. NVENCForge then
                  measures how far they CAN go and picks the most
                  economical setting instead of wasting space on a
-                 target that is out of reach. Two config keys
-                 steer how thrifty it may be: "autoCQTolerance"
-                 and "autoCQPlateauTolerance".
+                 target that is out of reach. Three config keys
+                 steer how thrifty it may be: "autoCQTolerance",
+                 "autoCQPlateauTolerance" and
+                 "autoCQPlateauMinSavePercent" - the last one
+                 refuses to trade picture for a file that barely
+                 gets smaller.
                  It also stops on its own once one more step
                  would gain too little quality to be worth the
                  extra file size.

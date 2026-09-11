@@ -691,6 +691,27 @@ func autoCQClimbBudgetFloor(sc autoCQScale, plateauTop float64, flatCurve bool,
 	return autoCQClimbFloor(sc, plateauTop, tolerance)
 }
 
+// autoCQClimbWorthIt decides whether a plateau-climb rung earns the quality it
+// costs. The climb otherwise only ever asks what a rung COSTS in VMAF, never
+// what it BUYS in file size — and on a source that is already compressed to the
+// bone a rung buys next to nothing. Measured 2026-08-28 on a 2.4 Mbit/s 60 fps
+// source: CQ 30 spent 52.7 % of the source, CQ 34 spent 52.2 %, so the climb
+// paid 0.68 VMAF for a file about 1 % smaller. The same series holds the
+// opposite case as well (49.9 % → 42.3 % across the same rungs), which is why
+// the answer cannot be a smaller plateau tolerance: that would block both.
+//
+// pickKbps/rungKbps are the sample bitrates of the current pick and of the
+// rung. A zero on either side means "not measurable" and lets the rung pass —
+// an unusable measurement must never flip established behaviour, the same rule
+// the cost cap follows when its budget cannot be worked out.
+func autoCQClimbWorthIt(pickKbps, rungKbps, minSavePercent float64) (savedPct float64, worth bool) {
+	if minSavePercent <= 0 || pickKbps <= 0 || rungKbps <= 0 {
+		return 0, true
+	}
+	savedPct = (pickKbps - rungKbps) / pickKbps * 100
+	return savedPct, savedPct >= minSavePercent
+}
+
 // bitrateBucket is one window-sized slice of the source with its average
 // video bitrate — the complexity proxy for guided window placement: where
 // the source encoder needed many bits, the material is hard.
@@ -1226,6 +1247,27 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		return fail(fmt.Sprintf("anchor measurement at CQ %d", sc.anchorHigh), err)
 	}
 
+	// Ab hier liegen beide Anker-Proben im Temp-Ordner. Aus ihren Größen
+	// ergibt sich die Zerfallskurve der Bitrate über CQ — dieselbe, mit der
+	// auch der Kosten-Deckel rechnet. sampleKbpsAt liefert damit für jedes CQ
+	// eine Bitrate: bevorzugt aus der echten Probendatei, ersatzweise aus der
+	// Kurve, und 0, wenn beides nicht geht.
+	anchorKbpsLow, bitrateRate := 0.0, 0.0
+	if kLow, lerr := autoCQSampleKbps(tmpDir, sc.anchorLow, sampleSec); lerr == nil {
+		if kHigh, herr := autoCQSampleKbps(tmpDir, sc.anchorHigh, sampleSec); herr == nil {
+			anchorKbpsLow, bitrateRate = kLow, autoCQBitrateRate(sc, kLow, kHigh)
+		}
+	}
+	sampleKbpsAt := func(atCQ int) float64 {
+		if kbps, kerr := autoCQSampleKbps(tmpDir, atCQ, sampleSec); kerr == nil {
+			return kbps
+		}
+		if bitrateRate <= 0 {
+			return 0
+		}
+		return autoCQEstimateKbps(sc, anchorKbpsLow, bitrateRate, atCQ)
+	}
+
 	cq, predicted := interpolateAutoCQ(sc, vmafLow, vmafHigh, target)
 
 	// The interpolated pick is ALWAYS confirmed by one real measurement: the
@@ -1381,6 +1423,10 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	// keeps the safe pick — the climb is a bonus, never a reason to fail the
 	// analysis. A healthy curve that reaches its target never gets here
 	// (plateauLevel == 0).
+	// Holding the floor is necessary but not sufficient: since 1.32.0 a rung
+	// must also make the file measurably smaller (autoCQClimbWorthIt), because
+	// on a source that is already squeezed dry it does not — and paying quality
+	// for a file that stays the same size is the one trade nobody wants.
 	var plateauProbes []string
 	anchorGainPerStep := -slope // VMAF gained per CQ step down, across the anchors
 	climbFloor, climbing := 0.0, false
@@ -1394,7 +1440,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	case anchorGainPerStep < sc.saturationSlope && cq == sc.anchorHigh:
 		climbFloor, climbing = autoCQClimbFloor(sc, vmafHigh, tolerance), true
 	}
+	// climbSkipNote erklärt einen NICHT angetretenen Aufstieg. Ohne diese
+	// Zeile sähe die Gegenrechnung wie ein stiller Ausfall aus: gleiche
+	// Ausgangslage, plötzlich anderes Ergebnis, und nichts sagt warum.
+	climbSkipNote := ""
 	if climbing {
+		// Was der aktuelle Pick kostet, ist der Bezugswert jedes Vergleichs.
+		pickKbps := sampleKbpsAt(cq)
 		for _, rung := range autoCQClimbCandidates(sc, cq) {
 			// The anchor rungs were already measured at the start of the
 			// search — reuse those scores instead of burning ~15 s on an
@@ -1415,13 +1467,28 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				}
 			}
 			plateauProbes = append(plateauProbes, fmt.Sprintf("CQ %d = %.2f", rung, score))
-			if score >= climbFloor {
-				cq, predicted = rung, score
-				verifyNote = fmt.Sprintf(
-					" (VMAF plateaus at ~%.1f — target %.4g unreachable, plateau holds to CQ %d)",
-					plateauLevel, target, rung)
+			if score < climbFloor {
+				continue
+			}
+			// Gegenrechnung (INI autoCQPlateauMinSavePercent): Die Sprosse hält
+			// den Qualitätsboden — das allein rechtfertigt sie aber nicht, sie
+			// muss die Datei auch spürbar kleiner machen. Die Sprossen kommen
+			// nach steigender Dateigröße; bringt schon die kleinste zu wenig,
+			// bringen die übrigen erst recht zu wenig. Deshalb endet der
+			// Aufstieg hier, statt weiter zu suchen.
+			savedPct, worth := autoCQClimbWorthIt(pickKbps, sampleKbpsAt(rung),
+				appSettings.autoCQPlateauMinSavePercent)
+			if !worth {
+				climbSkipNote = fmt.Sprintf(
+					"  · note: no plateau climb — CQ %d would make the file only %.1f%% smaller than CQ %d, under the %.4g%% minimum, so the picture stays",
+					rung, math.Max(savedPct, 0), cq, appSettings.autoCQPlateauMinSavePercent)
 				break
 			}
+			cq, predicted = rung, score
+			verifyNote = fmt.Sprintf(
+				" (VMAF plateaus at ~%.1f — target %.4g unreachable, plateau holds to CQ %d)",
+				plateauLevel, target, rung)
+			break
 		}
 	}
 
@@ -1512,6 +1579,9 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		formatDuration(time.Since(analysisStart).Seconds()))))
 	if len(plateauProbes) > 0 {
 		fmt.Println(pterm.Gray("  · plateau probes: " + strings.Join(plateauProbes, ", ")))
+	}
+	if climbSkipNote != "" {
+		fmt.Println(pterm.Gray(climbSkipNote))
 	}
 	if gapNote != "" {
 		fmt.Println(pterm.Gray(gapNote))

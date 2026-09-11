@@ -513,6 +513,23 @@ func autoCQEstimateKbps(sc autoCQScale, kbpsLow, rate float64, cq int) float64 {
 	return kbpsLow * math.Exp(-rate*float64(cq-sc.anchorLow))
 }
 
+// autoCQKbpsAt returns what one CQ step really costs at the sample windows:
+// the measured sample whenever the quality search already encoded that step,
+// and the modelled estimate only for steps nobody has touched.
+//
+// The measured file is always the better answer. The model is fitted to the
+// anchor span and drifts once it is extrapolated past it — measured
+// 2026-09-11 on a 30 fps source: it put CQ 34 at 54 % of the source where the
+// real sample was 39 %. Plateau probing usually leaves samples at exactly the
+// thrifty steps the cap is interested in, so this costs nothing: the encodes
+// are already on disk.
+func autoCQKbpsAt(sc autoCQScale, tmpDir string, sampleSec, kbpsLow, rate float64, cq int) float64 {
+	if kbps, err := autoCQSampleKbps(tmpDir, cq, sampleSec); err == nil && kbps > 0 {
+		return kbps
+	}
+	return autoCQEstimateKbps(sc, kbpsLow, rate, cq)
+}
+
 // autoCQCostCap is what the cost cap worked out, kept together so the caller
 // can both act on it and explain it in one line.
 type autoCQCostCap struct {
@@ -575,7 +592,10 @@ func autoCQCostCapTarget(sc autoCQScale, tmpDir string, buckets []bitrateBucket,
 		return budget, errors.New("bitrate does not fall between the anchors")
 	}
 	budget.capKbps = budget.sourceKbps * percent / 100
-	budget.pickKbps = autoCQEstimateKbps(sc, kbpsLow, rate, pick)
+	kbpsAt := func(cq int) float64 {
+		return autoCQKbpsAt(sc, tmpDir, sampleSec, kbpsLow, rate, cq)
+	}
+	budget.pickKbps = kbpsAt(pick)
 	if budget.pickKbps <= budget.capKbps {
 		return budget, nil // the target fits the budget — nothing to do
 	}
@@ -592,19 +612,28 @@ func autoCQCostCapTarget(sc autoCQScale, tmpDir string, buckets []bitrateBucket,
 	// ceiling. A fat 12 Mbit/s source drops to under 20 % over the same span.
 	// Without this check a cap tuned for the fat sources quietly wrecks the
 	// thin ones.
-	budget.thriftiestKbps = autoCQEstimateKbps(sc, kbpsLow, rate, sc.clampMax)
+	budget.thriftiestKbps = kbpsAt(sc.clampMax)
 	if budget.thriftiestKbps > budget.capKbps {
 		budget.unreachable = true
 		return budget, nil
 	}
-	// Ceiling, not rounding: the CQ has to land ON or BELOW the cap, and half
-	// a step over it would defeat the whole purpose.
-	needed := int(math.Ceil(float64(sc.anchorLow) + math.Log(kbpsLow/budget.capKbps)/rate))
-	if needed > sc.clampMax {
-		needed = sc.clampMax
-	}
-	if needed > pick {
-		budget.pick = needed
+	// Walk up one step at a time and keep the FIRST that fits: the cap may
+	// only take what it needs. Until 1.32.1 this was solved in closed form
+	// from the anchor curve, which overshot badly whenever that curve was
+	// flat — measured 2026-09-11 on a 30 fps source with a 55 % cap: the
+	// formula demanded CQ 34, whose sample then measured 39 % of the source.
+	// Sixteen points below the budget, three steps too far, and 4 VMAF thrown
+	// away that nobody had asked for. Stepping instead of solving also lets
+	// every already-encoded sample answer for itself.
+	//
+	// The walk cannot come up empty: the reachability check above proved the
+	// clamp ceiling fits, so it stands as the last resort.
+	budget.pick = sc.clampMax
+	for candidate := pick + 1; candidate < sc.clampMax; candidate++ {
+		if kbpsAt(candidate) <= budget.capKbps {
+			budget.pick = candidate
+			break
+		}
 	}
 	return budget, nil
 }

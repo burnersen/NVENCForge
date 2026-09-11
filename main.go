@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.32.0"
+const appVersion = "1.32.1"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1825,6 +1825,14 @@ func printActiveSettings(cfg *AppConfig) {
 		}
 		addQuality("Quality target", target)
 		addQuality("Plateau tolerance", fmt.Sprintf("%.4g VMAF", s.autoCQPlateauTolerance))
+		// Direkt unter die Toleranz: die eine sagt, wie viel Qualität der
+		// Plateau-Aufstieg ausgeben DARF, die andere, wofür er sie ausgeben
+		// muss. Bei 0 ist die Gegenrechnung aus und die Zeile würde die Liste
+		// nur füllen — wie beim Kosten-Deckel darunter.
+		if s.autoCQPlateauMinSavePercent > 0 {
+			addQuality("Min. climb saving",
+				fmt.Sprintf("%.4g%% smaller file", s.autoCQPlateauMinSavePercent))
+		}
 		// Only worth a line when it is armed: at 0 (the default) the cap
 		// changes nothing, and an "off" row would just pad the list.
 		if s.autoCQMaxSourcePercent > 0 {

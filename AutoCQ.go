@@ -705,10 +705,15 @@ func autoCQClimbBudgetFloor(sc autoCQScale, plateauTop float64, flatCurve bool,
 // an unusable measurement must never flip established behaviour, the same rule
 // the cost cap follows when its budget cannot be worked out.
 func autoCQClimbWorthIt(pickKbps, rungKbps, minSavePercent float64) (savedPct float64, worth bool) {
-	if minSavePercent <= 0 || pickKbps <= 0 || rungKbps <= 0 {
+	if pickKbps <= 0 || rungKbps <= 0 {
 		return 0, true
 	}
 	savedPct = (pickKbps - rungKbps) / pickKbps * 100
+	if minSavePercent <= 0 {
+		// Prüfung abgeschaltet — die Zahl wird trotzdem geliefert, denn das
+		// Protokoll nennt sie auch bei einem angetretenen Aufstieg.
+		return savedPct, true
+	}
 	return savedPct, savedPct >= minSavePercent
 }
 
@@ -1485,9 +1490,18 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 				break
 			}
 			cq, predicted = rung, score
+			// Die Ersparnis gehört in denselben Satz wie die Entscheidung.
+			// Ohne sie steht dort nur, welche Qualität aufgegeben wurde, und
+			// nicht, wofür — und die Gegenrechnung bliebe unsichtbar, solange
+			// sie durchlässt. Ist die Größe nicht messbar, bleibt der Satz
+			// genau der von vorher.
+			savingText := ""
+			if savedPct > 0 {
+				savingText = fmt.Sprintf(", file %.0f%% smaller", savedPct)
+			}
 			verifyNote = fmt.Sprintf(
-				" (VMAF plateaus at ~%.1f — target %.4g unreachable, plateau holds to CQ %d)",
-				plateauLevel, target, rung)
+				" (VMAF plateaus at ~%.1f — target %.4g unreachable, plateau holds to CQ %d%s)",
+				plateauLevel, target, rung, savingText)
 			break
 		}
 	}

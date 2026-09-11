@@ -753,7 +753,7 @@ func TestAutoCQClimbWorthIt(t *testing.T) {
 	}{
 		{"a squeezed-dry source does not earn the climb", dryPickKbps, dryRungKbps, 5, false, 0.949},
 		{"a source with room left earns it", roomPickKbps, roomRungKbps, 5, true, 8.043},
-		{"a disabled check lets every rung pass", dryPickKbps, dryRungKbps, 0, true, 0},
+		{"a disabled check passes but still reports the saving", dryPickKbps, dryRungKbps, 0, true, 0.949},
 		{"an unmeasurable pick lets every rung pass", 0, dryRungKbps, 5, true, 0},
 		{"an unmeasurable rung passes as well", dryPickKbps, 0, 5, true, 0},
 		{"a rung that is not smaller is refused", dryPickKbps, dryPickKbps * 1.02, 5, false, -2},

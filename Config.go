@@ -600,11 +600,21 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 				bad(key, val)
 			}
 		case "cpuAV1Preset":
-			// SVT-AV1 kennt 0-13; ab 11 ist es ausdrücklich nur noch für
-			// Automatisierung gedacht (der Encoder warnt selbst davor).
-			if n, e := strconv.Atoi(val); e == nil && n >= 0 && n <= 13 {
+			// SVT-AV1 4.x kennt nur noch 0-11. Eine alte 12 oder 13 ist kein
+			// Tippfehler, sondern die frühere Obergrenze: sie läuft mit 11
+			// weiter (das hat SVT ohnehin still daraus gemacht) statt auf den
+			// langsamen Standard zurückzufallen. Nur ein Hinweis, die INI
+			// bleibt unverändert.
+			n, e := strconv.Atoi(val)
+			switch {
+			case e == nil && n >= 0 && n <= svtMaxPreset:
 				s.cpuAV1Preset = n
-			} else {
+			case e == nil && n > svtMaxPreset && n <= svtLegacyMaxPreset:
+				s.cpuAV1Preset = svtMaxPreset
+				warns = append(warns, fmt.Sprintf(
+					"cpuAV1Preset=%d: SVT-AV1 has no preset above %d any more - using %d (same result as before)",
+					n, svtMaxPreset, svtMaxPreset))
+			default:
 				bad(key, val)
 			}
 		case "cpuTargetCRF":
@@ -995,9 +1005,11 @@ value on purpose: AV1 needs 25-30% less for the same quality.`)
 "medium" gains almost nothing over "fast", while "slow" gains a
 little quality for three to four times the encoding time.`)
 
-	configEntry("cpuAV1Preset", d.cpuAV1Preset, "0 to 13",
+	configEntry("cpuAV1Preset", d.cpuAV1Preset, "0 to 11",
 		`Same idea for AV1 on the processor. 0 is slowest/best,
-13 is fastest. 6 is the sweet spot; above 8 quality drops off.`)
+11 is fastest. Measured: 6 matches the GPU's file size and
+reaches VMAF 97 on most material; 9 is almost three times as
+fast but needs about 45% more data; 10 and 11 rarely reach 96.`)
 
 	configEntry("cpuTargetCRF", d.cpuTargetCRF, "1 to 51",
 		`Fixed quality for H.265 on the processor when the automatic

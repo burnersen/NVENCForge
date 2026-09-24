@@ -123,6 +123,7 @@ Two things worth knowing before you switch:
 
 - **CPU mode is not a quality upgrade.** At the default preset it lands where your GPU already is — it exists so people *without* an NVIDIA card can use the tool at all. Want more? `cpuPreset=slow` buys ~1 VMAF for triple the time.
 - **With `-cpu`, AV1 is the better deal.** SVT-AV1 at preset 6 takes about the same time as libx265 `fast` and still delivers smaller files at equal quality. If the target device plays AV1, use `-cpu -av1`.
+- **For AV1 on the processor, the preset decides more than anything else.** *(measured 24 Sep 2026, SVT-AV1 4.2, seven sources)* `cpuAV1Preset=6` (the default) matches the GPU's file size at equal quality. `9` is almost three times as fast but needs about 45% more data. From `10` on, SVT-AV1 cannot reach VMAF 96–97 at all, however many bits it gets — NVENCForge warns once per run if such a preset meets a high Auto-CQ target. SVT-AV1 4.x only knows presets 0–11; an old `12` or `13` in the config keeps running as `11`.
 
 Rough throughput: about **40 minutes per hour of 1080p video** on a modern 8-core CPU, clearly more on older machines — and unlike a GPU encode it keeps every core busy. `cpuThreads=8` (or any number) in the config caps that so the machine stays usable while it works.
 

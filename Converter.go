@@ -2538,7 +2538,8 @@ func buildX265OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string 
 
 // buildSVTAV1OptsWithCQ spiegelt buildX265OptsWithCQ für AV1 auf dem
 // Prozessor. SVT-AV1 kennt keine Profil-Angabe (Main deckt 8 und 10 Bit ab)
-// und zählt sein Preset numerisch (0 = langsamst/bester, 13 = schnellst).
+// und zählt sein Preset numerisch (0 = langsamst/bester, 11 = schnellst;
+// 12/13 bildet SVT-AV1 4.x selbst auf 11 ab, siehe svtMaxPreset).
 // Die Thread-Begrenzung heißt hier lp (logical processors) — libsvtav1
 // ignoriert das allgemeine -threads.
 func buildSVTAV1OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string {

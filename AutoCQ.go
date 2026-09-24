@@ -236,28 +236,73 @@ var x265AutoCQScale = autoCQScale{
 const svtav1AutoCQFallbackCRF = 24
 
 // svtav1AutoCQScale ist das Auto-CQ-Profil für den CPU-Modus mit -av1
-// (libsvtav1). Anker und Klemmen entsprechen denen von av1_nvenc — das ist
-// kein Abschreiben, sondern Messergebnis: die Schrittbreiten liegen mit
-// 0,30 (SVT) gegen 0,23 VMAF/Stufe (av1_nvenc) nah beieinander, weshalb
-// dieselbe Einteilung passt. Sättigungsschwelle und Kletter-Faktor sind mit
-// diesem Verhältnis nachgezogen (0,06 statt 0,05; 1,5 statt 2,0).
+// (libsvtav1). Anker und Klemmen stammen aus der Messreihe vom 2026-07-25;
+// am 2026-09-24 mit SVT-AV1 4.2 (FFmpeg n9.0.1) nachgeprüft: sieben Quellen,
+// Presets 6/8/9/10, dazu Vergleichsläufe des echten Programms (-cqcheck).
 //
-// WICHTIG: SVT-AV1 hat bei Preset 8 einen Qualitätsdeckel um VMAF 96,5 —
-// am Realfilm verläuft die Kurve von CRF 12 bis 24 praktisch flach
-// (96,56 → 96,20 bei 26 % weniger Dateigröße). Niedrigere CRF-Werte
-// erzeugen dort nur größere Dateien. Genau dafür ist die Plateau-Logik
-// (autoCQPlateauTolerance) da; die Anker sind deshalb bewusst nicht tiefer
-// gelegt.
+// Neu seit dieser Prüfung sind nur die schrittabhängigen Werte. Ein
+// SVT-CRF-Schritt ist mit SVT-AV1 4.2 nur noch rund 0,21 VMAF wert (vorher
+// 0,30). Mit dem alten Mindestgewinn 0,18 verwarf die Suche an einer
+// schweren 1080p50-Quelle den Schritt auf CRF 19 (0,17 VMAF je Stufe) und
+// blieb bei VMAF 94,5 stehen; mit 0,12 nimmt sie CRF 19 mit 95,3. Die
+// Sättigungsschwelle ist im selben Verhältnis gesenkt (0,04).
+//
+// Bewusst NICHT geändert, obwohl die Schrittbreite es nahelegt:
+//   - Anker 24/32: tiefere Anker (20/28) trafen auf festen Messfenstern
+//     besser, im echten Programm (bitraten-geführte Fenster) verfehlte ein
+//     leichter Realfilm damit aber das Ziel nach oben (CRF 29 mit VMAF 97,7
+//     statt CRF 32 mit 96,6) und die Analyse dauerte fast doppelt so lange.
+//   - Korrekturweite 5: mit 7 schoss derselbe Fall über das Ziel hinaus.
+//   - Kletter-Faktor 1,5: nach der Rechnung wären es 2,5, und damit dürfte
+//     der CPU-Modus mehr Bildqualität für kleinere Dateien hergeben.
+//
+// WICHTIG: Jedes SVT-Preset hat eine Qualitätsobergrenze, und sie sinkt mit
+// dem Tempo — gemessen bei CRF 16: Preset 6 96,6-98,8, Preset 9 96,2-98,2,
+// Preset 10 nur 94,0-96,3. Darunter bringen niedrigere CRF-Werte nur größere
+// Dateien; das fängt die Plateau-Logik ab, ab Preset 10 warnt zusätzlich
+// svtPresetCeilingWarning.
 var svtav1AutoCQScale = autoCQScale{
 	anchorLow: 24, anchorHigh: 32,
 	clampMin: 16, clampMax: 44,
 	maxStepDown:          5,
-	saturationSlope:      0.06,
-	minGainPerStep:       0.18,
+	saturationSlope:      0.04,
+	minGainPerStep:       0.12,
 	climbToleranceFactor: 1.5,
 	buildOpts:            buildSVTAV1OptsWithCQ,
 	fallbackCQ:           func() int { return svtav1AutoCQFallbackCRF },
 	codecLabel:           "AV1 (CPU)",
+}
+
+const (
+	// svtMaxPreset ist das schnellste Preset, das SVT-AV1 4.x noch kennt.
+	// 12 und 13 nimmt es an, bildet sie aber still auf 11 ab ("Preset M12 is
+	// mapped to M11", gemessen 2026-09-24).
+	svtMaxPreset = 11
+	// svtLegacyMaxPreset ist die alte Obergrenze (SVT-AV1 bis 3.x). INIs mit
+	// 12 oder 13 laufen mit svtMaxPreset weiter — genau das bekamen sie schon.
+	svtLegacyMaxPreset = 13
+	// Ab svtCeilingPreset erreicht SVT-AV1 hohe VMAF-Ziele gar nicht mehr,
+	// egal wie viele Daten es bekommt: gemessen bei CRF 16 an sieben Quellen
+	// höchstens 94,0-96,3 (Preset 10), 95,3-95,4 (Preset 11).
+	svtCeilingPreset = 10
+	// svtCeilingMinTarget ist das VMAF-Ziel, ab dem diese Obergrenze greift.
+	svtCeilingMinTarget = 96.0
+)
+
+// svtPresetCeilingWarning liefert die Warnung für ein SVT-Preset, das das
+// eingestellte VMAF-Ziel nicht erreichen kann — oder "", wenn es passt.
+// active fasst zusammen, ob die Warnung überhaupt zählt (CPU-Modus, AV1 und
+// Auto-CQ): ohne Auto-CQ gibt es kein Ziel, das verfehlt werden könnte.
+// Gewarnt wird einmal pro Lauf, weil Auto-CQ sonst bei jeder Datei still am
+// Deckel entlangsucht und niemand erfährt, warum die Dateien groß werden.
+func svtPresetCeilingWarning(active bool, preset int, target float64) string {
+	if !active || preset < svtCeilingPreset || target < svtCeilingMinTarget {
+		return ""
+	}
+	return fmt.Sprintf("cpuAV1Preset=%d cannot reach VMAF %.4g: from preset %d on, SVT-AV1 tops out "+
+		"around VMAF 94-96 however many bits it gets. Auto-CQ will settle below the target "+
+		"with large files — cpuAV1Preset 6 reaches it on most material, 9 is the fast compromise.",
+		preset, target, svtCeilingPreset)
 }
 
 // checkLibVMAF reports whether the FFmpeg build carries the libvmaf filter.

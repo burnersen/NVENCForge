@@ -7,6 +7,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,8 +129,9 @@ func TestActiveBackendSelection(t *testing.T) {
 	}
 }
 
-// TestCPUAutoCQScales guards the anchors measured on 2026-07-25 against
-// accidental edits and checks the invariants every scale profile must hold.
+// TestCPUAutoCQScales guards the measured anchors (x265 2026-07-25, SVT-AV1
+// 2026-09-24) against accidental edits and checks the invariants every scale
+// profile must hold.
 func TestCPUAutoCQScales(t *testing.T) {
 	prev := appSettings
 	defer func() { appSettings = prev }()
@@ -158,17 +161,30 @@ func TestCPUAutoCQScales(t *testing.T) {
 		}
 	}
 
-	// The measured anchors themselves (VMAF 96 sits at x265 CRF ~18; the SVT
-	// scale mirrors av1_nvenc because their step widths match).
+	// The measured anchors themselves (VMAF 96 sits at x265 CRF ~18). The SVT
+	// pair was re-checked with SVT-AV1 4.2 on 2026-09-24: lower anchors (20/28)
+	// looked better on fixed windows but overshot on a real, easy film.
 	if x265AutoCQScale.anchorLow != 18 || x265AutoCQScale.anchorHigh != 22 {
 		t.Errorf("x265 anchors = %d/%d, want 18/22 (measurement 2026-07-25)",
 			x265AutoCQScale.anchorLow, x265AutoCQScale.anchorHigh)
 	}
-	if svtav1AutoCQScale.anchorLow != av1AutoCQScale.anchorLow ||
-		svtav1AutoCQScale.anchorHigh != av1AutoCQScale.anchorHigh {
-		t.Errorf("svt anchors = %d/%d, want the av1_nvenc pair %d/%d",
-			svtav1AutoCQScale.anchorLow, svtav1AutoCQScale.anchorHigh,
-			av1AutoCQScale.anchorLow, av1AutoCQScale.anchorHigh)
+	if svtav1AutoCQScale.anchorLow != 24 || svtav1AutoCQScale.anchorHigh != 32 {
+		t.Errorf("svt anchors = %d/%d, want 24/32 (re-checked 2026-09-24, SVT-AV1 4.2)",
+			svtav1AutoCQScale.anchorLow, svtav1AutoCQScale.anchorHigh)
+	}
+	// SVT-AV1 4.2 buys only ~0.21 VMAF per CRF step. With the old threshold of
+	// 0.18 the search refused a step worth 0.17 on a hard 1080p50 source and
+	// stopped at VMAF 94.5 instead of 95.3 — this pins the fix.
+	if svtav1AutoCQScale.minGainPerStep != 0.12 || svtav1AutoCQScale.saturationSlope != 0.04 {
+		t.Errorf("svt minGainPerStep/saturationSlope = %.2f/%.2f, want 0.12/0.04 (SVT-AV1 4.2 step width)",
+			svtav1AutoCQScale.minGainPerStep, svtav1AutoCQScale.saturationSlope)
+	}
+	// The climb may not spend more picture for size than before: the step-width
+	// rule would have raised it to 2.5, which contradicts the user's call to
+	// value the picture over the last percent of space.
+	if svtav1AutoCQScale.climbToleranceFactor != 1.5 {
+		t.Errorf("svt climbToleranceFactor = %.2f, want 1.5 (kept on purpose)",
+			svtav1AutoCQScale.climbToleranceFactor)
 	}
 	// Same reasoning as the av1_nvenc fallback: an unmeasurable clip must land
 	// near the quality target, not on the lean manual value.
@@ -208,4 +224,73 @@ func TestCPUSampleEncodesMatchRealEncode(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCPUAV1PresetRange pins the SVT-AV1 4.x preset range: 0-11 are taken as
+// they are, the old upper values 12/13 keep running as 11 (what SVT made of
+// them anyway) with a note instead of falling back to the slow default, and
+// everything else is still rejected.
+func TestCPUAV1PresetRange(t *testing.T) {
+	cases := []struct {
+		val      string
+		want     int
+		wantBad  bool
+		wantNote bool
+	}{
+		{"0", 0, false, false},
+		{"6", 6, false, false},
+		{"9", 9, false, false},
+		{"11", 11, false, false},
+		{"12", 11, false, true},
+		{"13", 11, false, true},
+		{"14", defaultAppSettings().cpuAV1Preset, true, false},
+		{"-1", defaultAppSettings().cpuAV1Preset, true, false},
+		{"schnell", defaultAppSettings().cpuAV1Preset, true, false},
+	}
+	for _, c := range cases {
+		path := filepath.Join(t.TempDir(), "NVENCForge_Config.ini")
+		if err := os.WriteFile(path, []byte("cpuAV1Preset="+c.val+"\r\n"), 0644); err != nil {
+			t.Fatalf("cannot write test config: %v", err)
+		}
+		s, invalids, warns := parseAppConfig(path)
+		if s.cpuAV1Preset != c.want {
+			t.Errorf("cpuAV1Preset=%s parsed to %d, want %d", c.val, s.cpuAV1Preset, c.want)
+		}
+		if gotBad := len(invalids) > 0; gotBad != c.wantBad {
+			t.Errorf("cpuAV1Preset=%s: rejected = %v, want %v", c.val, gotBad, c.wantBad)
+		}
+		gotNote := len(warns) == 1 && strings.Contains(warns[0], "cpuAV1Preset="+c.val)
+		if gotNote != c.wantNote || (!c.wantNote && len(warns) > 0) {
+			t.Errorf("cpuAV1Preset=%s: notes = %q, want a note: %v", c.val, warns, c.wantNote)
+		}
+	}
+}
+
+// TestSVTPresetCeilingWarning guards the one-per-run warning: it may only
+// appear where the measured ceiling really bites (CPU AV1 search, preset 10+,
+// target 96+), otherwise it would teach people to ignore it.
+func TestSVTPresetCeilingWarning(t *testing.T) {
+	cases := []struct {
+		name   string
+		active bool
+		preset int
+		target float64
+		want   bool
+	}{
+		{"preset 10 at target 97", true, 10, 97, true},
+		{"preset 11 exactly at 96", true, 11, 96, true},
+		{"preset 9 reaches the target", true, 9, 97, false},
+		{"preset 6 reaches the target", true, 6, 97, false},
+		{"preset 10 with a low target", true, 10, 95.9, false},
+		{"no CPU AV1 search", false, 11, 97, false},
+	}
+	for _, c := range cases {
+		got := svtPresetCeilingWarning(c.active, c.preset, c.target)
+		if (got != "") != c.want {
+			t.Errorf("%s: warning = %q, want one: %v", c.name, got, c.want)
+		}
+		if c.want && !strings.Contains(got, "cpuAV1Preset=") {
+			t.Errorf("%s: warning must name the setting to change\n%s", c.name, got)
+		}
+	}
 }

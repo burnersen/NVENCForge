@@ -2334,6 +2334,12 @@ func main() {
 			cfg.autoCQ = false
 		}
 	}
+	// Erst hier steht alles fest (CPU-Rückfall, AV1, Auto-CQ nach dem
+	// libvmaf-Test) — deshalb die Preset-Warnung genau an dieser Stelle.
+	svtSearch := cpuModeActive && cfg.av1 && cfg.autoCQ
+	if warning := svtPresetCeilingWarning(svtSearch, appSettings.cpuAV1Preset, appSettings.autoCQTargetVMAF); warning != "" {
+		pWarn.Println(warning)
+	}
 	printActiveSettings(cfg)
 	files := collectInputFiles(cfg, cfg.inputArgs)
 	if len(files) == 0 {

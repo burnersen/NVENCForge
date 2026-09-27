@@ -119,20 +119,16 @@ func TestCounterFlagsOverrideTheConfigFile(t *testing.T) {
 	}
 }
 
-// TestConfiguredCodecPicksItsBitrateCap prüft die Verdrahtung eine Ebene
-// weiter: Der Codec aus der Datei muss dieselben Folgen haben wie das Flag —
-// AV1 hat eigene Bitraten-Deckel. Käme nur das Flag dort an, liefe ein
-// AV1-Lauf aus der Konfigurationsdatei mit den H.265-Werten.
-func TestConfiguredCodecPicksItsBitrateCap(t *testing.T) {
+// TestOldBitrateFlagIsIgnored: -NNNN setzte bis 1.34.0 einen Bitraten-Deckel.
+// Ältere Fenster und Skripte geben ihn weiter mit — er darf weder als Datei
+// gelten noch den Lauf stören.
+func TestOldBitrateFlagIsIgnored(t *testing.T) {
 	s := defaultAppSettings()
-	s.codec = codecAV1
 	withSettings(t, s)
 
 	cfg := newAppConfig(s)
-	cfg.parseArgs(nil)
-
-	if cfg.maxBitrateKbps != s.av1MaxBitrate1080p {
-		t.Errorf("Deckel %d, erwartet den AV1-Wert %d", cfg.maxBitrateKbps, s.av1MaxBitrate1080p)
+	if rest := cfg.parseArgs([]string{"-8000"}); len(rest) != 0 {
+		t.Errorf("-8000 landete bei den Eingaben: %v", rest)
 	}
 }
 

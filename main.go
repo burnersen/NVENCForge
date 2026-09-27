@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "1.34.0"
+const appVersion = "2.0.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -921,12 +921,12 @@ func checkCPUEncoderCapability(av1 bool) error {
 		"-v", "error", "-f", "lavfi",
 		"-i", "color=c=black:s=1920x1080:d=1",
 	}
-	// Dieselben Optionen wie im echten Lauf, nur ohne Bitraten-Deckel: was
-	// hier läuft, läuft auch beim Encodieren.
+	// Dieselben Optionen wie im echten Lauf: was hier läuft, läuft auch beim
+	// Encodieren.
 	if av1 {
-		args = append(args, buildSVTAV1OptsWithCQ(appSettings.cpuAV1TargetCRF, "20000k", "40000k", 120)...)
+		args = append(args, buildSVTAV1OptsWithCQ(appSettings.cpuAV1TargetCRF, 120)...)
 	} else {
-		args = append(args, buildX265OptsWithCQ(appSettings.cpuTargetCRF, "20000k", "40000k", 120)...)
+		args = append(args, buildX265OptsWithCQ(appSettings.cpuTargetCRF, 120)...)
 	}
 	args = append(args, "-f", "null", "-")
 
@@ -1093,7 +1093,6 @@ func acquireProcessingLock(lockPath string, sizeMB float64, sourceFile string) (
 
 func (cfg *AppConfig) parseArgs(args []string) []string {
 	var rest []string
-	explicitBitrate := false
 	sawAutoCQFlag, sawNoAutoCQ := false, false
 	sawCropFlag, sawNoCropFlag := false, false
 	sawKeepFlag, sawNoKeepFlag := false, false
@@ -1265,11 +1264,11 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		}
 		if len(arg) > 1 && arg[0] == '-' {
 			if _, errStat := os.Stat(arg); os.IsNotExist(errStat) {
+				// -NNNN set a bitrate cap until 1.34.0. Caps are gone since
+				// 2.0.0, but older windows and scripts still pass the option —
+				// say so instead of mistaking it for a typo.
 				if n, err := strconv.ParseInt(arg[1:], 10, 64); err == nil && n > 0 {
-					cfg.maxBitrateKbps = n
-					explicitBitrate = true
-					pInfo.Printf("Max bitrate set manually: %sk\n",
-						pterm.LightCyan(fmt.Sprintf("%d", cfg.maxBitrateKbps)))
+					pWarn.Printf("%s ignored: bitrate caps were removed in 2.0.0 — quality follows autoCQTargetVMAF, size minSavePercent.\n", arg)
 					continue
 				}
 				// Looks like an option but matches nothing known and no file on
@@ -1388,24 +1387,6 @@ func (cfg *AppConfig) parseArgs(args []string) []string {
 		pInfo.Println("Keep-source enabled via configuration: originals stay exactly where they are.")
 	case sawNoKeepFlag && appSettings.keepSource:
 		pInfo.Println("Keep-source disabled for this run (-nokeep) — originals are moved away as configured.")
-	}
-	// AV1 reaches H.265 quality at ~25-30% less bitrate, so the AV1 mode has
-	// its own (lower) caps. An explicit -NNNN always wins.
-	if !explicitBitrate {
-		switch {
-		case cfg.av1 && cfg.keepOriginal:
-			cfg.maxBitrateKbps = appSettings.av1MaxBitrateOriginal
-			pInfo.Printf("Max bitrate (AV1 Original mode): %sk\n",
-				pterm.LightCyan(fmt.Sprintf("%d", cfg.maxBitrateKbps)))
-		case cfg.av1:
-			cfg.maxBitrateKbps = appSettings.av1MaxBitrate1080p
-			pInfo.Printf("Max bitrate (AV1 mode): %sk\n",
-				pterm.LightCyan(fmt.Sprintf("%d", cfg.maxBitrateKbps)))
-		case cfg.keepOriginal:
-			cfg.maxBitrateKbps = appSettings.maxBitrateOriginal
-			pInfo.Printf("Max bitrate (Original mode): %sk\n",
-				pterm.LightCyan(fmt.Sprintf("%d", appSettings.maxBitrateOriginal)))
-		}
 	}
 	cfg.inputArgs = rest
 	return rest
@@ -1653,16 +1634,10 @@ func printActiveSettings(cfg *AppConfig) {
 		Println("Active Settings  (NVENCForge_Config.ini)")
 	fmt.Println()
 
-	bitrate := s.maxBitrate1080p
-	bitrateActive := false
 	resValue := fmt.Sprintf("max %dp", s.maxResolution)
 	resActive := false
 	autoShutdown := s.autoShutdown
 	if cfg != nil {
-		if cfg.maxBitrateKbps != s.maxBitrate1080p {
-			bitrate = cfg.maxBitrateKbps
-			bitrateActive = true
-		}
 		if cfg.keepOriginal {
 			resValue = "original (no downscale)"
 			resActive = true
@@ -1679,8 +1654,8 @@ func printActiveSettings(cfg *AppConfig) {
 		audioModeActive = true
 	}
 
-	// -av1 switches encoder, CQ scale (av1TargetCQ) and bitrate caps; the
-	// B-frame setting is not used by av1_nvenc.
+	// -av1 switches encoder and CQ scale (av1TargetCQ); the B-frame setting is
+	// not used by av1_nvenc.
 	videoCodec := "H.265"
 	codecActive := false
 	cqVal := s.targetCQ
@@ -1770,13 +1745,6 @@ func printActiveSettings(cfg *AppConfig) {
 		{"Audio", audioMode, "cyan", audioModeActive},
 		{"Originals", originalsText, "cyan", originalsActive},
 	}
-	// Ein von Hand gesetzter Deckel (-NNNN) gehört nach oben: der Nutzer hat ihn
-	// bewusst mitgegeben und will ihn bestätigt sehen. Der Standardwert bleibt
-	// unten bei den Details stehen.
-	if bitrateActive {
-		primary = append(primary,
-			entry{"Max bitrate", fmt.Sprintf("%d k", bitrate), "cyan", true})
-	}
 	// Das Schneiden schrieb bis 1.30.0 nur eine Info-Zeile weit oben und fehlte
 	// in dieser Übersicht — ausgerechnet dort, wo man nachsieht, ob eine
 	// Einstellung angekommen ist. Wie beim Abschalten nur im eingeschalteten
@@ -1812,31 +1780,23 @@ func printActiveSettings(cfg *AppConfig) {
 	addQuality := func(label, value string) { quality = append(quality, detail{label, value}) }
 	addPipeline := func(label, value string) { pipeline = append(pipeline, detail{label, value}) }
 
-	// Ein von Hand gesetzter Deckel steht schon oben in der Hauptliste — hier
-	// noch einmal wäre er die einzige doppelte Angabe der ganzen Anzeige.
-	if !bitrateActive {
-		addQuality("Max bitrate", fmt.Sprintf("%d k", bitrate))
+	// Die Mindestersparnis gilt immer — mit Auto-CQ schon vor dem Umwandeln,
+	// ohne erst an der fertigen Datei. Sie steht deshalb vor den Auto-CQ-Zeilen.
+	minSave := fmt.Sprintf("%.4g%% of the file, else remux", s.minSavePercent)
+	if s.minSavePercent <= 0 {
+		minSave = "must get smaller, else remux"
 	}
+	addQuality("Min. saving", minSave)
 	if cfg != nil && cfg.autoCQ {
-		target := fmt.Sprintf("VMAF %.4g", s.autoCQTargetVMAF)
-		if s.autoCQTolerance > 0 {
-			target = fmt.Sprintf("VMAF %.4g (accepts %.4g)",
-				s.autoCQTargetVMAF, s.autoCQTargetVMAF-s.autoCQTolerance)
-		}
-		addQuality("Quality target", target)
+		addQuality("Quality target", fmt.Sprintf("VMAF %.4g", s.autoCQTargetVMAF))
 		addQuality("Plateau tolerance", fmt.Sprintf("%.4g VMAF", s.autoCQPlateauTolerance))
 		// Direkt unter die Toleranz: die eine sagt, wie viel Qualität der
 		// Plateau-Aufstieg ausgeben DARF, die andere, wofür er sie ausgeben
 		// muss. Bei 0 ist die Gegenrechnung aus und die Zeile würde die Liste
-		// nur füllen — wie beim Kosten-Deckel darunter.
+		// nur füllen.
 		if s.autoCQPlateauMinSavePercent > 0 {
 			addQuality("Min. climb saving",
 				fmt.Sprintf("%.4g%% smaller file", s.autoCQPlateauMinSavePercent))
-		}
-		// Only worth a line when it is armed: at 0 (the default) the cap
-		// changes nothing, and an "off" row would just pad the list.
-		if s.autoCQMaxSourcePercent > 0 {
-			addQuality("Cost cap", fmt.Sprintf("%.4g%% of source bitrate", s.autoCQMaxSourcePercent))
 		}
 	}
 

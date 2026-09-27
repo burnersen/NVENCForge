@@ -77,16 +77,16 @@ func TestClassifyFFmpegError(t *testing.T) {
 
 func TestResetInvalidConfigLines(t *testing.T) {
 	// INI with invalid values (targetCQ, maxResolution, nvencPreset), a valid
-	// value (maxBitrate1080p), a comment and an unknown key. Only the invalid
+	// value (casStrength), a comment and an unknown key. Only the invalid
 	// lines must change; everything else must stay byte-for-byte.
 	ini := "# my notes\n" +
 		"targetCQ=77\n" +
-		"maxBitrate1080p=12000\n" +
+		"casStrength=0.2\n" +
 		"maxResolution=108\n" +
 		"nvencPreset=p8\n" +
 		"autoCQ=vielleicht\n" +
 		"autoCQTargetVMAF=120\n" +
-		"autoCQTolerance=-1\n" +
+		"minSavePercent=-1\n" +
 		"autoCQPlateauTolerance=11\n" +
 		"unknownKey=keepme\n"
 	path := filepath.Join(t.TempDir(), "NVENCForge_Config.ini")
@@ -110,12 +110,12 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	for _, want := range []string{
 		"# my notes",                 // comment untouched
 		"targetCQ=26",                // reset to default
-		"maxBitrate1080p=12000",      // valid value untouched
+		"casStrength=0.2",            // valid value untouched
 		"maxResolution=1080",         // reset to default
 		"nvencPreset=p5",             // reset to default
 		"autoCQ=true",                // reset to default
-		"autoCQTargetVMAF=97",        // reset to default
-		"autoCQTolerance=0.5",        // reset to default
+		"autoCQTargetVMAF=96",        // reset to default
+		"minSavePercent=20",          // reset to default
 		"autoCQPlateauTolerance=1.5", // reset to default
 		"unknownKey=keepme",          // unknown key untouched
 	} {
@@ -136,7 +136,7 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	}
 	if hasLine("targetCQ=77") || hasLine("maxResolution=108") ||
 		hasLine("nvencPreset=p8") || hasLine("autoCQ=vielleicht") ||
-		hasLine("autoCQTargetVMAF=120") || hasLine("autoCQTolerance=-1") ||
+		hasLine("autoCQTargetVMAF=120") || hasLine("minSavePercent=-1") ||
 		hasLine("autoCQPlateauTolerance=11") {
 		t.Errorf("an invalid value survived the reset:\n%s", got)
 	}

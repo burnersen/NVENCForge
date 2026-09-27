@@ -23,21 +23,20 @@ import (
 // ----------------------------------------------------------------------------
 
 type AppConfig struct {
-	maxBitrateKbps int64    // Obergrenze der Ziel-Bitrate in kbps
-	autoShutdown   bool     // PC nach Abschluss herunterfahren
-	keepOriginal   bool     // -original (alias -orig): Originalauflösung behalten, Bitrate-Cap auf 22000k
-	copyAudio      bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
-	av1            bool     // -av1: opt-in AV1-Encoding (av1_nvenc bzw. libsvtav1) statt H.265
-	cpu            bool     // -cpu: auf dem Prozessor encodieren (libx265/libsvtav1) statt auf der GPU
-	mp4Mode        bool     // -mp4 (alt: -apple): Ausgabe als überall abspielbare MP4 (H.265/hvc1 + AAC + faststart) statt MKV
-	eightBit       bool     // -8bit: in 8 Bit encodieren statt in 10 Bit (für alte Geräte, die kein Main10 können)
-	keepSource     bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
-	autoCQ         bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
-	forcedCQ       int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
-	autoCrop       bool     // -crop: schwarze Balken erkennen und wegschneiden (Voreinstellung aus)
-	cropCheckOnly  bool     // -cropcheck: nur das Kontrollbild schreiben, NICHT konvertieren
-	cqCheckOnly    bool     // -cqcheck: nur die Auto-CQ-Suche zeigen, NICHT konvertieren
-	inputArgs      []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
+	autoShutdown  bool     // PC nach Abschluss herunterfahren
+	keepOriginal  bool     // -original (alias -orig): Originalauflösung behalten, nicht auf maxResolution verkleinern
+	copyAudio     bool     // -copyaudio: Ton 1:1 kopieren (kein DaVinci-AAC-Re-Encode)
+	av1           bool     // -av1: opt-in AV1-Encoding (av1_nvenc bzw. libsvtav1) statt H.265
+	cpu           bool     // -cpu: auf dem Prozessor encodieren (libx265/libsvtav1) statt auf der GPU
+	mp4Mode       bool     // -mp4 (alt: -apple): Ausgabe als überall abspielbare MP4 (H.265/hvc1 + AAC + faststart) statt MKV
+	eightBit      bool     // -8bit: in 8 Bit encodieren statt in 10 Bit (für alte Geräte, die kein Main10 können)
+	keepSource    bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
+	autoCQ        bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
+	forcedCQ      int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
+	autoCrop      bool     // -crop: schwarze Balken erkennen und wegschneiden (Voreinstellung aus)
+	cropCheckOnly bool     // -cropcheck: nur das Kontrollbild schreiben, NICHT konvertieren
+	cqCheckOnly   bool     // -cqcheck: nur die Auto-CQ-Suche zeigen, NICHT konvertieren
+	inputArgs     []string // verbleibende Nicht-Flag-Argumente (Dateien/Ordner)
 }
 
 // newAppConfig baut den Startzustand eines Laufs aus der Konfigurationsdatei.
@@ -51,17 +50,16 @@ type AppConfig struct {
 // Eigene Funktion, damit eine Prüfung diesen Zustand ohne main() ansehen kann.
 func newAppConfig(s AppSettings) *AppConfig {
 	return &AppConfig{
-		maxBitrateKbps: s.maxBitrate1080p,
-		autoShutdown:   s.autoShutdown,
-		autoCQ:         s.autoCQ,
-		autoCrop:       s.autoCrop,
-		av1:            s.codec == codecAV1,
-		cpu:            s.encoder == encoderCPU,
-		mp4Mode:        s.container == containerMP4,
-		copyAudio:      s.audioMode == audioModeCopy,
-		eightBit:       s.bitDepth == bitDepth8,
-		keepSource:     s.keepSource,
-		keepOriginal:   s.keepResolution,
+		autoShutdown: s.autoShutdown,
+		autoCQ:       s.autoCQ,
+		autoCrop:     s.autoCrop,
+		av1:          s.codec == codecAV1,
+		cpu:          s.encoder == encoderCPU,
+		mp4Mode:      s.container == containerMP4,
+		copyAudio:    s.audioMode == audioModeCopy,
+		eightBit:     s.bitDepth == bitDepth8,
+		keepSource:   s.keepSource,
+		keepOriginal: s.keepResolution,
 	}
 }
 
@@ -72,8 +70,6 @@ func newAppConfig(s AppSettings) *AppConfig {
 
 type AppSettings struct {
 	targetCQ                    int
-	maxBitrate1080p             int64
-	maxBitrateOriginal          int64
 	maxResolution               int
 	nvencPreset                 string
 	nvencLookahead              int
@@ -85,14 +81,11 @@ type AppSettings struct {
 	autoShutdown                bool
 	extraFilenameChars          string
 	av1TargetCQ                 int
-	av1MaxBitrate1080p          int64
-	av1MaxBitrateOriginal       int64
 	autoCQ                      bool
 	autoCQTargetVMAF            float64
-	autoCQTolerance             float64
 	autoCQPlateauTolerance      float64
 	autoCQPlateauMinSavePercent float64
-	autoCQMaxSourcePercent      float64
+	minSavePercent              float64
 	encoder                     string
 	cpuPreset                   string
 	cpuAV1Preset                int
@@ -115,44 +108,45 @@ var appSettings = defaultAppSettings()
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		targetCQ:                    26,
-		maxBitrate1080p:             8000,
-		maxBitrateOriginal:          22000,
-		maxResolution:               1080,
-		nvencPreset:                 "p5",
-		nvencLookahead:              32,
-		bFrames:                     5,
-		aqStrength:                  2,
-		casStrength:                 0.4,
-		audioKbpsPerChannel:         96,
-		fallbackAudioBitrate:        128,
-		autoShutdown:                false,
-		extraFilenameChars:          "",
-		av1TargetCQ:                 32,
-		av1MaxBitrate1080p:          6000,
-		av1MaxBitrateOriginal:       13000,
-		autoCQ:                      true,
-		autoCQTargetVMAF:            97,
-		autoCQTolerance:             0.5,
+		targetCQ:             26,
+		maxResolution:        1080,
+		nvencPreset:          "p5",
+		nvencLookahead:       32,
+		bFrames:              5,
+		aqStrength:           2,
+		casStrength:          0.4,
+		audioKbpsPerChannel:  96,
+		fallbackAudioBitrate: 128,
+		autoShutdown:         false,
+		extraFilenameChars:   "",
+		av1TargetCQ:          32,
+		autoCQ:               true,
+		// 96 statt bis 1.34.0 97 (Nutzerwahl 2026-09-27, wie in CloudForge):
+		// ohne Kosten-Deckel ist das Ziel eine echte Untergrenze, und an fünf
+		// echten 1080p-Filmen (AV1) lohnten sich bei 97 zwei, bei 96 drei.
+		autoCQTargetVMAF:            96,
 		autoCQPlateauTolerance:      1.5,
 		autoCQPlateauMinSavePercent: 5,
-		autoCQMaxSourcePercent:      45,
-		encoder:                     encoderNvidia,
-		cpuPreset:                   "fast",
-		cpuAV1Preset:                6,
-		cpuTargetCRF:                18,
-		cpuAV1TargetCRF:             32,
-		cpuThreads:                  0,
-		gpuDecode:                   true,
-		gpuDecodeMaxMbit:            gpuDecodeDefaultMaxMbit,
-		retireMode:                  retireModeFolder,
-		autoCrop:                    false,
-		codec:                       codecH265,
-		container:                   containerMKV,
-		audioMode:                   audioModeAAC,
-		bitDepth:                    bitDepth10,
-		keepSource:                  false,
-		keepResolution:              false,
+		// Umgewandelt wird nur, was mindestens so viel spart; alles andere wird
+		// verlustfrei umgepackt. 20 ist die Wahl des Nutzers aus CloudForge
+		// (2026-09-27): darunter lohnt der Bildverlust eines Neukodierens nicht.
+		minSavePercent:   20,
+		encoder:          encoderNvidia,
+		cpuPreset:        "fast",
+		cpuAV1Preset:     6,
+		cpuTargetCRF:     18,
+		cpuAV1TargetCRF:  32,
+		cpuThreads:       0,
+		gpuDecode:        true,
+		gpuDecodeMaxMbit: gpuDecodeDefaultMaxMbit,
+		retireMode:       retireModeFolder,
+		autoCrop:         false,
+		codec:            codecH265,
+		container:        containerMKV,
+		audioMode:        audioModeAAC,
+		bitDepth:         bitDepth10,
+		keepSource:       false,
+		keepResolution:   false,
 	}
 }
 
@@ -267,18 +261,28 @@ func loadOrCreateAppConfig() {
 	}
 
 	// Die Datei ist da, aber vielleicht älter als das Programm. Fehlende
-	// Einstellungen werden ergänzt, BEVOR gelesen wird — nicht wegen der Werte
-	// (dafür gäbe es Standardwerte), sondern wegen der Oberfläche: das Fenster
-	// baut seine Einstellungsseite aus dieser Datei und kann nur anbieten, was
-	// darin steht.
-	added, addErr := addMissingConfigEntries(path)
+	// Einstellungen werden ergänzt und weggefallene entfernt, BEVOR gelesen
+	// wird — nicht wegen der Werte (dafür gäbe es Standardwerte), sondern wegen
+	// der Oberfläche: das Fenster baut seine Einstellungsseite aus dieser Datei
+	// und kann nur anbieten, was darin steht.
+	update, updateErr := updateConfigEntries(path)
 	switch {
-	case addErr != nil:
-		pWarn.Printf("Config: could not add new settings to the config file: %v\n",
-			plainError(addErr))
-	case len(added) > 0:
-		pInfo.Printf("Config: %d new setting(s) added to NVENCForge_Config.ini: %s\n",
-			len(added), strings.Join(added, ", "))
+	case updateErr != nil:
+		pWarn.Printf("Config: could not bring the config file up to date: %v\n",
+			plainError(updateErr))
+	case update.changed():
+		if len(update.added) > 0 {
+			pInfo.Printf("Config: %d new setting(s) added to NVENCForge_Config.ini: %s\n",
+				len(update.added), strings.Join(update.added, ", "))
+		}
+		if len(update.removed) > 0 {
+			pInfo.Printf("Config: %d setting(s) removed that no longer exist: %s\n",
+				len(update.removed), strings.Join(update.removed, ", "))
+		}
+		if len(update.refreshed) > 0 {
+			pInfo.Printf("Config: explanation updated for: %s\n",
+				strings.Join(update.refreshed, ", "))
+		}
 		pInfo.Printf("        Your previous file was kept as %s\n",
 			filepath.Base(path)+configBackupSuffix)
 	}
@@ -315,8 +319,6 @@ func defaultConfigStrings() map[string]string {
 	d := defaultAppSettings()
 	return map[string]string{
 		"targetCQ":                    strconv.Itoa(d.targetCQ),
-		"maxBitrate1080p":             strconv.FormatInt(d.maxBitrate1080p, 10),
-		"maxBitrateOriginal":          strconv.FormatInt(d.maxBitrateOriginal, 10),
 		"maxResolution":               strconv.Itoa(d.maxResolution),
 		"nvencPreset":                 d.nvencPreset,
 		"nvencLookahead":              strconv.Itoa(d.nvencLookahead),
@@ -327,14 +329,11 @@ func defaultConfigStrings() map[string]string {
 		"fallbackAudioBitrate":        strconv.Itoa(d.fallbackAudioBitrate),
 		"autoShutdown":                strconv.FormatBool(d.autoShutdown),
 		"av1TargetCQ":                 strconv.Itoa(d.av1TargetCQ),
-		"av1MaxBitrate1080p":          strconv.FormatInt(d.av1MaxBitrate1080p, 10),
-		"av1MaxBitrateOriginal":       strconv.FormatInt(d.av1MaxBitrateOriginal, 10),
 		"autoCQ":                      strconv.FormatBool(d.autoCQ),
 		"autoCQTargetVMAF":            strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
-		"autoCQTolerance":             strconv.FormatFloat(d.autoCQTolerance, 'f', -1, 64),
 		"autoCQPlateauTolerance":      strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
 		"autoCQPlateauMinSavePercent": strconv.FormatFloat(d.autoCQPlateauMinSavePercent, 'f', -1, 64),
-		"autoCQMaxSourcePercent":      strconv.FormatFloat(d.autoCQMaxSourcePercent, 'f', -1, 64),
+		"minSavePercent":              strconv.FormatFloat(d.minSavePercent, 'f', -1, 64),
 		"encoder":                     d.encoder,
 		"cpuPreset":                   d.cpuPreset,
 		"cpuAV1Preset":                strconv.Itoa(d.cpuAV1Preset),
@@ -454,18 +453,6 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
-		case "maxBitrate1080p":
-			if n, e := strconv.Atoi(val); e == nil && n > 1000 {
-				s.maxBitrate1080p = int64(n)
-			} else {
-				bad(key, val)
-			}
-		case "maxBitrateOriginal":
-			if n, e := strconv.Atoi(val); e == nil && n > 1000 {
-				s.maxBitrateOriginal = int64(n)
-			} else {
-				bad(key, val)
-			}
 		case "maxResolution":
 			if n, e := strconv.Atoi(val); e == nil && validRes[n] {
 				s.maxResolution = n
@@ -526,18 +513,6 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
-		case "av1MaxBitrate1080p":
-			if n, e := strconv.Atoi(val); e == nil && n > 1000 {
-				s.av1MaxBitrate1080p = int64(n)
-			} else {
-				bad(key, val)
-			}
-		case "av1MaxBitrateOriginal":
-			if n, e := strconv.Atoi(val); e == nil && n > 1000 {
-				s.av1MaxBitrateOriginal = int64(n)
-			} else {
-				bad(key, val)
-			}
 		case "autoCQ":
 			if b, e := strconv.ParseBool(val); e == nil {
 				s.autoCQ = b
@@ -547,12 +522,6 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "autoCQTargetVMAF":
 			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 70 && fv <= 99 {
 				s.autoCQTargetVMAF = fv
-			} else {
-				bad(key, val)
-			}
-		case "autoCQTolerance":
-			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 5 {
-				s.autoCQTolerance = fv
 			} else {
 				bad(key, val)
 			}
@@ -572,12 +541,13 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			} else {
 				bad(key, val)
 			}
-		// 0 switches the cap off. The lower bound of 10 is deliberate: below
-		// that a re-encode cannot hold quality on any material, so a typo like
-		// "4" instead of "40" is rejected instead of quietly ruining a batch.
-		case "autoCQMaxSourcePercent":
-			if fv, e := strconv.ParseFloat(val, 64); e == nil && (fv == 0 || (fv >= 10 && fv <= 100)) {
-				s.autoCQMaxSourcePercent = fv
+		// 0 lässt nur die Grundregel übrig: ein Ergebnis, das nicht kleiner
+		// als die Quelle ist, wird verworfen. Oben bei 90 abgeriegelt, weil
+		// ein Neukodieren nie mehr spart — ein höherer Wert wäre ein
+		// Aus-Schalter für das Umwandeln durch die Hintertür.
+		case "minSavePercent":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 0 && fv <= 90 {
+				s.minSavePercent = fv
 			} else {
 				bad(key, val)
 			}
@@ -878,13 +848,30 @@ for a single run, -nocrop off.`)
 
 	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
 		`How much visible quality the automatic search aims for, on a scale
-where 100 is identical to the source. 97 is the default: below it the
-scale turns forgiving fast - on smooth, evenly lit close-ups a result
-scoring 96 can already look soft. It works hand in hand with
-"autoCQMaxSourcePercent", which caps what an expensive file may cost,
-so the target itself does not have to be lowered for grainy material.
+where 100 is identical to the source. 96 is the default. Measured on five
+real 1080p films in AV1: at 96 three of them were worth re-encoding, at
+97 only two - that last point often costs as many bits as the source
+itself. On smooth, evenly lit close-ups 97 keeps a touch more texture.
+The target is a floor: the chosen setting is measured and holds it,
+unless the source cannot reach it or only at a price no one would pay -
+the log then says why.
+Pictures smaller than 1080p are measured the way they look on a Full HD
+screen, so a small file cannot score better than it looks.
 Lower values save real space on busy material; below 94 the loss shows
 on anything. Higher = bigger files.`)
+
+	configEntry("minSavePercent", d.minSavePercent, "0 to 90",
+		`How much smaller a file must get to be worth re-encoding, in percent
+of the whole file. The saving is predicted from the quality measurement
+before anything is encoded - close to the limit, ten more spots across
+the film are encoded to be sure - and the finished file is checked
+again. A file that would not save this much is remuxed losslessly
+instead: the picture stays exactly as it is.
+0 only rejects results that come out larger than the source.
+Always remuxed without measuring: videos below 720p, and sources whose
+bitrate is already at the floor for their resolution.
+Files scaled down to maxResolution only have to come out smaller than the
+source - the smaller picture is what you asked for.`)
 
 	configEntry("audioKbpsPerChannel", d.audioKbpsPerChannel, "more than 32",
 		`Audio quality when a track has to be re-encoded to AAC, per channel.
@@ -918,19 +905,11 @@ The -cpu option switches a single run over, -gpu back.`)
 
 	heading("PART 2  -  expert settings\nThese are measured, well-tested values. You can safely ignore\nthis entire section - it is here for people who want to tinker.")
 
-	group("Quality and bitrate")
+	group("Quality")
 
 	configEntry("targetCQ", d.targetCQ, "1 to 51",
 		`Fixed quality value for H.265, used only when the automatic search
 is off (-noautocq). Lower = better quality and bigger files.`)
-
-	configEntry("maxBitrate1080p", d.maxBitrate1080p, "more than 1000",
-		`Upper bitrate limit in kbit/s for normal (downscaled) mode.
-A ceiling, not a target: most files stay well below it.`)
-
-	configEntry("maxBitrateOriginal", d.maxBitrateOriginal, "more than 1000",
-		`Upper bitrate limit in kbit/s when -original is used. Higher,
-because 4K material needs more bitrate than 1080p.`)
 
 	configEntry("casStrength", d.casStrength, "0.0 to 1.0",
 		`Sharpening applied after downscaling. 0.4 is a light touch,
@@ -950,17 +929,14 @@ mono or low-channel track would end up with far too little bitrate.`)
 makes NVENCForge more than a preset - leave it on.
 -noautocq switches it off for a single run.`)
 
-	configEntry("autoCQTolerance", d.autoCQTolerance, "0 to 5",
-		`How far below the quality target the search may land when that
-saves a real amount of file size. Differences up to about 0.5 are
-invisible. 0 chases the target exactly and produces bigger files.`)
-
 	configEntry("autoCQPlateauTolerance", d.autoCQPlateauTolerance, "0 to 10",
 		`Extra savings allowance for sources that were already heavily
 compressed (streaming rips, for example). Their quality tops out
 below the target no matter what, so chasing it only wastes space.
-Every candidate is verified by a real measurement, never estimated.
-0 restores the old, more cautious behaviour.`)
+It is only spent where the measured curve is flat - where each step
+still costs visible quality, nothing is given away. Every candidate
+is verified by a real measurement, never estimated.
+0 switches the allowance off.`)
 
 	configEntry("autoCQPlateauMinSavePercent", d.autoCQPlateauMinSavePercent, "0 to 50",
 		`How much smaller the file actually has to get before that extra
@@ -970,33 +946,12 @@ a file that stays the same size helps nobody. Measured on such a
 source: four CQ steps cost 0.7 VMAF and saved 1 % of the size.
 0 spends the allowance no matter how little it buys.`)
 
-	configEntry("autoCQMaxSourcePercent", d.autoCQMaxSourcePercent, "0, or 10 to 100",
-		`Spending limit for the quality search, as a percentage of what
-the source itself uses. Grainy or very busy films can otherwise
-cost more than half the original bitrate for quality nobody sees.
-45 is the default: the search stops at the best setting that still
-fits into 45% of the source rate and says so in the log. The chosen
-setting is confirmed by a real measurement. Lower values save more
-and cost more picture; 0 switches the limit off entirely, and the
-quality target then always wins.
-Files that were ALREADY compressed hard are left alone: they need
-a bigger share of their own bitrate, not a smaller one, so a limit
-they cannot meet would only cost picture without saving anything.
-The log says whenever that happens.`)
-
 	group("AV1 mode (-av1, needs an RTX 40 series card or newer)")
 
 	configEntry("av1TargetCQ", d.av1TargetCQ, "1 to 63",
 		`Fixed quality value for AV1 when the automatic search is off.
 This is a DIFFERENT scale than targetCQ - the numbers are not
 comparable. 32 here is a lean setting, roughly VMAF 94.`)
-
-	configEntry("av1MaxBitrate1080p", d.av1MaxBitrate1080p, "more than 1000",
-		`Bitrate ceiling for AV1 in normal mode. Lower than the H.265
-value on purpose: AV1 needs 25-30% less for the same quality.`)
-
-	configEntry("av1MaxBitrateOriginal", d.av1MaxBitrateOriginal, "more than 1000",
-		`Bitrate ceiling for AV1 together with -original.`)
 
 	group("CPU mode (-cpu)")
 
@@ -1265,25 +1220,154 @@ func insertMissingEntries(content string, blocks []configBlock) (string, []strin
 	return strings.Join(out, detectLineEnding(content)), added
 }
 
-// addMissingConfigEntries trägt fehlende Einstellungen in eine vorhandene INI
-// nach und meldet, welche das waren. Angefasst wird die Datei nur, wenn
-// wirklich etwas fehlt; vorher entsteht eine Sicherungskopie.
-func addMissingConfigEntries(path string) ([]string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (read): %w", err)
+// ----------------------------------------------------------------------------
+// Weggefallene Einstellungen entfernen
+// ----------------------------------------------------------------------------
+//
+// Mit 2.0.0 sind die Bitraten-Deckel verschwunden: die Qualität regelt allein
+// das VMAF-Ziel, die Größe die Mindestersparnis (minSavePercent). In einer
+// alten INI stünden ihre Zeilen sonst wirkungslos weiter herum — und die
+// Oberfläche, die ihre Einstellungsseite aus der INI baut, böte sie weiter an.
+
+// retiredConfigKeys sind Schlüssel, die das Programm nicht mehr kennt. Sie
+// werden beim ersten Lauf samt ihrer Erklärung aus der INI entfernt.
+var retiredConfigKeys = []string{
+	"maxBitrate1080p", "maxBitrateOriginal",
+	"av1MaxBitrate1080p", "av1MaxBitrateOriginal",
+	"autoCQMaxSourcePercent", "autoCQTolerance",
+}
+
+// commentLinesAbove liefert, wo die Kommentarzeilen direkt über der Zeile
+// valueIndex beginnen — dieselbe Blockregel wie configBlocksFromTemplate: eine
+// Leerzeile oder eine Nicht-Kommentarzeile beendet den Block nach oben.
+func commentLinesAbove(lines []string, valueIndex int) int {
+	start := valueIndex
+	for start > 0 && strings.HasPrefix(strings.TrimSpace(lines[start-1]), "#") {
+		start--
+	}
+	return start
+}
+
+// removeRetiredEntries streicht jeden Eintrag eines weggefallenen Schlüssels:
+// die Wertzeile, ihre Erklärung darüber und die Leerzeile dahinter, damit keine
+// doppelten Leerzeilen zurückbleiben. Getrennt vom Schreiben, damit die Regel
+// ohne Datei prüfbar ist. Alles andere bleibt Zeichen für Zeichen stehen.
+func removeRetiredEntries(content string, retired []string) (string, []string) {
+	isRetired := make(map[string]bool, len(retired))
+	for _, key := range retired {
+		isRetired[key] = true
 	}
 
-	updated, added := insertMissingEntries(string(content), configBlocksFromTemplate())
-	if len(added) == 0 {
-		return nil, nil
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	drop := make([]bool, len(lines))
+	var removed []string
+	for i, line := range lines {
+		key, ok := configKeyOfLine(line)
+		if !ok || !isRetired[key] {
+			continue
+		}
+		for j := commentLinesAbove(lines, i); j <= i; j++ {
+			drop[j] = true
+		}
+		// The last element is what follows the final line break — keeping it
+		// keeps the file ending on a line break.
+		if next := i + 1; next < len(lines)-1 && strings.TrimSpace(lines[next]) == "" {
+			drop[next] = true
+		}
+		removed = append(removed, key)
+	}
+	if len(removed) == 0 {
+		return content, nil
+	}
+
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if !drop[i] {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, detectLineEnding(content)), removed
+}
+
+// refreshStaleComments ersetzt die Erklärung eines noch gültigen Eintrags durch
+// die aktuelle aus der Vorlage — aber nur, wenn sie einen weggefallenen
+// Schlüssel nennt. Anlass: der Text zu autoCQTargetVMAF verwies bis 1.34.0 auf
+// den Kosten-Deckel, und die Oberfläche zeigt genau diesen Text als Hilfe an.
+// Ein Hinweis auf eine Einstellung, die es nicht mehr gibt, führt in die Irre.
+// Der Wert selbst bleibt, wie er ist.
+func refreshStaleComments(content string, blocks []configBlock, retired []string) (string, []string) {
+	template := make(map[string][]string, len(blocks))
+	for _, block := range blocks {
+		template[block.key] = block.lines[:len(block.lines)-1] // ohne die Wertzeile
+	}
+	mentionsRetired := func(comment []string) bool {
+		for _, line := range comment {
+			for _, key := range retired {
+				if strings.Contains(line, key) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	var out []string
+	var refreshed []string
+	for i, line := range lines {
+		key, ok := configKeyOfLine(line)
+		fresh, known := template[key]
+		if ok && known {
+			start := commentLinesAbove(lines, i)
+			// Die Kommentarzeilen darüber stehen schon in out — sie werden dort
+			// ersetzt, falls sie veraltet sind.
+			if mentionsRetired(lines[start:i]) {
+				out = append(out[:len(out)-(i-start)], fresh...)
+				refreshed = append(refreshed, key)
+			}
+		}
+		out = append(out, line)
+	}
+	if len(refreshed) == 0 {
+		return content, nil
+	}
+	return strings.Join(out, detectLineEnding(content)), refreshed
+}
+
+// configUpdate sagt, was updateConfigEntries an einer INI geändert hat.
+type configUpdate struct {
+	added, removed, refreshed []string
+}
+
+// changed meldet, ob überhaupt etwas geändert wurde.
+func (u configUpdate) changed() bool {
+	return len(u.added)+len(u.removed)+len(u.refreshed) > 0
+}
+
+// updateConfigEntries bringt eine vorhandene INI auf den Stand des Programms:
+// veraltete Erklärungen auffrischen, weggefallene Einstellungen entfernen,
+// fehlende nachtragen. Angefasst wird die Datei nur, wenn sich wirklich etwas
+// ändert; vorher entsteht EINE Sicherungskopie des ursprünglichen Stands.
+func updateConfigEntries(path string) (configUpdate, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return configUpdate{}, fmt.Errorf("Config.go: updateConfigEntries (read): %w", err)
+	}
+
+	blocks := configBlocksFromTemplate()
+	updated, refreshed := refreshStaleComments(string(content), blocks, retiredConfigKeys)
+	updated, removed := removeRetiredEntries(updated, retiredConfigKeys)
+	updated, added := insertMissingEntries(updated, blocks)
+	update := configUpdate{added: added, removed: removed, refreshed: refreshed}
+	if !update.changed() {
+		return update, nil
 	}
 
 	if err := os.WriteFile(path+configBackupSuffix, content, 0644); err != nil {
-		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (backup): %w", err)
+		return configUpdate{}, fmt.Errorf("Config.go: updateConfigEntries (backup): %w", err)
 	}
 	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
-		return nil, fmt.Errorf("Config.go: addMissingConfigEntries (write): %w", err)
+		return configUpdate{}, fmt.Errorf("Config.go: updateConfigEntries (write): %w", err)
 	}
-	return added, nil
+	return update, nil
 }

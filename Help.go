@@ -75,10 +75,8 @@ const helpFileContent = `=======================================================
 ============================================================
 
 CONVERSION OPTIONS
-  -NNNN          Set the maximum target bitrate in kbit/s.
-                 Example:  NVENCForge.exe -10000 video.mp4
-  -original      Keep the original resolution (no downscaling);
-                 the bitrate cap is raised automatically. (alias: -orig)
+  -original      Keep the original resolution (no downscaling).
+                 (alias: -orig)
                  Set keepResolution=true in the config file to make
                  this the permanent behaviour.
   -downscale     Scale down as configured after all, even when
@@ -150,7 +148,7 @@ CONVERSION OPTIONS
                  card - NO Nvidia card required (libx265, or
                  SVT-AV1 when combined with -av1). Everything else
                  is identical: downscaling, sharpening, audio,
-                 bitrate caps, Auto-CQ and the file names.
+                 Auto-CQ and the file names.
                  It is much slower - roughly 40 minutes per hour of
                  1080p video on a modern 8-core CPU, clearly more
                  on older machines. Speed, quality and how many
@@ -170,20 +168,36 @@ CONVERSION OPTIONS
                  test settings and compared against the original
                  with VMAF, a measurement of how much visible
                  quality is left. The setting that should reach the
-                 quality target is then verified by one more real
-                 measurement before the actual encode starts. It
-                 costs a minute or two per file and replaces all
-                 guesswork about "which CQ should I use".
+                 quality target is then measured itself before the
+                 actual encode starts. It costs a minute or two per
+                 file and replaces all guesswork about "which CQ
+                 should I use".
                  The target is "autoCQTargetVMAF" in the config
-                 file (default 97 of 100 - high enough that fine
-                 texture survives even on smooth, evenly lit
-                 close-ups, where a 96 can already look soft).
+                 file (default 96 of 100 - measured on five real
+                 1080p films, 97 made only two of them worth
+                 re-encoding against three at 96; on smooth,
+                 evenly lit close-ups 97 keeps a touch more
+                 texture). It is a floor: if the chosen setting misses it, the
+                 next ones are measured until one holds it; if it
+                 clears it by a wide margin, one step thriftier is
+                 tried. Pictures smaller than 1080p are measured
+                 enlarged to Full HD, the way they look on screen.
+                 There is no bitrate cap. What decides whether a
+                 file is re-encoded at all is "minSavePercent"
+                 (default 20): the analysis predicts how much
+                 smaller the whole file gets, and below that it is
+                 remuxed losslessly instead - the picture stays
+                 exactly as it is. Close to the limit, ten more
+                 spots across the film are encoded to be sure, and
+                 the finished file is checked once more. Videos
+                 below 720p and sources that are already lean are
+                 remuxed without any measuring.
                  Sources that were already heavily compressed
                  cannot reach the target at all. NVENCForge then
                  measures how far they CAN go and picks the most
                  economical setting instead of wasting space on a
-                 target that is out of reach. Three config keys
-                 steer how thrifty it may be: "autoCQTolerance",
+                 target that is out of reach. Two config keys
+                 steer how thrifty it may be there:
                  "autoCQPlateauTolerance" and
                  "autoCQPlateauMinSavePercent" - the last one
                  refuses to trade picture for a file that barely
@@ -191,28 +205,21 @@ CONVERSION OPTIONS
                  It also stops on its own once one more step
                  would gain too little quality to be worth the
                  extra file size.
-                 Grainy or very busy films are the opposite case:
-                 there the target IS reachable, but only at a
-                 price. "autoCQMaxSourcePercent" puts a spending
-                 limit on the search (45 by default = never use
-                 more than 45% of the source bitrate). The log
-                 says whenever it steps in, 0 turns it off.
-                 Sources that were already compressed hard are
-                 left alone - they need a bigger share of their
-                 own bitrate, so a limit they cannot meet would
-                 only cost picture without saving anything.
                  Works for H.265 and AV1 alike. Videos shorter
                  than 30 seconds skip the analysis. Turn it off
                  with -noautocq, or autoCQ=false in the config.
   -noautocq      Disable Auto-CQ for this run (overrides the
                  autoCQ=true config default).
   -cqcheck       Run the Auto-CQ search, report the CQ it would
-                 pick for every file - and convert nothing.
-                 Useful to see the pick and the anchor measurements
-                 without paying for the encode afterwards. Files
-                 that would only be remuxed say so instead: no CQ
-                 search runs for them. Switches the search on by
-                 itself, so -autocq is not needed alongside it.
+                 pick and the saving it expects for every file -
+                 and convert nothing. Useful to see the pick and
+                 the anchor measurements without paying for the
+                 encode afterwards. Files that would not be
+                 re-encoded say so instead: below 720p or already
+                 lean, no CQ search runs for them; under
+                 minSavePercent, the search says it would only
+                 remux. Switches the search on by itself, so
+                 -autocq is not needed alongside it.
   -gpu           Encode on the graphics card after all, even when
                  encoder=cpu stands in the config file. Counterpart
                  to -cpu, for front-ends: a window can only ADD
@@ -559,7 +566,6 @@ func printConsoleHelp() {
 	option("-cropcheck", "show where black bars would be cut - converts nothing")
 	option("-crop", "cut black bars off letterboxed video (see -help for what it costs)")
 	option("-nocrop", "keep the black bars for this run")
-	option("-NNNN", "maximum bitrate in kbit/s, e.g. -10000")
 	option("-keep", "leave the originals exactly where they are")
 	option("-nokeep", "move the originals away, even if the config says keepSource=true")
 	option("-shutdown", "shut the PC down 30 s after the batch (\"shutdown /a\" cancels)")

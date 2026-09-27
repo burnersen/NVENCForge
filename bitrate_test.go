@@ -6,67 +6,171 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// TestCappedTargetKbps locks in the source-derived bitrate cap restored in 1.1.4
-// (80% of source, floored per output resolution, ceilinged per mode). The 1.1.3
-// regression — a fixed per-mode ceiling that never bit, so low/mid-bitrate sources
-// grew — is exactly what these cases guard against.
-func TestCappedTargetKbps(t *testing.T) {
-	cases := []struct {
-		name    string
-		source  int64
-		height  int
-		ceiling int64
-		want    int64
-	}{
-		// 1080p mode (ceiling 8000, floor 1500)
-		{"1080p lean → floor", 1200, 1080, 8000, 1500},     // 0.8*1200=960 < floor
-		{"1080p just-under floor", 1800, 1080, 8000, 1500}, // 0.8*1800=1440 < floor
-		{"1080p mid → 80%", 4000, 1080, 8000, 3200},        // 0.8*4000 between floor/ceiling
-		{"1080p high → ceiling", 12000, 1080, 8000, 8000},  // 0.8*12000=9600 > ceiling
-		// 720p mode (floor 800)
-		{"720p lean → floor", 900, 720, 8000, 800}, // 0.8*900=720 < floor
-		{"720p mid → 80%", 3000, 720, 8000, 2400},  // 0.8*3000 between floor/ceiling
-		// 4K -original mode (ceiling 22000, floor 6000)
-		{"4K low → floor", 5000, 2160, 22000, 6000},      // 0.8*5000=4000 < floor
-		{"4K mid → 80%", 10000, 2160, 22000, 8000},       // 0.8*10000 between floor/ceiling
-		{"4K high → ceiling", 30000, 2160, 22000, 22000}, // 0.8*30000=24000 > ceiling
-		// explicit -NNNN override (ceiling) must win even over the floor
-		{"manual low ceiling beats floor", 5000, 2160, 1000, 1000},
-	}
-	for _, c := range cases {
-		if got := cappedTargetKbps(c.source, c.height, c.ceiling); got != c.want {
-			t.Errorf("%s: cappedTargetKbps(%d, %d, %d) = %d, want %d",
-				c.name, c.source, c.height, c.ceiling, got, c.want)
+// Seit 2.0.0 gibt es keinen Bitraten-Deckel mehr. Vor jeder Analyse steht nur
+// fest, was ohne Messung umgepackt wird: Bilder unter 720p und Quellen, die
+// schon am Boden ihrer Auflösung liegen. Diese Regel gibt es genau EINMAL
+// (upfrontRemuxReason) — die Übersprung-Prüfung und die Weiche fragen beide dort.
+
+// TestUpfrontRemuxLeanRuleUnchanged hält die alte Mager-Regel fest: bis 1.34.0
+// stand sie als "max(80 % der Quelle, Boden) < Quelle" im Code, und das war
+// rechnerisch genau "Quelle > Boden". Der Umbau darf daran nichts verschieben.
+func TestUpfrontRemuxLeanRuleUnchanged(t *testing.T) {
+	for _, height := range []int{720, 1080, 1440, 2160} {
+		floor := bitrateFloorKbps(height)
+		stats := &VideoStats{Width: height * 16 / 9, Height: height}
+		for source := int64(300); source <= 60000; source += 100 {
+			oldTarget := max(source*80/100, floor) // der alte Wert ohne Obergrenze
+			oldRemux := oldTarget >= source
+			newRemux := upfrontRemuxReason(stats, false, source) != ""
+			if oldRemux != newRemux {
+				t.Fatalf("%dp at %d kbps: old rule remux=%v, new rule remux=%v",
+					height, source, oldRemux, newRemux)
+			}
 		}
 	}
 }
 
-// TestCapNeverGrowsWhenItBites is the core guarantee: whenever the cap undercuts
-// the source (the condition under which 1.1.4 chooses to re-encode rather than
-// remux), the target is strictly below the source bitrate — so the encode can only
-// shrink the file, never grow it.
-func TestCapNeverGrowsWhenItBites(t *testing.T) {
-	type mode struct {
-		height  int
-		ceiling int64
+func TestUpfrontRemuxReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		w, h       int
+		doScale    bool
+		sourceKbps int64
+		wantRemux  bool
+		wantWord   string // steht im Grund, damit die Meldung stimmt
+	}{
+		{"1080p with room", 1920, 1080, false, 8000, false, ""},
+		{"1080p at the floor", 1920, 1080, false, 1500, true, "lean"},
+		{"1080p just above the floor", 1920, 1080, false, 1501, false, ""},
+		{"480p is below 720p", 854, 480, false, 8000, true, "below 720p"},
+		{"576p PAL SD is below 720p", 720, 576, false, 6000, true, "below 720p"},
+		{"cinemascope 1280x536 counts as 720p", 1280, 536, false, 4000, false, ""},
+		{"portrait 720x1280 counts as 720p", 720, 1280, false, 4000, false, ""},
+		// Wird verkleinert, wird immer neu kodiert — auch eine magere Quelle.
+		{"4K scaled down, lean", 3840, 2160, true, 3000, false, ""},
+		// Unbekannte Maße zählen nie als klein.
+		{"unknown size", 0, 0, false, 8000, false, ""},
 	}
-	modes := []mode{{1080, 8000}, {720, 8000}, {2160, 22000}}
-	for _, m := range modes {
-		for src := int64(300); src <= 60000; src += 100 {
-			target := cappedTargetKbps(src, m.height, m.ceiling)
-			if target < src {
-				continue // cap bites → re-encode is bounded below source → guaranteed smaller
-			}
-			// target >= src → 1.1.4 remuxes instead of re-encoding (reEncodeWorthwhile
-			// is false), so nothing is encoded and there is no growth risk. The only
-			// reasons a target can reach the source are the resolution floor or an
-			// explicit ceiling — assert that, so a future change can't silently let a
-			// re-encode target climb above the source again.
-			if target != bitrateFloorKbps(m.height) && target != m.ceiling {
-				t.Fatalf("unexpected non-biting target=%d at src=%d height=%d", target, src, m.height)
-			}
+	for _, c := range cases {
+		stats := &VideoStats{Width: c.w, Height: c.h}
+		reason := upfrontRemuxReason(stats, c.doScale, c.sourceKbps)
+		if (reason != "") != c.wantRemux {
+			t.Errorf("%s: reason %q, want remux=%v", c.name, reason, c.wantRemux)
+		}
+		if c.wantWord != "" && !strings.Contains(reason, c.wantWord) {
+			t.Errorf("%s: reason %q should mention %q", c.name, reason, c.wantWord)
+		}
+	}
+}
+
+func TestBelow720p(t *testing.T) {
+	cases := []struct {
+		w, h int
+		want bool
+	}{
+		{1280, 720, false},
+		{1279, 719, true},
+		{854, 480, true},
+		{720, 404, true},
+		{1280, 536, false}, // lange Kante reicht
+		{960, 720, false},  // kurze Kante reicht
+		{480, 854, true},   // hochkant
+		{0, 480, false},    // unbekannt
+		{-1, -1, false},
+	}
+	for _, c := range cases {
+		if got := below720p(c.w, c.h); got != c.want {
+			t.Errorf("below720p(%d, %d) = %v, want %v", c.w, c.h, got, c.want)
+		}
+	}
+}
+
+// TestEncodedFrameSize spiegelt buildVideoFilter: danach entscheidet Auto-CQ,
+// ob die VMAF-Messung auf Full-HD-Größe hochgerechnet wird.
+func TestEncodedFrameSize(t *testing.T) {
+	old := appSettings
+	defer func() { appSettings = old }()
+	appSettings.maxResolution = 1080
+
+	cases := []struct {
+		name         string
+		w, h         int
+		doScale      bool
+		crop         cropRect
+		wantW, wantH int
+	}{
+		{"1080p stays", 1920, 1080, false, cropRect{}, 1920, 1080},
+		{"odd edges are trimmed to even", 1281, 721, false, cropRect{}, 1280, 720},
+		{"4K scaled into the box", 3840, 2160, true, cropRect{}, 1920, 1080},
+		{"4K scope scaled by width", 3840, 1600, true, cropRect{}, 1920, 800},
+		{"portrait 4K scaled", 2160, 3840, true, cropRect{}, 1080, 1920},
+		{"crop wins", 1920, 1080, false, cropRect{w: 1920, h: 800, x: 0, y: 140}, 1920, 800},
+	}
+	for _, c := range cases {
+		stats := &VideoStats{Width: c.w, Height: c.h}
+		w, h := encodedFrameSize(stats, c.doScale, c.crop)
+		if w != c.wantW || h != c.wantH {
+			t.Errorf("%s: got %dx%d, want %dx%d", c.name, w, h, c.wantW, c.wantH)
+		}
+	}
+}
+
+func TestPrerollInPacketFlags(t *testing.T) {
+	cases := []struct {
+		name, out string
+		want      bool
+	}{
+		{"plain keyframe start", "K__\n___\n___\n", false},
+		{"discarded pre-roll", "K_D\n__D\n___\nK__\n", true},
+		{"nothing read", "", false},
+	}
+	for _, c := range cases {
+		if got := prerollInPacketFlags(c.out); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCanRenameInPlace(t *testing.T) {
+	aac := []AudioStreamInfo{{Codec: "aac", Channels: 2}}
+	dts := []AudioStreamInfo{{Codec: "dts", Channels: 6}}
+	cases := []struct {
+		name    string
+		codec   string
+		ext     string
+		audio   []AudioStreamInfo
+		mp4Mode bool
+		doScale bool
+		want    bool
+	}{
+		{"AV1 MKV in AV1 mode", "av1", ".mkv", aac, false, false, true},
+		{"H.264 MKV is no target file", "h264", ".mkv", aac, false, false, false},
+		{"AV1 MP4 must be remuxed", "av1", ".mp4", aac, false, false, false},
+		{"sound that needs converting", "av1", ".mkv", dts, false, false, false},
+		{"mp4 mode wants an MP4", "av1", ".mkv", aac, true, false, false},
+		{"scaled down is re-encoded", "av1", ".mkv", aac, false, true, false},
+	}
+	for _, c := range cases {
+		stats := &VideoStats{VideoCodec: c.codec, AudioStreams: c.audio}
+		if got := canRenameInPlace(stats, "av1", c.ext, c.mp4Mode, c.doScale); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestUpperFirst(t *testing.T) {
+	for in, want := range map[string]string{
+		"source already lean": "Source already lean",
+		"über":                "Über",
+		"":                    "",
+	} {
+		if got := upperFirst(in); got != want {
+			t.Errorf("upperFirst(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

@@ -7,7 +7,6 @@
 package main
 
 import (
-	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -106,13 +105,13 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 
 	enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30000, 1001, 30, "8000k", "16000k", 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
+		30000, 1001, 30, 120, "sample_cq30.mkv", buildNVENCOptsWithCQ)
 	encStr := strings.Join(enc, " ")
 	if got := strings.Count(encStr, "-ss "); got != len(windows) {
 		t.Errorf("encode args: %d -ss occurrences, want %d", got, len(windows))
 	}
 	for _, want := range []string{
-		"-c:v hevc_nvenc", "-cq 30", "-maxrate 8000k", "-bufsize 16000k", "-g 120",
+		"-c:v hevc_nvenc", "-cq 30", "-b:v 0", "-g 120",
 		"concat=n=4:v=1:a=0," + chain, "setpts=PTS-STARTPTS",
 		"-map [out]", "-an", "-sn",
 	} {
@@ -127,17 +126,27 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	// AV1 samples must run through av1_nvenc at the requested CQ (same builder,
 	// different encoder profile) — the whole point of the per-codec buildOpts.
 	av1enc := buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30000, 1001, 32, "6000k", "12000k", 120, "sample_cq32.mkv", buildAV1OptsWithCQ)
+		30000, 1001, 32, 120, "sample_cq32.mkv", buildAV1OptsWithCQ)
 	av1Str := strings.Join(av1enc, " ")
-	for _, want := range []string{"-c:v av1_nvenc", "-cq 32", "-maxrate 6000k"} {
+	for _, want := range []string{"-c:v av1_nvenc", "-cq 32"} {
 		if !strings.Contains(av1Str, want) {
 			t.Errorf("AV1 encode args missing %q\n%s", want, av1Str)
 		}
 	}
+	// 2.0.0: no peak cap any more — it starved the hard scenes and made
+	// several CQ steps measure alike.
+	for _, args := range []string{encStr, av1Str} {
+		if strings.Contains(args, "-maxrate") || strings.Contains(args, "-bufsize") {
+			t.Errorf("sample encode still carries a bitrate cap\n%s", args)
+		}
+	}
 
 	vmaf := buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30000, 1001, "sample_cq30.mkv", "vmaf_cq30.json")
+		30000, 1001, 0, 0, "sample_cq30.mkv", "vmaf_cq30.json")
 	vmafStr := strings.Join(vmaf, " ")
+	if strings.Contains(vmafStr, "scale=") {
+		t.Errorf("a picture of 1080p or more must be measured as it is\n%s", vmafStr)
+	}
 	for _, want := range []string{
 		// Both VMAF inputs must get frame-number-based timestamps (the
 		// documented Matroska millisecond-rounding pitfall) and 10-bit format.
@@ -153,6 +162,43 @@ func TestBuildAutoCQArgs(t *testing.T) {
 	}
 	if vmaf[len(vmaf)-1] != "-" || vmaf[len(vmaf)-2] != "null" {
 		t.Errorf("vmaf args must end with '-f null -', got %v", vmaf[len(vmaf)-2:])
+	}
+
+	// A picture below 1080p: BOTH sides are enlarged by the identical scaler,
+	// after the conversion to 10 bit, so only the encoder loss is scored.
+	small := strings.Join(buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, nil, chain,
+		30000, 1001, 1920, 1080, "sample_cq30.mkv", "vmaf_cq30.json"), " ")
+	const enlarge = "format=yuv420p10le,scale=1920:1080:flags=bicubic,settb=AVTB"
+	if got := strings.Count(small, enlarge); got != 2 {
+		t.Errorf("enlarging must happen on both sides the same way (%d of 2)\n%s", got, small)
+	}
+}
+
+// TestAutoCQVMAFMeasureSize: pictures smaller than 1080p are measured the way
+// they look full-screen; 1080p and more stay as they are.
+func TestAutoCQVMAFMeasureSize(t *testing.T) {
+	cases := []struct {
+		name          string
+		width, height int
+		wantW, wantH  int
+		wantEnlarge   bool
+	}{
+		{"720p is enlarged to 1080p", 1280, 720, 1920, 1080, true},
+		{"404p keeps its aspect", 720, 404, 1920, 1078, true},
+		{"portrait 720x1280 turned", 720, 1280, 1080, 1920, true},
+		{"PAL SD 720x576 fills the short edge", 720, 576, 1350, 1080, true},
+		{"1080p stays", 1920, 1080, 1920, 1080, false},
+		{"cropped 1080p (1920x800) stays", 1920, 800, 1920, 800, false},
+		{"4:3 HD 1440x1080 stays", 1440, 1080, 1440, 1080, false},
+		{"4K stays", 3840, 2160, 3840, 2160, false},
+		{"unknown size stays", 0, 0, 0, 0, false},
+	}
+	for _, c := range cases {
+		w, h, enlarge := autoCQVMAFMeasureSize(c.width, c.height)
+		if w != c.wantW || h != c.wantH || enlarge != c.wantEnlarge {
+			t.Errorf("%s: got %dx%d enlarge=%v, want %dx%d enlarge=%v",
+				c.name, w, h, enlarge, c.wantW, c.wantH, c.wantEnlarge)
+		}
 	}
 }
 
@@ -214,9 +260,9 @@ func TestAutoCQWindowPrep(t *testing.T) {
 	windows := [][2]float64{{36, 8}, {84, 8}}
 	const chain = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=p010le"
 	enc := strings.Join(buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30000, 1001, 30, "8000k", "16000k", 120, "s.mkv", buildNVENCOptsWithCQ), " ")
+		30000, 1001, 30, 120, "s.mkv", buildNVENCOptsWithCQ), " ")
 	vmaf := strings.Join(buildAutoCQVMAFArgs("C:\\videos\\in.mp4", windows, nil, chain,
-		30000, 1001, "s.mkv", "v.json"), " ")
+		30000, 1001, 0, 0, "s.mkv", "v.json"), " ")
 	for i, args := range map[string]string{"encode": enc, "vmaf": vmaf} {
 		if got := strings.Count(args, want); got != len(windows) {
 			t.Errorf("%s args prepare %d windows with %q, want %d\n%s", i, got, want, len(windows), args)
@@ -409,34 +455,28 @@ func TestAutoCQMinGainAboveSaturation(t *testing.T) {
 	}
 }
 
+// TestAutoCQPlateauPick: on a saturated curve the pick is the low anchor —
+// or the high anchor when even the anchor span is flat. Further savings are
+// the plateau climb's job, which measures every rung; since 2.0.0 no
+// tolerance buys steps here on the anchor slope alone.
 func TestAutoCQPlateauPick(t *testing.T) {
 	cases := []struct {
 		name              string
 		sc                autoCQScale
 		vmafLow, vmafHigh float64
-		tolerance         float64
 		wantCQ            int
 		wantVMAF          float64
 	}{
 		// H.265: real anchors from the saturation report, 26→30 loses 0.325/step.
-		// Without tolerance the plateau ends at the low anchor; 0.5 buys exactly
-		// one step (0.5/0.325 → 1).
-		{"h265 sloped, no tolerance", hevcAutoCQScale, 96.37, 95.07, 0, hevcAutoCQScale.anchorLow, 96.37},
-		{"h265 sloped, tolerance 0.5", hevcAutoCQScale, 96.37, 95.07, 0.5, 27, 96.045},
-		// Gentler slope (0.225/step): the same tolerance buys two steps.
-		{"h265 gentle slope, tolerance 0.5", hevcAutoCQScale, 96.5, 95.6, 0.5, 28, 96.05},
+		{"h265 sloped", hevcAutoCQScale, 96.37, 95.07, hevcAutoCQScale.anchorLow, 96.37},
 		// Whole curve flat (0.025/step): even the high anchor sits on the plateau.
-		{"h265 flat anchors", hevcAutoCQScale, 96.40, 96.30, 0, hevcAutoCQScale.anchorHigh, 96.30},
-		// A huge tolerance never picks past the high anchor (no measurement beyond).
-		{"h265 tolerance capped", hevcAutoCQScale, 96.37, 95.07, 5, hevcAutoCQScale.anchorHigh, 95.07},
-		// AV1: anchors 24/32 (span 8). Exodus 96.24/94.03 loses 0.27625/step,
-		// so 0.5 tolerance buys one step (24→25); a huge tolerance stops at 32.
-		{"av1 sloped, tolerance 0.5", av1AutoCQScale, 96.24, 94.03, 0.5, 25, 95.96375},
-		{"av1 flat anchors", av1AutoCQScale, 95.60, 95.55, 0, av1AutoCQScale.anchorHigh, 95.55},
-		{"av1 tolerance capped", av1AutoCQScale, 96.24, 94.03, 5, av1AutoCQScale.anchorHigh, 94.03},
+		{"h265 flat anchors", hevcAutoCQScale, 96.40, 96.30, hevcAutoCQScale.anchorHigh, 96.30},
+		// AV1: anchors 24/32 (span 8). Exodus 96.24/94.03 loses 0.27625/step.
+		{"av1 sloped", av1AutoCQScale, 96.24, 94.03, av1AutoCQScale.anchorLow, 96.24},
+		{"av1 flat anchors", av1AutoCQScale, 95.60, 95.55, av1AutoCQScale.anchorHigh, 95.55},
 	}
 	for _, c := range cases {
-		cq, vmaf := autoCQPlateauPick(c.sc, c.vmafLow, c.vmafHigh, c.tolerance)
+		cq, vmaf := autoCQPlateauPick(c.sc, c.vmafLow, c.vmafHigh)
 		if cq != c.wantCQ {
 			t.Errorf("%s: got CQ %d, want %d", c.name, cq, c.wantCQ)
 		}
@@ -489,71 +529,27 @@ func TestAutoCQClimbCandidates(t *testing.T) {
 	}
 }
 
-func TestAutoCQClimbFloor(t *testing.T) {
-	cases := []struct {
-		name          string
-		sc            autoCQScale
-		vmafHigh, tol float64
-		rungScore     float64 // a candidate rung's measured VMAF
-		wantAccept    bool    // rung taken (score >= floor)?
-	}{
-		// H.265 keeps factor 1.0: floor = 94.16 - 0.5 = 93.66, so CQ 38 at 93.65
-		// is NOT taken — the pre-fix behaviour, unchanged.
-		{"h265 unchanged floor", hevcAutoCQScale, 94.16, 0.5, 93.65, false},
-		// AV1 real Big Buck Bunny case (user 2026-07-06): anchor CQ 32 = 94.16,
-		// CQ 38 = 93.65. Factor 2.0 → floor 93.16 → CQ 38 IS now taken (was 32).
-		{"av1 flat plateau (BBB) climbs", av1AutoCQScale, 94.16, 0.5, 93.65, true},
-		// AV1 steep plateau (detail-rich source, measured 2026-07-06): CQ 38 at
-		// 91.83 sits well below floor 92.59, so AV1 stays at the high anchor —
-		// the climb does not overreach into real quality loss.
-		{"av1 steep plateau stays put", av1AutoCQScale, 93.59, 0.5, 91.83, false},
-	}
-	for _, c := range cases {
-		floor := autoCQClimbFloor(c.sc, c.vmafHigh, c.tol)
-		if got := c.rungScore >= floor; got != c.wantAccept {
-			t.Errorf("%s: rung %.2f vs floor %.2f → accept=%v, want %v",
-				c.name, c.rungScore, floor, got, c.wantAccept)
-		}
-	}
-}
-
 // TestAutoCQClimbBudgetFloor pins the curve-shape rule of the unreachable-
-// target climb (2026-07-27 fix): the wide plateau budget only applies when
-// the measured curve is FLAT — its spread is re-encode noise. A steep curve
-// (a target merely grazed at the low anchor, or a rising curve clamped at
-// the CQ floor) spends at most the small search tolerance, so the climb can
-// never trade several points of real, visible quality for savings. Numbers
-// from the real 2026-07-25 series (plateau top 90.62, tolerance 0.5).
+// target climb (2026-07-27 fix): the plateau budget only applies when the
+// measured curve is FLAT — its spread is re-encode noise. On a steep curve
+// every step is real, visible quality, and since 2.0.0 nothing of it is given
+// away (until 1.34.0 the removed autoCQTolerance was spent there). Numbers
+// from the real 2026-07-25 series (plateau top 90.62).
 func TestAutoCQClimbBudgetFloor(t *testing.T) {
-	const plateauTop, plateauTol, tol = 90.62, 5, 0.5
-	cases := []struct {
-		name      string
-		sc        autoCQScale
-		flat      bool
-		wantFloor float64
-	}{
-		// Flat curve: full plateau budget, identical to autoCQPlateauFloor.
-		{"flat curve gets plateau budget", hevcAutoCQScale, true, 85.62},
-		// Steep curve: only the search tolerance (H.265 factor 1.0).
-		{"steep curve gets search tolerance", hevcAutoCQScale, false, 90.12},
-		// AV1 scales the small budget with climbToleranceFactor 2.0.
-		{"av1 steep curve scales the tolerance", av1AutoCQScale, false, 89.62},
+	const plateauTop, plateauTol = 90.62, 5
+	if got := autoCQClimbBudgetFloor(plateauTop, true, plateauTol); math.Abs(got-85.62) > 1e-9 {
+		t.Errorf("flat curve: floor %.4f, want the plateau budget 85.62", got)
 	}
-	for _, c := range cases {
-		got := autoCQClimbBudgetFloor(c.sc, plateauTop, c.flat, plateauTol, tol)
-		if math.Abs(got-c.wantFloor) > 1e-9 {
-			t.Errorf("%s: floor %.4f, want %.4f", c.name, got, c.wantFloor)
-		}
+	if got := autoCQClimbBudgetFloor(plateauTop, false, plateauTol); got != plateauTop {
+		t.Errorf("steep curve: floor %.4f, want the plateau top %.2f itself", got, plateauTop)
 	}
 	// A near-miss on a steep curve must reject every real rung of the
-	// 2026-07-25 curve (CQ 30 = 89.88 < 90.12) while the proven-flat brake
-	// path still accepts CQ 32 = 88.01 — the live-tested v1.5.0 outcome.
-	steepFloor := autoCQClimbBudgetFloor(hevcAutoCQScale, plateauTop, false, plateauTol, tol)
-	if 89.88 >= steepFloor {
+	// 2026-07-25 curve (CQ 30 = 89.88) while the proven-flat brake path still
+	// accepts CQ 32 = 88.01 — the live-tested v1.5.0 outcome.
+	if steepFloor := autoCQClimbBudgetFloor(plateauTop, false, plateauTol); 89.88 >= steepFloor {
 		t.Errorf("steep near-miss must not take CQ 30 (89.88 vs floor %.2f)", steepFloor)
 	}
-	flatFloor := autoCQClimbBudgetFloor(hevcAutoCQScale, plateauTop, true, plateauTol, tol)
-	if 88.01 < flatFloor {
+	if flatFloor := autoCQClimbBudgetFloor(plateauTop, true, plateauTol); 88.01 < flatFloor {
 		t.Errorf("flat plateau must keep taking CQ 32 (88.01 vs floor %.2f)", flatFloor)
 	}
 }
@@ -613,36 +609,25 @@ func TestAutoCQStepDown(t *testing.T) {
 		target, verified float64
 		slope            float64
 		wantCQ           int
-		wantPred         float64
-		wantCapped       bool
 	}{
 		// H.265 (maxStepDown 3, clampMin 20). slope -0.5: one step buys ~0.5 VMAF.
-		{"h265 two steps", hevcAutoCQScale, 28, 95, 94.2, -0.5, 26, 95.2, false},
-		{"h265 tiny miss, one step", hevcAutoCQScale, 28, 95, 94.9, -0.5, 27, 95.4, false},
-		{"h265 big miss capped at 3", hevcAutoCQScale, 28, 95, 91, -0.5, 25, 92.5, true},
-		{"h265 flat slope defaults to one step", hevcAutoCQScale, 28, 95, 94, 0, 27, 94, false},
-		{"h265 already at clamp floor", hevcAutoCQScale, 20, 95, 90, -0.5, 20, 90, true},
-		{"h265 clamped into floor", hevcAutoCQScale, 21, 95, 90, -0.5, 20, 90.5, true},
-		{"h265 prediction capped at 100", hevcAutoCQScale, 24, 99.9, 99.5, -3, 23, 100, false},
+		{"h265 two steps", hevcAutoCQScale, 28, 95, 94.2, -0.5, 26},
+		{"h265 tiny miss, one step", hevcAutoCQScale, 28, 95, 94.9, -0.5, 27},
+		{"h265 big miss capped at 3", hevcAutoCQScale, 28, 95, 91, -0.5, 25},
+		{"h265 flat slope defaults to one step", hevcAutoCQScale, 28, 95, 94, 0, 27},
+		{"h265 already at clamp floor", hevcAutoCQScale, 20, 95, 90, -0.5, 20},
+		{"h265 clamped into floor", hevcAutoCQScale, 21, 95, 90, -0.5, 20},
 		// AV1 (maxStepDown 6, clampMin 16) — the wider scale allows deeper steps.
-		{"av1 big miss capped at 6", av1AutoCQScale, 28, 95, 90, -0.5, 22, 93, true},
-		{"av1 clamped into floor", av1AutoCQScale, 18, 95, 90, -0.5, 16, 91, true},
+		{"av1 big miss capped at 6", av1AutoCQScale, 28, 95, 90, -0.5, 22},
+		{"av1 clamped into floor", av1AutoCQScale, 18, 95, 90, -0.5, 16},
 		// Real 2026-07-10 CreamPiled AV1 case, second stage: after the capped
-		// jump 44→38 the re-measurement (94.9) still misses 95.5, and the LOCAL
-		// slope from the two fresh points (-0.792/step) buys one ordinary,
-		// uncapped final step to CQ 37.
-		{"av1 local slope after re-measure", av1AutoCQScale, 38, 95.5, 94.9, -0.792, 37, 95.692, false},
+		// jump 44→38 the measurement (94.9) still misses 95.5, and the LOCAL
+		// slope from the two fresh points (-0.792/step) asks for one step.
+		{"av1 local slope", av1AutoCQScale, 38, 95.5, 94.9, -0.792, 37},
 	}
 	for _, c := range cases {
-		gotCQ, gotPred, gotCapped := autoCQStepDown(c.sc, c.cq, c.target, c.verified, c.slope)
-		if gotCQ != c.wantCQ {
-			t.Errorf("%s: got CQ %d, want %d", c.name, gotCQ, c.wantCQ)
-		}
-		if diff := gotPred - c.wantPred; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("%s: got predicted %.3f, want %.3f", c.name, gotPred, c.wantPred)
-		}
-		if gotCapped != c.wantCapped {
-			t.Errorf("%s: got capped=%v, want %v", c.name, gotCapped, c.wantCapped)
+		if got := autoCQStepDown(c.sc, c.cq, c.target, c.verified, c.slope); got != c.wantCQ {
+			t.Errorf("%s: got CQ %d, want %d", c.name, got, c.wantCQ)
 		}
 	}
 }
@@ -664,69 +649,6 @@ func TestAutoCQSpinnerText(t *testing.T) {
 			t.Errorf("%s: padded width %d, want %d (%q)",
 				c.name, len(c.got), autoCQSpinnerTextWidth, c.got)
 		}
-	}
-}
-
-func TestParseMaxrateKbps(t *testing.T) {
-	cases := []struct {
-		in   string
-		want int64
-	}{
-		{"8000k", 8000},
-		{"8000", 8000},
-		{" 12000k ", 12000},
-		{"", 0},
-		{"k", 0},
-		{"abc", 0},
-		{"0k", 0},
-		{"-5000k", 0},
-	}
-	for _, c := range cases {
-		if got := parseMaxrateKbps(c.in); got != c.want {
-			t.Errorf("parseMaxrateKbps(%q) = %d, want %d", c.in, got, c.want)
-		}
-	}
-}
-
-// TestAutoCQCapLimitsQuality uses the two real sources that prompted the hint
-// (measured 2026-07-27): a ~12.3 Mbit/s file whose 8000k ceiling provably
-// flattened the CQ curve, and a ~7.4 Mbit/s file where the ceiling never bit.
-// The maxrate argument is derived with cappedTargetKbps exactly as processFile
-// builds it, so the test fails if the two ever drift apart.
-func TestAutoCQCapLimitsQuality(t *testing.T) {
-	const shippedCeiling = 8000 // maxBitrate1080p default, spelled out so other tests cannot shift it
-	stereoAAC := []AudioStreamInfo{{Codec: "aac", Channels: 2}}
-	cases := []struct {
-		name        string
-		fileSizeMB  float64
-		durationSec float64
-		want        bool
-	}{
-		{"ceiling clamps a 12 Mbit/s source", 3013, 1958.1, true},
-		{"ceiling never bites at 7.4 Mbit/s", 1833, 1969.4, false},
-	}
-	for _, c := range cases {
-		stats := &VideoStats{
-			FileSizeMB:   c.fileSizeMB,
-			DurationSec:  c.durationSec,
-			Height:       1080,
-			AudioStreams: stereoAAC,
-		}
-		sourceKbps := determineBitrateKbps(stats)
-		maxBR := fmt.Sprintf("%dk", cappedTargetKbps(sourceKbps, 1080, shippedCeiling))
-		gotKbps, got := autoCQCapLimitsQuality(stats, maxBR)
-		if got != c.want {
-			t.Errorf("%s: autoCQCapLimitsQuality(%s) = %v, want %v (source %d kbps)",
-				c.name, maxBR, got, c.want, sourceKbps)
-		}
-		if gotKbps != sourceKbps {
-			t.Errorf("%s: reported %d kbps, want the source rate %d", c.name, gotKbps, sourceKbps)
-		}
-	}
-	// An unreadable maxrate must stay silent instead of guessing.
-	stats := &VideoStats{FileSizeMB: 3013, DurationSec: 1958.1, Height: 1080, AudioStreams: stereoAAC}
-	if _, got := autoCQCapLimitsQuality(stats, ""); got {
-		t.Error("unparsable maxrate must not report a cap limit")
 	}
 }
 

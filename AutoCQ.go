@@ -32,17 +32,21 @@ import (
 // (the heaviest scene is always part of the sample), encode them at two
 // anchor CQ values with EXACTLY the settings of the real encode, measure
 // VMAF against the identically filtered source, interpolate the CQ that
-// should hit the configured quality target (autoCQTargetVMAF minus the
-// space-saving autoCQTolerance, defaults 97 and 0.5), then confirm the
-// pick with one verification measurement. A saturated
-// curve (pre-compressed source, target unreachable) falls back to the
-// cheapest CQ on the measured plateau instead of chasing the target; on
-// every proven-unreachable target, rungs above the pick (up to the clamp
-// ceiling) are probed too and taken when their measured score holds the
-// climb floor: within autoCQPlateauTolerance of the plateau top on a
-// proven-flat curve, only within the small search tolerance on a steep one
-// (a grazed target is not a plateau) — the file shrinks as far as real
+// should hit the configured quality target (autoCQTargetVMAF, default 96),
+// then confirm the pick by measuring it. Since 2.0.0 the target is a FLOOR,
+// as in CloudForge: a pick that misses it is followed by further measured
+// steps until one holds it, and a pick that clears it by more than
+// autoCQThriftyMargin tries one step thriftier. Only a target that is proven
+// unreachable or too expensive may end below it: a saturated curve
+// (pre-compressed source) falls back to the cheapest CQ on the measured
+// plateau, and there rungs above the pick (up to the clamp ceiling) are
+// probed too and taken when their measured score stays within
+// autoCQPlateauTolerance of the plateau top — the file shrinks as far as real
 // measurements justify, never on extrapolation.
+// The same samples predict what re-encoding saves on the whole file
+// (autoCQExpectedSavingPercent); processFile remuxes instead when that stays
+// under minSavePercent. Close to that limit, a separate size probe across the
+// whole film settles it (autoCQSizeProbeNeeded).
 // H.265 and AV1 both run this search — the per-codec numbers (anchors, clamps,
 // saturation slope, encoder) live in autoCQScale; av1_nvenc uses a wider CQ
 // scale (1-63), so its anchors and clamps differ from H.265.
@@ -119,8 +123,8 @@ const (
 // because av1_nvenc uses a wider CQ scale (1-63) on which the same VMAF change
 // spans about twice as many steps. Both anchor pairs come from a real
 // VMAF-over-CQ measurement series (H.265: NVENCForge_Qualitaetsanalyse.md;
-// AV1: measured 2026-07-06). The VMAF target and tolerance are NOT part of
-// this struct — they measure quality, not CQ, so both codecs share them.
+// AV1: measured 2026-07-06). The VMAF target is NOT part of this struct — it
+// measures quality, not CQ, so both codecs share it.
 type autoCQScale struct {
 	// anchorLow/anchorHigh: the two calibration CQs. anchorLow is the better,
 	// larger-file end; together they bracket the practically useful range.
@@ -143,14 +147,9 @@ type autoCQScale struct {
 	// +0.49 VMAF for +6.6% as invisible, so 0.30 is the conservative side of a
 	// trade he has already made. Scales with the step width like saturationSlope.
 	minGainPerStep float64
-	// climbToleranceFactor widens the plateau-climb tolerance on the finer AV1
-	// scale: one AV1 CQ step is worth about half a VMAF step, so the climb may
-	// spend proportionally more tolerance for the same file-size saving as H.265.
-	// 1.0 = H.265 (unchanged); 2.0 = AV1 (its anchor span is twice as wide).
-	climbToleranceFactor float64
 	// buildOpts assembles the real encoder options at a given CQ, so the sample
 	// encodes match the actual encode bit for bit.
-	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string
+	buildOpts func(cq int, gop int) []string
 	// fallbackCQ is the configured fixed CQ used (and reported) when the
 	// analysis cannot run. Read lazily so an INI value applied after startup wins.
 	fallbackCQ func() int
@@ -164,19 +163,18 @@ type autoCQScale struct {
 var hevcAutoCQScale = autoCQScale{
 	anchorLow: 26, anchorHigh: 30,
 	clampMin: 20, clampMax: 34,
-	maxStepDown:          3,
-	saturationSlope:      0.10,
-	minGainPerStep:       0.30,
-	climbToleranceFactor: 1.0,
-	buildOpts:            buildNVENCOptsWithCQ,
-	fallbackCQ:           func() int { return appSettings.targetCQ },
-	codecLabel:           "H.265",
+	maxStepDown:     3,
+	saturationSlope: 0.10,
+	minGainPerStep:  0.30,
+	buildOpts:       buildNVENCOptsWithCQ,
+	fallbackCQ:      func() int { return appSettings.targetCQ },
+	codecLabel:      "H.265",
 }
 
 // av1AutoCQFallbackCQ is the CQ the AV1 Auto-CQ search falls back to when its
 // analysis cannot run (clip too short, unknown frame rate, libvmaf missing). It
 // is deliberately NOT av1TargetCQ: that value (32 ≈ VMAF 94) is a lean manual-
-// mode setting, too far below the VMAF target (default 97) for a graceful fallback. 24
+// mode setting, too far below the VMAF target (default 96) for a graceful fallback. 24
 // equals the low anchor (≈ VMAF 96), so an unmeasurable AV1 clip lands in the
 // neighbourhood of the search intent instead of visibly softer, while manual AV1
 // mode keeps its own av1TargetCQ. H.265 needs no such constant — its manual
@@ -191,13 +189,12 @@ const av1AutoCQFallbackCQ = 24
 var av1AutoCQScale = autoCQScale{
 	anchorLow: 24, anchorHigh: 32,
 	clampMin: 16, clampMax: 44,
-	maxStepDown:          6,
-	saturationSlope:      0.05,
-	minGainPerStep:       0.15,
-	climbToleranceFactor: 2.0,
-	buildOpts:            buildAV1OptsWithCQ,
-	fallbackCQ:           func() int { return av1AutoCQFallbackCQ },
-	codecLabel:           "AV1",
+	maxStepDown:     6,
+	saturationSlope: 0.05,
+	minGainPerStep:  0.15,
+	buildOpts:       buildAV1OptsWithCQ,
+	fallbackCQ:      func() int { return av1AutoCQFallbackCQ },
+	codecLabel:      "AV1",
 }
 
 // x265AutoCQScale ist das Auto-CQ-Profil für den CPU-Modus (-cpu) mit
@@ -215,18 +212,17 @@ var av1AutoCQScale = autoCQScale{
 // Die schrittabhängigen Werte sind NICHT von NVENC abgeschrieben, sondern
 // mit der gemessenen Schrittbreite skaliert: ein x265-CRF-Schritt ist
 // 0,64 VMAF wert, ein NVENC-CQ-Schritt 0,79 — Faktor 0,81. Daraus folgen
-// die feinere Sättigungsschwelle (0,08 statt 0,10), ein Schritt mehr
-// Korrekturweite (4 statt 3) und der etwas größere Kletter-Faktor 1,25.
+// die feinere Sättigungsschwelle (0,08 statt 0,10) und ein Schritt mehr
+// Korrekturweite (4 statt 3).
 var x265AutoCQScale = autoCQScale{
 	anchorLow: 18, anchorHigh: 22,
 	clampMin: 12, clampMax: 28,
-	maxStepDown:          4,
-	saturationSlope:      0.08,
-	minGainPerStep:       0.24,
-	climbToleranceFactor: 1.25,
-	buildOpts:            buildX265OptsWithCQ,
-	fallbackCQ:           func() int { return appSettings.cpuTargetCRF },
-	codecLabel:           "H.265 (CPU)",
+	maxStepDown:     4,
+	saturationSlope: 0.08,
+	minGainPerStep:  0.24,
+	buildOpts:       buildX265OptsWithCQ,
+	fallbackCQ:      func() int { return appSettings.cpuTargetCRF },
+	codecLabel:      "H.265 (CPU)",
 }
 
 // svtav1AutoCQFallbackCRF ist der CRF, auf den die AV1-Suche im CPU-Modus
@@ -253,8 +249,6 @@ const svtav1AutoCQFallbackCRF = 24
 //     leichter Realfilm damit aber das Ziel nach oben (CRF 29 mit VMAF 97,7
 //     statt CRF 32 mit 96,6) und die Analyse dauerte fast doppelt so lange.
 //   - Korrekturweite 5: mit 7 schoss derselbe Fall über das Ziel hinaus.
-//   - Kletter-Faktor 1,5: nach der Rechnung wären es 2,5, und damit dürfte
-//     der CPU-Modus mehr Bildqualität für kleinere Dateien hergeben.
 //
 // WICHTIG: Jedes SVT-Preset hat eine Qualitätsobergrenze, und sie sinkt mit
 // dem Tempo — gemessen bei CRF 16: Preset 6 96,6-98,8, Preset 9 96,2-98,2,
@@ -264,13 +258,12 @@ const svtav1AutoCQFallbackCRF = 24
 var svtav1AutoCQScale = autoCQScale{
 	anchorLow: 24, anchorHigh: 32,
 	clampMin: 16, clampMax: 44,
-	maxStepDown:          5,
-	saturationSlope:      0.04,
-	minGainPerStep:       0.12,
-	climbToleranceFactor: 1.5,
-	buildOpts:            buildSVTAV1OptsWithCQ,
-	fallbackCQ:           func() int { return svtav1AutoCQFallbackCRF },
-	codecLabel:           "AV1 (CPU)",
+	maxStepDown:     5,
+	saturationSlope: 0.04,
+	minGainPerStep:  0.12,
+	buildOpts:       buildSVTAV1OptsWithCQ,
+	fallbackCQ:      func() int { return svtav1AutoCQFallbackCRF },
+	codecLabel:      "AV1 (CPU)",
 }
 
 const (
@@ -321,34 +314,6 @@ func checkLibVMAF() error {
 		}
 	}
 	return errors.New("AutoCQ.go: checkLibVMAF: libvmaf filter missing in this FFmpeg build")
-}
-
-// parseMaxrateKbps reads the "8000k" form the encoder options carry for
-// -maxrate back into plain kbit/s. Anything unparsable answers 0 (unknown),
-// which keeps callers on their silent path.
-func parseMaxrateKbps(maxBitrate string) int64 {
-	kbps, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(maxBitrate), "k"), 10, 64)
-	if err != nil || kbps <= 0 {
-		return 0
-	}
-	return kbps
-}
-
-// autoCQCapLimitsQuality reports whether the configured bitrate ceiling — and
-// not the source material — is what holds the measured quality down. The encode
-// aims at bitrateTargetPercent of the source rate; once the ceiling has cut that
-// target, every low CQ rung rides the cap and measures the same score, so the
-// saturation brake sees a plateau the source alone would not have produced
-// (measured 2026-07-27: CQ 20/22/26 all landed on 23.08 MB and VMAF 89.9).
-// The verdict only means something after the target proved unreachable. Returns
-// the source rate in kbit/s for the message; false whenever a rate is unknown.
-func autoCQCapLimitsQuality(stats *VideoStats, maxBitrate string) (int64, bool) {
-	capKbps := parseMaxrateKbps(maxBitrate)
-	sourceKbps := determineBitrateKbps(stats)
-	if capKbps <= 0 || sourceKbps <= 0 {
-		return 0, false
-	}
-	return sourceKbps, capKbps < sourceKbps*bitrateTargetPercent/100
 }
 
 // autoCQSampleWindows returns the (start, length) sample windows in seconds
@@ -410,53 +375,22 @@ func interpolateAutoCQ(sc autoCQScale, vmafLow, vmafHigh, target float64) (int, 
 	return cq, predicted
 }
 
-// autoCQStepDown returns the CQ to fall back to after the verification
-// measurement missed the target, plus the VMAF predicted for that CQ. The
-// step count comes from the anchor slope (how much VMAF one CQ step buys),
-// capped at the scale's maxStepDown and clamped at its clampMin — so the
-// returned CQ can equal the input when the clamp floor is already reached.
-// The third return value reports that the estimated step count exceeded
-// maxStepDown: the prediction then extrapolates far beyond any measured
-// point (observed several VMAF points off on the fine AV1 scale), so the
-// caller must confirm the stepped CQ with a real measurement.
-func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) (int, float64, bool) {
+// autoCQStepDown returns the CQ to measure next after a measurement missed the
+// target. The step count comes from the slope (how much VMAF one CQ step
+// buys), capped at the scale's maxStepDown so a single noisy measurement cannot
+// jump into oversized files, and clamped at clampMin — so the returned CQ
+// equals the input when the clamp floor is already reached. Since 2.0.0 the
+// stepped CQ is always measured; until then it was often taken on the estimate
+// alone, and the estimate below the low anchor is provably too optimistic.
+func autoCQStepDown(sc autoCQScale, cq int, target, verified, slope float64) int {
 	steps := 1
 	if slope < -0.01 {
 		if s := int(math.Ceil((target - verified) / -slope)); s > steps {
 			steps = s
 		}
 	}
-	capped := steps > sc.maxStepDown
-	if capped {
-		steps = sc.maxStepDown
-	}
-	stepped := cq - steps
-	if stepped < sc.clampMin {
-		stepped = sc.clampMin
-	}
-	predicted := verified - slope*float64(cq-stepped)
-	if predicted > 100 {
-		predicted = 100
-	}
-	return stepped, predicted, capped
-}
-
-// autoCQFinalStepPick entscheidet, welcher CQ nach der zweiten Messung gilt —
-// die letzte Station des gedeckelten Step-Downs.
-//
-// Zwei Ausgänge, und beide müssen ankommen: Ist der berechnete Schritt gleich
-// dem schon gemessenen (die Klemmgrenze ist erreicht), zählt der MESSWERT
-// dort. Geht es noch eine Stufe tiefer, zählt diese Stufe mit ihrer Schätzung —
-// die Messung hat den Wert darüber ja gerade widerlegt.
-//
-// Die Funktion existiert, damit genau diese Entscheidung ohne FFmpeg prüfbar
-// ist: sie war von 1.6.1 bis 1.30.0 falsch, und ohne eigene Funktion ließ sich
-// das nicht absichern.
-func autoCQFinalStepPick(stepped, final int, remeasured, finalPred float64) (int, float64) {
-	if final == stepped {
-		return stepped, remeasured
-	}
-	return final, finalPred
+	steps = min(steps, sc.maxStepDown)
+	return max(cq-steps, sc.clampMin)
 }
 
 // autoCQSaturated reports whether the verification measurement below the
@@ -502,17 +436,17 @@ func autoCQSampleKbps(tmpDir string, cq int, sampleSec float64) (float64, error)
 	return float64(info.Size()) * 8 / 1000 / sampleSec, nil
 }
 
-// autoCQWindowSourceKbps returns the source bitrate AT THE SAMPLE WINDOWS,
-// averaged over them.
+// autoCQWindowSourceKbps returns the source's video bitrate AT THE GIVEN
+// WINDOWS, averaged over them.
 //
-// The cost cap compares an encode of these windows against the source, and
-// that comparison only holds when both sides describe the same seconds of
-// film. With bitrate-guided placement the windows sit deliberately on the
-// heaviest scenes, where the source runs well above its own average — judging
-// them against the whole-file average would fire the cap on material that is
-// not expensive at all. A window overlapping two buckets is weighted by the
-// share it covers of each. Returns 0 when no profile exists; the caller then
-// skips the cap instead of guessing.
+// The saving prediction compares an encode of these windows against the
+// source, and that comparison only holds when both sides describe the same
+// seconds of film. With bitrate-guided placement the analysis windows sit
+// deliberately on the heaviest scenes, where the source runs well above its
+// own average — judging them against the whole-file average would get the
+// share wrong. A window overlapping two buckets is weighted by the share it
+// covers of each. Returns 0 when no profile exists; the caller then makes no
+// prediction instead of guessing.
 func autoCQWindowSourceKbps(buckets []bitrateBucket, windows [][2]float64, bucketLen float64) float64 {
 	if len(buckets) == 0 || len(windows) == 0 || bucketLen <= 0 {
 		return 0
@@ -558,148 +492,303 @@ func autoCQEstimateKbps(sc autoCQScale, kbpsLow, rate float64, cq int) float64 {
 	return kbpsLow * math.Exp(-rate*float64(cq-sc.anchorLow))
 }
 
-// autoCQKbpsAt returns what one CQ step really costs at the sample windows:
-// the measured sample whenever the quality search already encoded that step,
-// and the modelled estimate only for steps nobody has touched.
-//
-// The measured file is always the better answer. The model is fitted to the
-// anchor span and drifts once it is extrapolated past it — measured
-// 2026-09-11 on a 30 fps source: it put CQ 34 at 54 % of the source where the
-// real sample was 39 %. Plateau probing usually leaves samples at exactly the
-// thrifty steps the cap is interested in, so this costs nothing: the encodes
-// are already on disk.
-func autoCQKbpsAt(sc autoCQScale, tmpDir string, sampleSec, kbpsLow, rate float64, cq int) float64 {
-	if kbps, err := autoCQSampleKbps(tmpDir, cq, sampleSec); err == nil && kbps > 0 {
-		return kbps
-	}
-	return autoCQEstimateKbps(sc, kbpsLow, rate, cq)
-}
-
-// autoCQCostCap is what the cost cap worked out, kept together so the caller
-// can both act on it and explain it in one line.
-type autoCQCostCap struct {
-	pick       int     // the CQ the cap asks for (equals the incoming pick when it does not fire)
-	capKbps    float64 // the ceiling itself
-	pickKbps   float64 // estimated bitrate of the INCOMING pick
-	sourceKbps float64 // source rate at the sample windows
-	// thriftiestKbps is what the scale's clamp ceiling would still cost, and
-	// unreachable says that even THAT stays above the cap — the source is
-	// already compressed too hard for the cap to be met. The pick is then left
-	// alone; see the reasoning in autoCQCostCapTarget.
-	thriftiestKbps float64
-	unreachable    bool
-}
-
-// fires reports whether the cap actually moves the pick.
-func (c autoCQCostCap) fires(pick int) bool { return c.pick > pick }
-
-// sharePct expresses a bitrate as a share of what the source spends.
-func (c autoCQCostCap) sharePct(kbps float64) float64 {
-	if c.sourceKbps <= 0 {
-		return 0
-	}
-	return kbps / c.sourceKbps * 100
-}
-
-// autoCQCostCapTarget answers one question: does reaching the quality target
-// cost more of the source bitrate than the user allows, and if so, which CQ
-// still fits?
-//
-// The model comes free from the two anchor samples the quality search already
-// encoded. Verified on a 50 fps source (2026-08-28): anchors CQ 26 = 6625 and
-// CQ 30 = 3690 kbit/s predict CQ 28 at 4942 kbit/s against 5008 measured — an
-// error of 1.3 %, far inside what a ceiling decision needs.
-//
-// The result never falls below the incoming pick: the cap may save space, it
-// may never spend it. And it never leaves the scale's clamp range, where even
-// easy material visibly degrades.
-func autoCQCostCapTarget(sc autoCQScale, tmpDir string, buckets []bitrateBucket,
-	windows [][2]float64, sampleSec, percent float64, pick int) (autoCQCostCap, error) {
-
-	budget := autoCQCostCap{pick: pick}
-	if percent <= 0 || len(windows) == 0 {
-		return budget, errors.New("cost cap disabled")
-	}
-	budget.sourceKbps = autoCQWindowSourceKbps(buckets, windows, windows[0][1])
-	if budget.sourceKbps <= 0 {
-		return budget, errors.New("no source bitrate profile for the sample windows")
-	}
-	kbpsLow, err := autoCQSampleKbps(tmpDir, sc.anchorLow, sampleSec)
-	if err != nil {
-		return budget, fmt.Errorf("sample size at CQ %d: %w", sc.anchorLow, err)
-	}
-	kbpsHigh, err := autoCQSampleKbps(tmpDir, sc.anchorHigh, sampleSec)
-	if err != nil {
-		return budget, fmt.Errorf("sample size at CQ %d: %w", sc.anchorHigh, err)
-	}
-	rate := autoCQBitrateRate(sc, kbpsLow, kbpsHigh)
-	if rate <= 0 {
-		return budget, errors.New("bitrate does not fall between the anchors")
-	}
-	budget.capKbps = budget.sourceKbps * percent / 100
-	kbpsAt := func(cq int) float64 {
-		return autoCQKbpsAt(sc, tmpDir, sampleSec, kbpsLow, rate, cq)
-	}
-	budget.pickKbps = kbpsAt(pick)
-	if budget.pickKbps <= budget.capKbps {
-		return budget, nil // the target fits the budget — nothing to do
-	}
-	// Reachability first. A cap that cannot be met even at the thriftiest CQ
-	// the scale allows must not interfere at all: the search would clamp to
-	// that CQ — the worst picture the setting can produce — and STILL miss the
-	// cap. Worse picture, no saving, which is the exact opposite of the point.
-	//
-	// This is not a corner case. Measured 2026-08-28 across a real library:
-	// sources that are already compressed hard need a HIGHER share of their
-	// own bitrate, not a lower one, because there is nothing left to squeeze
-	// out. One 60 fps source at 2.8 Mbit/s stayed at 53 % of itself from CQ 26
-	// all the way down to CQ 30, and would still sit near 52 % at the clamp
-	// ceiling. A fat 12 Mbit/s source drops to under 20 % over the same span.
-	// Without this check a cap tuned for the fat sources quietly wrecks the
-	// thin ones.
-	budget.thriftiestKbps = kbpsAt(sc.clampMax)
-	if budget.thriftiestKbps > budget.capKbps {
-		budget.unreachable = true
-		return budget, nil
-	}
-	// Walk up one step at a time and keep the FIRST that fits: the cap may
-	// only take what it needs. Until 1.32.1 this was solved in closed form
-	// from the anchor curve, which overshot badly whenever that curve was
-	// flat — measured 2026-09-11 on a 30 fps source with a 55 % cap: the
-	// formula demanded CQ 34, whose sample then measured 39 % of the source.
-	// Sixteen points below the budget, three steps too far, and 4 VMAF thrown
-	// away that nobody had asked for. Stepping instead of solving also lets
-	// every already-encoded sample answer for itself.
-	//
-	// The walk cannot come up empty: the reachability check above proved the
-	// clamp ceiling fits, so it stands as the last resort.
-	budget.pick = sc.clampMax
-	for candidate := pick + 1; candidate < sc.clampMax; candidate++ {
-		if kbpsAt(candidate) <= budget.capKbps {
-			budget.pick = candidate
-			break
-		}
-	}
-	return budget, nil
-}
-
-// autoCQPlateauPick returns the cheapest acceptable CQ on a curve whose
-// reachable quality tops out below the search target. Base case is the low
-// anchor (its measurement IS the plateau, minus noise); the user tolerance
-// then buys additional steps toward the high anchor along the measured
-// anchor slope — never beyond the high anchor, where no measurement exists.
-// When even the anchor span is flat, the high anchor wins outright: the whole
-// measured curve is level then and the extra bitrate of the low anchor buys nothing.
-func autoCQPlateauPick(sc autoCQScale, vmafLow, vmafHigh, tolerance float64) (int, float64) {
+// autoCQPlateauPick returns the pick on a curve whose reachable quality tops
+// out below the target: the low anchor (its measurement IS the plateau, minus
+// noise) — or, when even the anchor span is flat, the high anchor: the whole
+// measured curve is level then and the extra bitrate of the low anchor buys
+// nothing. Further savings are left to the plateau climb, which measures every
+// rung. Until 1.34.0 the removed autoCQTolerance bought extra steps here on the
+// anchor slope alone.
+func autoCQPlateauPick(sc autoCQScale, vmafLow, vmafHigh float64) (int, float64) {
 	anchorGainPerStep := (vmafLow - vmafHigh) / float64(sc.anchorHigh-sc.anchorLow)
 	if anchorGainPerStep < sc.saturationSlope {
 		return sc.anchorHigh, vmafHigh
 	}
-	steps := int(tolerance / anchorGainPerStep) // floor: stay above (plateau - tolerance)
-	if maxSteps := sc.anchorHigh - sc.anchorLow; steps > maxSteps {
-		steps = maxSteps
+	return sc.anchorLow, vmafLow
+}
+
+// ----------------------------------------------------------------------------
+// The target as a floor (since 2.0.0, CloudForge's rules)
+// ----------------------------------------------------------------------------
+
+// autoCQThriftyMargin: a measured pick that clears the target by more than
+// this tries one CQ step thriftier. Near the top of the curve 0.5 VMAF is
+// about one H.265 CQ step (0.79 per step in the 2026-07-25 series) and one to
+// two AV1 steps, so a pick this far above the target is most likely a step
+// too generous.
+const autoCQThriftyMargin = 0.5
+
+// autoCQMaxHoldSteps limits the extra measurements the search may spend to
+// make a missed pick hold the target — each costs a sample encode plus a VMAF
+// run (10-20 s on the graphics card). Narrowing a gap needs two or three,
+// stepping below the low anchor a few more; the limit only guards against a
+// curve that jumps about.
+const autoCQMaxHoldSteps = 6
+
+// autoCQPoint is one measured step of the search.
+type autoCQPoint struct {
+	cq   int
+	vmaf float64
+}
+
+// autoCQScorer returns the VMAF of one CQ — from memory when that step was
+// measured before, otherwise by a new sample encode and measurement.
+type autoCQScorer func(cq int) (float64, error)
+
+// autoCQHoldOutcome says how the search for a CQ that holds the target ended.
+type autoCQHoldOutcome int
+
+const (
+	holdReached      autoCQHoldOutcome = iota // a measured CQ reaches the target
+	holdClampFloor                            // even the clamp floor misses it: proven unreachable
+	holdSaturated                             // below the low anchor the curve is dead
+	holdTooExpensive                          // below the low anchor each step buys too little
+	holdGaveUp                                // a measurement failed or the step limit ran out
+)
+
+// autoCQHold is what autoCQHoldTarget ends on: the outcome and the measured
+// point it rests on (for holdGaveUp the last miss).
+type autoCQHold struct {
+	outcome autoCQHoldOutcome
+	point   autoCQPoint
+}
+
+// autoCQThriftiestHolding returns, among the measured points, the one with the
+// highest CQ (smallest file) that still reaches the target.
+func autoCQThriftiestHolding(scores map[int]float64, target float64) (autoCQPoint, bool) {
+	var best autoCQPoint
+	found := false
+	for cq, score := range scores {
+		if score >= target && (!found || cq > best.cq) {
+			best, found = autoCQPoint{cq, score}, true
+		}
 	}
-	return sc.anchorLow + steps, vmafLow - anchorGainPerStep*float64(steps)
+	return best, found
+}
+
+// autoCQLocalSlope returns the VMAF change per CQ step between a point and its
+// nearest measured neighbour at a higher CQ — the curve right where the search
+// stands. Below the low anchor the anchor slope is provably too optimistic
+// (measured 2026-08-27), the local one is not. Without a neighbour, or when the
+// two do not form a falling curve, fallback answers.
+func autoCQLocalSlope(scores map[int]float64, at autoCQPoint, fallback float64) float64 {
+	neighbour, found := 0, false
+	for cq := range scores {
+		if cq > at.cq && (!found || cq < neighbour) {
+			neighbour, found = cq, true
+		}
+	}
+	if !found {
+		return fallback
+	}
+	if slope := (scores[neighbour] - at.vmaf) / float64(neighbour-at.cq); slope < -0.01 {
+		return slope
+	}
+	return fallback
+}
+
+// autoCQBetween interpolates the CQ where the straight line between a point
+// above the target and one below it crosses the target, kept strictly between
+// the two so that every measurement narrows the gap. The caller guarantees at
+// least one step in between.
+func autoCQBetween(above, below autoCQPoint, target float64) int {
+	next := (above.cq + below.cq) / 2
+	if drop := above.vmaf - below.vmaf; drop > 0 {
+		next = int(math.Round(float64(above.cq) +
+			(above.vmaf-target)/drop*float64(below.cq-above.cq)))
+	}
+	return min(max(next, above.cq+1), below.cq-1)
+}
+
+// autoCQHoldTarget finds the thriftiest CQ whose MEASUREMENT reaches the
+// target, after the pick measured below it (miss). Until 1.34.0 a step down was
+// often taken on its estimate alone; since 2.0.0 the target is a floor, as in
+// CloudForge.
+//
+// Two phases. While no measured point reaches the target, the search steps
+// further down (autoCQStepDown on the local slope), and every step below the
+// low anchor faces the same brakes as the first verification: a dead curve
+// (holdSaturated) or one that buys too little per step (holdTooExpensive) ends
+// it. Once a point reaches the target, the gap between it and the nearest miss
+// is narrowed until no step lies in between — with the Illinois correction
+// against creeping: while the miss stays put, its distance to the target is
+// halved for the next calculation (CloudForge measured the creep on 2026-09-26:
+// 29, 30, 31, 32, one probe each, because a far point held the line).
+//
+// scores holds every point measured so far; scoreAt adds to it.
+func autoCQHoldTarget(sc autoCQScale, target, vmafLow, anchorSlope float64,
+	miss autoCQPoint, scores map[int]float64, scoreAt autoCQScorer) autoCQHold {
+
+	calcMiss := miss // the miss as it enters the interpolation (Illinois)
+	for step := 0; step < autoCQMaxHoldSteps; step++ {
+		if above, found := autoCQThriftiestHolding(scores, target); found {
+			if above.cq > miss.cq || miss.cq-above.cq <= 1 {
+				return autoCQHold{holdReached, above}
+			}
+			next := autoCQBetween(above, calcMiss, target)
+			score, err := scoreAt(next)
+			switch {
+			case err != nil:
+				return autoCQHold{holdReached, above} // the measured point above still holds
+			case score < target:
+				miss = autoCQPoint{next, score}
+				calcMiss = miss
+			default:
+				calcMiss.vmaf = target + (calcMiss.vmaf-target)/2
+			}
+			continue
+		}
+
+		// No measured point reaches the target yet: step further down.
+		if miss.cq <= sc.clampMin {
+			return autoCQHold{holdClampFloor, miss}
+		}
+		next := autoCQStepDown(sc, miss.cq, target, miss.vmaf,
+			autoCQLocalSlope(scores, miss, anchorSlope))
+		score, err := scoreAt(next)
+		switch {
+		case err != nil:
+			return autoCQHold{holdGaveUp, miss}
+		case score >= target:
+			continue // the next round narrows the gap from here
+		case autoCQSaturated(sc, next, score, vmafLow):
+			return autoCQHold{holdSaturated, autoCQPoint{next, score}}
+		case autoCQGainTooSmall(sc, next, score, vmafLow):
+			return autoCQHold{holdTooExpensive, autoCQPoint{next, score}}
+		}
+		miss = autoCQPoint{next, score}
+		calcMiss = miss
+	}
+	if above, found := autoCQThriftiestHolding(scores, target); found {
+		return autoCQHold{holdReached, above}
+	}
+	return autoCQHold{holdGaveUp, miss}
+}
+
+// autoCQThriftyStep tries one CQ step thriftier when a measured pick clears
+// the target by more than autoCQThriftyMargin, and takes it when its own
+// measurement still reaches the target (CloudForge's rule, taken over
+// 2026-09-27). Only one step: each costs a full sample encode and measurement.
+func autoCQThriftyStep(sc autoCQScale, target float64, pick autoCQPoint, scoreAt autoCQScorer) (autoCQPoint, bool) {
+	if pick.vmaf-target <= autoCQThriftyMargin || pick.cq >= sc.clampMax {
+		return pick, false
+	}
+	next := pick.cq + 1
+	score, err := scoreAt(next)
+	if err != nil || score < target {
+		return pick, false
+	}
+	return autoCQPoint{next, score}, true
+}
+
+// ----------------------------------------------------------------------------
+// Does re-encoding pay off? (since 2.0.0, replaces the cost cap)
+// ----------------------------------------------------------------------------
+
+const (
+	// autoCQSizeProbeSpots: how many stretches the size probe encodes across
+	// the whole film — CloudForge's figure (user's choice 2026-09-27). There,
+	// 3-5 analysis windows missed whole films by up to 13 points, always on
+	// the optimistic side, while evenly spread spots came within 2-5 points.
+	autoCQSizeProbeSpots = 10
+
+	// autoCQSizeProbeBand: how close (in percentage points) the first
+	// prediction has to lie to the minimum saving for the size probe to run.
+	// The largest error of the analysis windows CloudForge measured was 13
+	// points; a clear case costs no probe at all.
+	autoCQSizeProbeBand = 15.0
+
+	// autoCQSizeProbeBatch: that many stretches go into one probe encode — as
+	// many as the analysis decodes at once, which is known to run on the
+	// graphics card. Ten inputs at once would open ten decoders.
+	autoCQSizeProbeBatch = 3
+)
+
+// autoCQExpectedSavingPercent predicts how much smaller the whole file gets
+// when the picture costs share of its source bitrate (0.42 = 42 %). Only the
+// picture is re-encoded; sound and subtitles are counted unchanged — they are
+// treated the same way whether the file is re-encoded or remuxed, so they do
+// not decide between the two (CloudForge's formula). ok is false when there is
+// nothing to predict from.
+func autoCQExpectedSavingPercent(fileMB, videoKbps, durationSec, share float64) (float64, bool) {
+	if share <= 0 || fileMB <= 0 || durationSec <= 0 {
+		return 0, false
+	}
+	fileBytes := fileMB * 1048576
+	videoBytes := videoKbps * 1000 / 8 * durationSec
+	if videoBytes <= 0 || videoBytes > fileBytes {
+		videoBytes = fileBytes // split unknown: count everything as picture
+	}
+	predicted := share*videoBytes + (fileBytes - videoBytes)
+	return (fileBytes - predicted) / fileBytes * 100, true
+}
+
+// autoCQSavingText phrases a predicted saving for the log. A negative one
+// means the re-encode would come out LARGER than the source — "-21% smaller"
+// would leave the reader puzzling.
+func autoCQSavingText(pct float64) string {
+	if pct < 0 {
+		return fmt.Sprintf("about %.0f%% larger than the source", -pct)
+	}
+	return fmt.Sprintf("about %.0f%% smaller", pct)
+}
+
+// autoCQSizeProbeNeeded reports whether the first prediction lies so close to
+// the minimum saving that its error could flip the decision.
+func autoCQSizeProbeNeeded(expectedPct, minSavePct float64) bool {
+	return math.Abs(expectedPct-minSavePct) <= autoCQSizeProbeBand
+}
+
+// autoCQSizeProbeWindows spreads count stretches evenly over the WHOLE film,
+// each centred in its section (5 %, 15 % … 95 % for ten). Unlike the quality
+// windows, intro and credits belong in: the question is the size of the whole
+// file, not the quality of its hardest scene.
+func autoCQSizeProbeWindows(durationSec, length float64, count int) [][2]float64 {
+	if durationSec <= 0 || length <= 0 || count <= 0 {
+		return nil
+	}
+	windows := make([][2]float64, 0, count)
+	for i := 0; i < count; i++ {
+		centre := durationSec * (float64(i) + 0.5) / float64(count)
+		start := math.Max(0, math.Min(centre-length/2, durationSec-length))
+		windows = append(windows, [2]float64{start, length})
+	}
+	return windows
+}
+
+// ----------------------------------------------------------------------------
+// Measuring small pictures the way they look (since 2.0.0)
+// ----------------------------------------------------------------------------
+
+// VMAF's default model is built for a picture that fills a 1080p screen.
+const (
+	vmafScreenLong  = 1920
+	vmafScreenShort = 1080
+)
+
+// autoCQVMAFMeasureSize returns the size at which an encode is measured: one
+// smaller than 1080p is enlarged — both sides alike — until its long edge
+// reaches 1920 or its short edge 1080, in the same aspect ratio (portrait the
+// same way, turned). In its own small size VMAF scores far better than the
+// picture looks full-screen — CloudForge measured on 2026-09-27: 720p 96.2 in
+// its own size against 92.9 enlarged, 540p 95.2 against 88.4, 404p 97.0
+// against 87.8. At 1080p and above, or with unknown sizes, nothing changes.
+func autoCQVMAFMeasureSize(width, height int) (int, int, bool) {
+	if width <= 0 || height <= 0 {
+		return width, height, false
+	}
+	long, short := max(width, height), min(width, height)
+	factor := math.Min(float64(vmafScreenLong)/float64(long), float64(vmafScreenShort)/float64(short))
+	if factor <= 1 {
+		return width, height, false
+	}
+	return evenRound(float64(width) * factor), evenRound(float64(height) * factor), true
+}
+
+// evenRound rounds a pixel count to the nearest even number; a value of at
+// most 1080 stays at most 1080.
+func evenRound(v float64) int {
+	return int(math.Round(v/2)) * 2
 }
 
 // autoCQClimbCandidates returns the CQ rungs the plateau climb probes above
@@ -726,43 +815,30 @@ func autoCQClimbCandidates(sc autoCQScale, pick int) []int {
 	return rungs
 }
 
-// autoCQClimbFloor is the minimum VMAF a plateau-climb rung must still reach to
-// be taken: the high-anchor score minus the (scaled) tolerance. On the finer
-// AV1 scale climbToleranceFactor is 2.0, so AV1 may climb further for the same
-// spend as H.265 — e.g. the real Big Buck Bunny case (anchor CQ 32 = 94.16)
-// accepts CQ 38 at 93.65 (floor 93.16) instead of stalling at CQ 32, while a
-// steep plateau (a rung well below the floor) still keeps the conservative pick.
-func autoCQClimbFloor(sc autoCQScale, vmafHigh, tolerance float64) float64 {
-	return vmafHigh - tolerance*sc.climbToleranceFactor
-}
-
 // autoCQPlateauFloor is the minimum VMAF a climb rung must reach when the
 // target is proven unreachable: the measured plateau top minus the configured
-// plateau tolerance. Unlike autoCQClimbFloor this is an absolute VMAF budget
-// shared by both codecs — on a source whose quality tops out below the target,
-// how much of that unreachable quality the savings may cost does not depend on
-// the CQ scale. The budget is deliberately wider than autoCQTolerance: the
-// spread inside a saturated plateau is largely re-encode noise of an already
-// degraded picture, while every skipped CQ step wastes real bitrate (measured
-// 2026-07-25: CQ 26 vs 28 both ride the maxrate cap and differ by ~2% file
-// size at 0.03 VMAF).
+// plateau tolerance. It is an absolute VMAF budget shared by all codecs — on a
+// source whose quality tops out below the target, how much of that
+// unreachable quality the savings may cost does not depend on the CQ scale.
+// The spread inside a saturated plateau is largely re-encode noise of an
+// already degraded picture, while every skipped CQ step wastes real bitrate.
 func autoCQPlateauFloor(plateauTop, plateauTolerance float64) float64 {
 	return plateauTop - plateauTolerance
 }
 
 // autoCQClimbBudgetFloor returns the climb floor for a proven-unreachable
-// target. The wide plateau budget is only justified when the measured curve is
+// target. The plateau budget is only justified when the measured curve is
 // FLAT: the spread between rungs is then re-encode noise of an already
 // degraded picture (the autoCQPlateauFloor rationale). On a steep curve the
-// same spread is real, visible quality — a near-miss at the low anchor must
-// not give away several VMAF points for savings — so the climb may only spend
-// the small search tolerance there, scaled per codec like autoCQClimbFloor.
-func autoCQClimbBudgetFloor(sc autoCQScale, plateauTop float64, flatCurve bool,
-	plateauTolerance, tolerance float64) float64 {
+// same spread is real, visible quality, so nothing may be given away: the
+// floor is the plateau top itself. Until 1.34.0 the removed autoCQTolerance
+// was spent there; the user chose the picture over those last percent of
+// space (2026-09-11 and again 2026-09-27).
+func autoCQClimbBudgetFloor(plateauTop float64, flatCurve bool, plateauTolerance float64) float64 {
 	if flatCurve {
 		return autoCQPlateauFloor(plateauTop, plateauTolerance)
 	}
-	return autoCQClimbFloor(sc, plateauTop, tolerance)
+	return plateauTop
 }
 
 // autoCQClimbWorthIt decides whether a plateau-climb rung earns the quality it
@@ -776,8 +852,7 @@ func autoCQClimbBudgetFloor(sc autoCQScale, plateauTop float64, flatCurve bool,
 //
 // pickKbps/rungKbps are the sample bitrates of the current pick and of the
 // rung. A zero on either side means "not measurable" and lets the rung pass —
-// an unusable measurement must never flip established behaviour, the same rule
-// the cost cap follows when its budget cannot be worked out.
+// an unusable measurement must never flip established behaviour.
 func autoCQClimbWorthIt(pickKbps, rungKbps, minSavePercent float64) (savedPct float64, worth bool) {
 	if pickKbps <= 0 || rungKbps <= 0 {
 		return 0, true
@@ -959,8 +1034,8 @@ func autoCQGuidedWindows(buckets []bitrateBucket, durationSec float64,
 
 // buildAutoCQEncodeArgs assembles the FFmpeg call that encodes the sample
 // windows (video only) into one small anchor file, using exactly the options
-// of the real encode (buildOpts, same filter chain, maxrate/bufsize/GOP) at the
-// given CQ — so H.265 and AV1 each sample through their own encoder.
+// of the real encode (buildOpts, same filter chain, same GOP) at the given
+// CQ — so H.265 and AV1 each sample through their own encoder.
 // setpts=PTS-STARTPTS per window re-bases the decoded segment timestamps
 // (pitfall 1), concat then joins the windows into one stream.
 // autoCQWindowInputs baut die Eingabe-Argumente der Messfenster: je Fenster
@@ -984,9 +1059,8 @@ func autoCQWindowInputs(sourcePath string, windows [][2]float64, hwaccel []strin
 }
 
 func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, hwaccel []string,
-	filterChain string, fpsNum, fpsDen int, cq int, maxBitrate, bufsize string, gop int,
-	sampleName string,
-	buildOpts func(cq int, maxBitrate, bufsize string, gop int) []string) []string {
+	filterChain string, fpsNum, fpsDen int, cq int, gop int, sampleName string,
+	buildOpts func(cq int, gop int) []string) []string {
 
 	args := []string{"-y"}
 	args = append(args, autoCQWindowInputs(sourcePath, windows, hwaccel)...)
@@ -1000,7 +1074,7 @@ func buildAutoCQEncodeArgs(sourcePath string, windows [][2]float64, hwaccel []st
 	}
 	fmt.Fprintf(&fg, "concat=n=%d:v=1:a=0,%s[out]", len(windows), filterChain)
 	args = append(args, "-filter_complex", fg.String(), "-map", "[out]", "-an", "-sn")
-	args = append(args, buildOpts(cq, maxBitrate, bufsize, gop)...)
+	args = append(args, buildOpts(cq, gop)...)
 	return append(args, sampleName)
 }
 
@@ -1058,8 +1132,14 @@ func autoCQVMAFThreads() int {
 // (not scaling/sharpening). Both sides are forced to yuv420p10le and to
 // frame-number-based timestamps (pitfall 2). n_subsample=3 scores every third
 // frame — plenty for a sample and three times faster.
+// measureWidth/measureHeight > 0 enlarge BOTH sides to that size before the
+// comparison (autoCQVMAFMeasureSize): a picture smaller than 1080p is judged
+// the way it looks full-screen. Both sides pass through the identical scaler
+// in the identical pixel format, so only the encoder loss is scored; 0 keeps
+// the encoded size.
 func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, hwaccel []string,
-	filterChain string, fpsNum, fpsDen int, sampleName, logName string) []string {
+	filterChain string, fpsNum, fpsDen int, measureWidth, measureHeight int,
+	sampleName, logName string) []string {
 
 	args := autoCQWindowInputs(sourcePath, windows, hwaccel)
 	// Die Vergleichsdatei bleibt bewusst auf dem Prozessor: sie ist bereits
@@ -1077,11 +1157,15 @@ func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, hwaccel []stri
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(&fg, "[w%d]", i)
 	}
+	enlarge := ""
+	if measureWidth > 0 && measureHeight > 0 {
+		enlarge = fmt.Sprintf(",scale=%d:%d:flags=bicubic", measureWidth, measureHeight)
+	}
 	// filterChainToCPU: libvmaf rechnet auf dem Prozessor und kann mit Bildern
 	// im Grafikspeicher nichts anfangen (siehe Kommentar dort).
-	fmt.Fprintf(&fg, "concat=n=%d:v=1:a=0,%s,format=yuv420p10le,%s[ref];",
-		n, filterChainToCPU(filterChain), normPTS)
-	fmt.Fprintf(&fg, "[%d:V:0]format=yuv420p10le,%s[dist];", n, normPTS)
+	fmt.Fprintf(&fg, "concat=n=%d:v=1:a=0,%s,format=yuv420p10le%s,%s[ref];",
+		n, filterChainToCPU(filterChain), enlarge, normPTS)
+	fmt.Fprintf(&fg, "[%d:V:0]format=yuv420p10le%s,%s[dist];", n, enlarge, normPTS)
 	fmt.Fprintf(&fg, "[dist][ref]libvmaf=log_fmt=json:log_path=%s:n_subsample=3:n_threads=%d",
 		logName, autoCQVMAFThreads())
 	return append(args, "-filter_complex", fg.String(), "-f", "null", "-")
@@ -1151,37 +1235,69 @@ func autoCQSpinnerText(format string, args ...any) string {
 	return fmt.Sprintf("%-*s", autoCQSpinnerTextWidth, fmt.Sprintf(format, args...))
 }
 
-// autoDetectCQ runs the full -autocq search for one file and returns the CQ to
-// use. On ANY failure it warns and returns ok=false so the caller keeps the
-// configured targetCQ — the Auto-CQ analysis must never break a conversion.
-// The spinner keeps the analysis visibly alive (a silent multi-second pause
-// would look like a hang).
-func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
-	filterChain, maxBitrate, bufsize string, gop int, doScale bool, sc autoCQScale) (int, bool) {
+// autoCQInput bundles what the analysis needs to know about one file's encode.
+type autoCQInput struct {
+	filePath    string
+	stats       *VideoStats
+	filterChain string
+	gop         int
+	doScale     bool
+	// encWidth/encHeight: the picture size the encoder writes (encodedFrameSize);
+	// below 1080p VMAF is measured enlarged to it.
+	encWidth, encHeight int
+	// minSavePct: the saving processFile will demand (minSaveFor) — the size
+	// probe runs when the first prediction lies close to it.
+	minSavePct float64
+}
 
-	// The tolerance (INI key autoCQTolerance) deliberately trades invisible
-	// quality for disk space: the whole search runs against the reduced
-	// target and treats it as hit. 0 = chase the full target.
-	tolerance := appSettings.autoCQTolerance
-	target := appSettings.autoCQTargetVMAF - tolerance
+// autoCQResult is what the analysis hands back: the CQ to encode with, its
+// VMAF and the reason line, and the predicted saving on the whole file
+// (savingKnown = false when nothing could be predicted — the finished file is
+// judged instead).
+//
+// The "cq" event for a front-end is sent by processFile, not by the analysis:
+// only processFile knows whether the file is re-encoded at all. A window that
+// reuses the CQ of a check run must never get one for a file that is only
+// remuxed — it would force an encode that the minimum saving then throws away.
+type autoCQResult struct {
+	cq          int
+	vmaf        float64
+	note        string
+	savingPct   float64
+	savingKnown bool
+}
+
+// autoDetectCQ runs the full -autocq search for one file and returns the CQ to
+// use, together with what re-encoding at that CQ is predicted to save. On ANY
+// failure it warns and returns ok=false so the caller keeps the configured
+// targetCQ — the Auto-CQ analysis must never break a conversion. The spinner
+// keeps the analysis visibly alive (a silent multi-second pause would look like
+// a hang).
+func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQResult, bool) {
+	filePath, stats, filterChain, gop, doScale := in.filePath, in.stats, in.filterChain, in.gop, in.doScale
+
+	// The target is a floor since 2.0.0: there is no tolerance below it any
+	// more (the removed autoCQTolerance), only proven-unreachable or
+	// too-expensive targets end below it — and the log says so.
+	target := appSettings.autoCQTargetVMAF
 
 	windows := autoCQSampleWindows(stats.DurationSec)
 	if windows == nil {
 		pWarn.Printf("Auto-CQ: video too short for sampling (< %.0f s) — using fallback CQ %d.\n",
 			autoCQMinSourceSec, sc.fallbackCQ())
-		return 0, false
+		return autoCQResult{}, false
 	}
 	if stats.FPSNum <= 0 || stats.FPSDen <= 0 {
 		pWarn.Printf("Auto-CQ: source frame rate unknown — using fallback CQ %d.\n",
 			sc.fallbackCQ())
-		return 0, false
+		return autoCQResult{}, false
 	}
 
 	tmpDir, err := os.MkdirTemp("", "NVENCForge_autocq_")
 	if err != nil {
 		pWarn.Printf("Auto-CQ: cannot create temp folder (%v) — using fallback CQ %d.\n",
 			err, sc.fallbackCQ())
-		return 0, false
+		return autoCQResult{}, false
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -1189,10 +1305,14 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	for _, w := range windows {
 		sampleSec += w[1]
 	}
-	toleranceNote := ""
-	if tolerance > 0 {
-		toleranceNote = fmt.Sprintf(" (%.4g - %.4g tolerance)",
-			appSettings.autoCQTargetVMAF, tolerance)
+	// Below 1080p both sides are measured enlarged to Full HD size — say so,
+	// otherwise a small file's CQ would look strangely generous.
+	measureWidth, measureHeight, enlarge := autoCQVMAFMeasureSize(in.encWidth, in.encHeight)
+	measureNote := ""
+	if enlarge {
+		measureNote = fmt.Sprintf(", measured at %dx%d like on a Full HD screen", measureWidth, measureHeight)
+	} else {
+		measureWidth, measureHeight = 0, 0
 	}
 	// Erst hier steht fest, dass wirklich gemessen wird — alle Abbruchgründe
 	// (zu kurzes Video, unbekannte Bildrate, kein Temp-Ordner) liegen oben.
@@ -1202,7 +1322,7 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	emitStage("analyze")
 
 	pInfo.Printf("%s Auto-CQ: analyzing %d sample windows (%.0f s) for VMAF target %.4g%s...\n",
-		pterm.LightMagenta("›"), len(windows), sampleSec, target, toleranceNote)
+		pterm.LightMagenta("›"), len(windows), sampleSec, target, measureNote)
 
 	spinner, _ := pterm.DefaultSpinner.WithText(autoCQSpinnerText(autoCQSpinnerScanText)).Start()
 	analysisStart := time.Now()
@@ -1214,13 +1334,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	placement := "fixed positions"
 	var profileErr error
 	gapNote := ""
-	// The profile outlives the placement decision: the cost cap needs it again
-	// at the end, to read the source rate at exactly the sampled seconds.
+	// The profile outlives the placement decision: the saving prediction needs
+	// it again at the end, to read the source rate at exactly the sampled seconds.
 	var profile []bitrateBucket
 	if buckets, videoPackets, perr := probeSourceBitrateBuckets(ctx, filePath, stats.DurationSec, windows[0][1]); perr != nil {
 		if ctx.Err() != nil {
 			_ = spinner.Stop()
-			return 0, false
+			return autoCQResult{}, false
 		}
 		profileErr = perr
 	} else {
@@ -1280,14 +1400,14 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		return runAutoCQFFmpeg(ctx, tmpDir, build(nil, activeChain))
 	}
 
-	fail := func(step string, err error) (int, bool) {
+	fail := func(step string, err error) (autoCQResult, bool) {
 		_ = spinner.Stop()
 		if ctx.Err() != nil {
-			return 0, false // user abort — no misleading failure warning
+			return autoCQResult{}, false // user abort — no misleading failure warning
 		}
 		pWarn.Printf("Auto-CQ: %s failed — using fallback CQ %d.\n", step, sc.fallbackCQ())
 		pDetail.Printf("Auto-CQ detail: %v\n", err)
-		return 0, false
+		return autoCQResult{}, false
 	}
 
 	measure := func(cq int) (float64, error) {
@@ -1295,12 +1415,11 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		logName := fmt.Sprintf("vmaf_cq%d.json", cq)
 		buildEnc := func(hw []string, chain string) []string {
 			return buildAutoCQEncodeArgs(filePath, windows, hw, chain,
-				stats.FPSNum, stats.FPSDen,
-				cq, maxBitrate, bufsize, gop, sampleName, sc.buildOpts)
+				stats.FPSNum, stats.FPSDen, cq, gop, sampleName, sc.buildOpts)
 		}
 		buildVMAF := func(hw []string, chain string) []string {
 			return buildAutoCQVMAFArgs(filePath, windows, hw, chain,
-				stats.FPSNum, stats.FPSDen, sampleName, logName)
+				stats.FPSNum, stats.FPSDen, measureWidth, measureHeight, sampleName, logName)
 		}
 		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: encoding samples at CQ %d...", cq))
 		if err := runAutoCQStep(buildEnc); err != nil {
@@ -1317,20 +1436,33 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		return score, nil
 	}
 
-	vmafLow, err := measure(sc.anchorLow)
+	// scores remembers every measured CQ of this search: no step is ever
+	// encoded twice, and each rule below can ask for a score by CQ.
+	scores := make(map[int]float64)
+	scoreAt := func(cq int) (float64, error) {
+		if score, known := scores[cq]; known {
+			return score, nil
+		}
+		score, err := measure(cq)
+		if err == nil {
+			scores[cq] = score
+		}
+		return score, err
+	}
+
+	vmafLow, err := scoreAt(sc.anchorLow)
 	if err != nil {
 		return fail(fmt.Sprintf("anchor measurement at CQ %d", sc.anchorLow), err)
 	}
-	vmafHigh, err := measure(sc.anchorHigh)
+	vmafHigh, err := scoreAt(sc.anchorHigh)
 	if err != nil {
 		return fail(fmt.Sprintf("anchor measurement at CQ %d", sc.anchorHigh), err)
 	}
 
 	// Ab hier liegen beide Anker-Proben im Temp-Ordner. Aus ihren Größen
-	// ergibt sich die Zerfallskurve der Bitrate über CQ — dieselbe, mit der
-	// auch der Kosten-Deckel rechnet. sampleKbpsAt liefert damit für jedes CQ
-	// eine Bitrate: bevorzugt aus der echten Probendatei, ersatzweise aus der
-	// Kurve, und 0, wenn beides nicht geht.
+	// ergibt sich die Zerfallskurve der Bitrate über CQ. sampleKbpsAt liefert
+	// damit für jedes CQ eine Bitrate: bevorzugt aus der echten Probendatei,
+	// ersatzweise aus der Kurve, und 0, wenn beides nicht geht.
 	anchorKbpsLow, bitrateRate := 0.0, 0.0
 	if kLow, lerr := autoCQSampleKbps(tmpDir, sc.anchorLow, sampleSec); lerr == nil {
 		if kHigh, herr := autoCQSampleKbps(tmpDir, sc.anchorHigh, sampleSec); herr == nil {
@@ -1347,178 +1479,159 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		return autoCQEstimateKbps(sc, anchorKbpsLow, bitrateRate, atCQ)
 	}
 
+	// bucketLen: the length of one slice of the source bitrate profile — the
+	// window length it was built with.
+	bucketLen := windows[0][1]
+	// sizeProbeShare encodes stretches spread over the whole film at one CQ —
+	// nothing is measured, only the size counts — and returns what the picture
+	// costs there against the source at exactly those seconds (0.42 = 42 %).
+	// Batches of autoCQSizeProbeBatch keep the number of decoders at what the
+	// analysis itself uses.
+	sizeProbeShare := func(atCQ int) (float64, error) {
+		spots := autoCQSizeProbeWindows(stats.DurationSec, bucketLen, autoCQSizeProbeSpots)
+		sourceKbps := autoCQWindowSourceKbps(profile, spots, bucketLen)
+		if sourceKbps <= 0 {
+			return 0, errors.New("no source bitrate profile for the probe spots")
+		}
+		var probeBytes int64
+		var probeSec float64
+		for first := 0; first < len(spots); first += autoCQSizeProbeBatch {
+			batch := spots[first:min(first+autoCQSizeProbeBatch, len(spots))]
+			name := fmt.Sprintf("sizeprobe_%d.mkv", first)
+			build := func(hw []string, chain string) []string {
+				return buildAutoCQEncodeArgs(filePath, batch, hw, chain,
+					stats.FPSNum, stats.FPSDen, atCQ, gop, name, sc.buildOpts)
+			}
+			if err := runAutoCQStep(build); err != nil {
+				return 0, fmt.Errorf("size probe encode: %w", err)
+			}
+			info, err := os.Stat(filepath.Join(tmpDir, name))
+			if err != nil {
+				return 0, fmt.Errorf("size probe result: %w", err)
+			}
+			probeBytes += info.Size()
+			for _, spot := range batch {
+				probeSec += spot[1]
+			}
+		}
+		return float64(probeBytes) * 8 / 1000 / probeSec / sourceKbps, nil
+	}
+
 	cq, predicted := interpolateAutoCQ(sc, vmafLow, vmafHigh, target)
 
-	// The interpolated pick is ALWAYS confirmed by one real measurement: the
+	// The interpolated pick is ALWAYS confirmed by a real measurement: the
 	// linear model is only exact at the anchors, and between/beyond them the
 	// bent VMAF(CQ) curve tends to promise slightly more quality than the
 	// encode delivers. A pick that IS an anchor already carries its
-	// measurement. On a miss, autoCQStepDown estimates from the anchor slope
-	// how many CQ steps the shortfall costs and steps down in one go.
+	// measurement. Since 2.0.0 the target is a floor: a miss is followed by
+	// further measured steps (autoCQHoldTarget) instead of an estimated step
+	// down, and a clear hit tries one step thriftier (autoCQThriftyStep).
 	slope := (vmafHigh - vmafLow) / float64(sc.anchorHigh-sc.anchorLow)
 	verifyNote := ""
 	plateauLevel := 0.0 // > 0: target proven unreachable — climb may probe higher rungs
 	// plateauFlat: the measured curve is proven flat around the pick, so the
-	// spread up to the climb rungs is mostly re-encode noise and the full
-	// plateau budget applies. A steep curve (real quality per CQ step) keeps
-	// the climb on the small search tolerance instead — see autoCQClimbBudgetFloor.
+	// spread up to the climb rungs is mostly re-encode noise and the plateau
+	// budget applies. A steep curve (real quality per CQ step) gives nothing
+	// away — see autoCQClimbBudgetFloor.
 	plateauFlat := false
+
+	// saturatedPick is the saturation brake: the source is already compressed
+	// so hard that VMAF plateaus below the target — more bitrate buys no
+	// quality. Fall back to the cheapest CQ still on the plateau instead of
+	// stepping further down into pure waste. level is the plateau top.
+	saturatedPick := func(level float64) {
+		satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh)
+		verifyNote = fmt.Sprintf(
+			" (VMAF saturates at ~%.1f — target %.4g unreachable, picking efficient CQ %d)",
+			level, target, satCQ)
+		cq, predicted = satCQ, satVMAF
+		plateauLevel = level
+		plateauFlat = true // saturation proven by a real sub-anchor measurement
+	}
+	// thriftPick is the thrift brake: the target IS still reachable further
+	// down, but below the low anchor each step buys so little VMAF that it does
+	// not pay for the bitrate it costs. Fall back to the low anchor — the last CQ
+	// whose step still earned its place. Deliberately no plateauLevel: the
+	// target is NOT proven unreachable here, so the plateau climb (which may
+	// spend whole VMAF points on savings) must stay out of this case.
+	thriftPick := func(at autoCQPoint) {
+		gainPerStep := (at.vmaf - vmafLow) / float64(sc.anchorLow-at.cq)
+		verifyNote = fmt.Sprintf(
+			" (CQ %d measured %.1f — each step below CQ %d buys only %.2f VMAF, not worth the size)",
+			at.cq, at.vmaf, sc.anchorLow, gainPerStep)
+		cq, predicted = sc.anchorLow, vmafLow
+	}
+
+	verified, verr := scoreAt(cq)
 	switch {
-	case cq == sc.anchorLow:
-		predicted, verifyNote = vmafLow, " (anchor measurement)"
-		if vmafLow < target && tolerance > 0 {
-			// Even the low anchor misses the search target, so the target is
-			// only reachable (if at all) by escalating below the low anchor —
-			// the same spend-vs-gain trade the saturation brake handles. The
-			// tolerance picks the cheapest CQ within reach of the anchor score.
-			// Flatness evidence here is the anchor span alone: a near-miss on
-			// a steep curve is NOT a plateau, merely a target grazed by.
-			plateauLevel = vmafLow
-			plateauFlat = -slope < sc.saturationSlope
-			if satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh, tolerance); satCQ != cq {
-				verifyNote = fmt.Sprintf(
-					" (VMAF tops out at ~%.1f — target %.4g unreachable, tolerance picks CQ %d)",
-					vmafLow, target, satCQ)
-				cq, predicted = satCQ, satVMAF
-			}
+	case verr != nil && ctx.Err() != nil:
+		return fail("verification", verr)
+	case verr != nil:
+		// The anchors were fine, so keep the interpolated pick.
+		verifyNote = " (verification failed, interpolated value kept)"
+		pDetail.Printf("Auto-CQ verification detail: %v\n", verr)
+	case verified >= target:
+		predicted, verifyNote = verified, " (verified)"
+		if cq == sc.anchorLow || cq == sc.anchorHigh {
+			verifyNote = " (anchor measurement)"
 		}
-	case cq == sc.anchorHigh:
-		predicted, verifyNote = vmafHigh, " (anchor measurement)"
+		if thrifty, ok := autoCQThriftyStep(sc, target, autoCQPoint{cq, verified}, scoreAt); ok {
+			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — one step thriftier still holds the target)",
+				cq, verified)
+			cq, predicted = thrifty.cq, thrifty.vmaf
+		}
+	case autoCQSaturated(sc, cq, verified, vmafLow):
+		saturatedPick(math.Max(verified, vmafLow))
+	case autoCQGainTooSmall(sc, cq, verified, vmafLow):
+		thriftPick(autoCQPoint{cq, verified})
 	default:
-		verified, verr := measure(cq)
-		switch {
-		case verr != nil && ctx.Err() != nil:
-			return fail("verification", verr)
-		case verr != nil:
-			// The anchors were fine, so keep the interpolated pick.
-			verifyNote = " (verification failed, interpolated value kept)"
-			pDetail.Printf("Auto-CQ verification detail: %v\n", verr)
-		case verified < target && autoCQSaturated(sc, cq, verified, vmafLow):
-			// Saturation brake: the source is already compressed so hard
-			// that VMAF plateaus below the target — more bitrate buys no
-			// quality. Fall back to the cheapest CQ still on the plateau
-			// instead of stepping further down into pure waste.
-			satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh, tolerance)
-			verifyNote = fmt.Sprintf(
-				" (VMAF saturates at ~%.1f — target %.4g unreachable, picking efficient CQ %d)",
-				math.Max(verified, vmafLow), target, satCQ)
-			cq, predicted = satCQ, satVMAF
-			plateauLevel = math.Max(verified, vmafLow)
-			plateauFlat = true // saturation proven by the real sub-anchor measurement
-		case verified < target && autoCQGainTooSmall(sc, cq, verified, vmafLow):
-			// Thrift brake: the target IS still reachable further down, but below
-			// the low anchor each step buys so little VMAF that it does not pay for
-			// the bitrate it costs. Fall back to the low anchor — the last CQ whose
-			// step still earned its place, and the last one carrying a measured
-			// instead of an extrapolated score. Deliberately no plateauLevel: the
-			// target is NOT proven unreachable here, so the plateau climb (which
-			// may spend whole VMAF points on savings) must stay out of this case.
-			gainPerStep := (verified - vmafLow) / float64(sc.anchorLow-cq)
-			verifyNote = fmt.Sprintf(
-				" (CQ %d measured %.1f — each step below CQ %d buys only %.2f VMAF, not worth the size)",
-				cq, verified, sc.anchorLow, gainPerStep)
-			cq, predicted = sc.anchorLow, vmafLow
-		case verified < target:
-			stepped, pred, capped := autoCQStepDown(sc, cq, target, verified, slope)
-			switch {
-			case stepped == cq:
-				// The clamp floor itself measured below the target — proven
-				// unreachable, so the climb may still trade quality for size.
-				// The curve is NOT saturated here (the brake would have fired),
-				// so only the small climb budget applies.
-				predicted = verified
-				verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", verified)
-				plateauLevel = verified
-			case capped:
-				// The verification miss already proved the anchor slope too
-				// optimistic, and the correction jump was capped at maxStepDown —
-				// pred would be an extrapolation far outside the measured points.
-				// Replace it with a real measurement; if even that misses the
-				// target, the two fresh points give a realistic LOCAL slope for
-				// one final, ordinary step-down (accepted unmeasured, exactly
-				// like an uncapped step-down).
-				remeasured, rerr := measure(stepped)
-				switch {
-				case rerr != nil && ctx.Err() != nil:
-					return fail("step-down re-measurement", rerr)
-				case rerr != nil:
-					// The anchors and the first verification were fine — keep
-					// the stepped pick with its estimate, like a failed verify.
-					verifyNote = fmt.Sprintf(
-						" (CQ %d measured %.1f, stepped down to CQ %d — re-measurement failed, estimate kept)",
-						cq, verified, stepped)
-					pDetail.Printf("Auto-CQ re-measurement detail: %v\n", rerr)
-					cq, predicted = stepped, pred
-				case remeasured >= target:
-					verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d, verified)",
-						cq, verified, stepped)
-					cq, predicted = stepped, remeasured
-				default:
-					localSlope := (verified - remeasured) / float64(cq-stepped)
-					final, finalPred, _ := autoCQStepDown(sc, stepped, target, remeasured, localSlope)
-					// Nur die Notiz hängt vom Zweig ab — sie braucht das noch
-					// nicht überschriebene cq. Der Pick selbst wird DANACH
-					// gesetzt, ein einziges Mal für beide Fälle: von 1.6.1 bis
-					// 1.30.0 stand die Zuweisung in beiden Zweigen doppelt, ein
-					// Umbau verlor dabei das else, und im Fall "es geht noch
-					// eine Stufe tiefer" blieb der interpolierte CQ stehen —
-					// obwohl zwei Messungen ihn bereits widerlegt hatten.
-					if final == stepped {
-						// Same proven-unreachable case as the direct clamp-floor
-						// branch above: allow the (small-budget) climb. The pick
-						// moves to the clamp floor it just measured — keeping the
-						// interpolated CQ would pair the floor's score and note
-						// with a pick whose own measurement already fell below
-						// the climb budget.
-						verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)", remeasured)
-						plateauLevel = remeasured
-					} else {
-						verifyNote = fmt.Sprintf(" (CQ %d = %.1f, CQ %d = %.1f, stepped down to CQ %d)",
-							cq, verified, stepped, remeasured, final)
-					}
-					cq, predicted = autoCQFinalStepPick(stepped, final, remeasured, finalPred)
-				}
-			default:
-				verifyNote = fmt.Sprintf(" (CQ %d measured %.1f, stepped down to CQ %d)", cq, verified, stepped)
-				cq, predicted = stepped, pred
-			}
-		default:
-			predicted = verified
-			verifyNote = " (verified)"
+		missed := autoCQPoint{cq, verified}
+		hold := autoCQHoldTarget(sc, target, vmafLow, slope, missed, scores, scoreAt)
+		if ctx.Err() != nil {
+			return fail("search below the target", ctx.Err())
+		}
+		switch hold.outcome {
+		case holdReached:
+			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — stepped down to CQ %d, which holds the target)",
+				missed.cq, missed.vmaf, hold.point.cq)
+			cq, predicted = hold.point.cq, hold.point.vmaf
+		case holdClampFloor:
+			// The clamp floor itself measured below the target — proven
+			// unreachable. The curve is NOT saturated here (the brake would
+			// have fired), so the climb gives nothing away on it.
+			verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)",
+				hold.point.vmaf)
+			cq, predicted = hold.point.cq, hold.point.vmaf
+			plateauLevel = hold.point.vmaf
+		case holdSaturated:
+			saturatedPick(math.Max(hold.point.vmaf, vmafLow))
+		case holdTooExpensive:
+			thriftPick(hold.point)
+		default: // holdGaveUp: the best measured point so far, below the target
+			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — the search below the target stopped at CQ %d)",
+				missed.cq, missed.vmaf, hold.point.cq)
+			cq, predicted = hold.point.cq, hold.point.vmaf
 		}
 	}
 
 	// Plateau climb: a measured plateau below the target says nothing about
 	// where the plateau ENDS — CQ rungs above the pick may still cost next to
-	// nothing on such sources (2026-07-25 case: CQ 26 and 28 both ride the
-	// maxrate cap, the real savings only start above the high anchor). Probe
-	// the clamp ceiling first (cheapest file), then the lower rungs; a rung is
-	// taken only when its REAL measurement holds the floor. With the plateau
-	// tolerance configured every unreachable-target pick climbs; the floor is
-	// (plateau top - autoCQPlateauTolerance) on a proven-flat curve and the
-	// much tighter search-tolerance floor on a steep one (see
-	// autoCQClimbBudgetFloor). At 0 the pre-1.5.0 behaviour remains (only a
-	// flat anchor span climbs, floored by autoCQClimbFloor). A probe failure
-	// keeps the safe pick — the climb is a bonus, never a reason to fail the
-	// analysis. A healthy curve that reaches its target never gets here
+	// nothing on such sources (2026-07-25 case: the real savings only started
+	// above the high anchor). Probe the clamp ceiling first (cheapest file),
+	// then the lower rungs; a rung is taken only when its REAL measurement
+	// holds the floor: plateau top minus autoCQPlateauTolerance on a
+	// proven-flat curve, the plateau top itself on a steep one (see
+	// autoCQClimbBudgetFloor). A tolerance of 0 switches the climb off. A probe
+	// failure keeps the safe pick — the climb is a bonus, never a reason to fail
+	// the analysis. A healthy curve that reaches its target never gets here
 	// (plateauLevel == 0).
 	// Holding the floor is necessary but not sufficient: since 1.32.0 a rung
 	// must also make the file measurably smaller (autoCQClimbWorthIt), because
 	// on a source that is already squeezed dry it does not — and paying quality
 	// for a file that stays the same size is the one trade nobody wants.
 	var plateauProbes []string
-	anchorGainPerStep := -slope // VMAF gained per CQ step down, across the anchors
-	climbFloor, climbing := 0.0, false
-	switch {
-	case plateauLevel <= 0 || tolerance <= 0:
-		// healthy curve, or savings disabled entirely
-	case appSettings.autoCQPlateauTolerance > 0:
-		climbFloor = autoCQClimbBudgetFloor(sc, plateauLevel, plateauFlat,
-			appSettings.autoCQPlateauTolerance, tolerance)
-		climbing = true
-	case anchorGainPerStep < sc.saturationSlope && cq == sc.anchorHigh:
-		climbFloor, climbing = autoCQClimbFloor(sc, vmafHigh, tolerance), true
-	}
+	climbing := plateauLevel > 0 && appSettings.autoCQPlateauTolerance > 0
+	climbFloor := autoCQClimbBudgetFloor(plateauLevel, plateauFlat, appSettings.autoCQPlateauTolerance)
 	// climbSkipNote erklärt einen NICHT angetretenen Aufstieg. Ohne diese
 	// Zeile sähe die Gegenrechnung wie ein stiller Ausfall aus: gleiche
 	// Ausgangslage, plötzlich anderes Ergebnis, und nichts sagt warum.
@@ -1527,23 +1640,15 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		// Was der aktuelle Pick kostet, ist der Bezugswert jedes Vergleichs.
 		pickKbps := sampleKbpsAt(cq)
 		for _, rung := range autoCQClimbCandidates(sc, cq) {
-			// The anchor rungs were already measured at the start of the
-			// search — reuse those scores instead of burning ~15 s on an
-			// identical encode+measurement. (No switch here: its break would
-			// only leave the switch, not this probing loop.)
-			var score float64
-			if rung == sc.anchorHigh {
-				score = vmafHigh
-			} else if rung == sc.anchorLow {
-				score = vmafLow
-			} else {
-				var cerr error
-				if score, cerr = measure(rung); cerr != nil {
-					if ctx.Err() == nil {
-						pDetail.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
-					}
-					break
+			// Rungs measured earlier in the search (the anchors at least) come
+			// from memory instead of burning ~15 s on an identical
+			// encode+measurement.
+			score, cerr := scoreAt(rung)
+			if cerr != nil {
+				if ctx.Err() == nil {
+					pDetail.Printf("Auto-CQ plateau probe detail: %v\n", cerr)
 				}
+				break
 			}
 			plateauProbes = append(plateauProbes, fmt.Sprintf("CQ %d = %.2f", rung, score))
 			if score < climbFloor {
@@ -1580,71 +1685,44 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 		}
 	}
 
-	// Cost cap (INI key autoCQMaxSourcePercent, 45 % by default, 0 = off): the quality
-	// target counts only as long as reaching it stays within a share of what
-	// the source itself spends. Grainy or very busy material can push Auto-CQ
-	// into picks that cost more than half the source rate for VMAF nobody sees
-	// — measured 2026-08-28 on a 50 fps source: CQ 26 spends 55 % of the
-	// source, CQ 29 only 36 %.
-	//
-	// It runs LAST, after every quality mechanism has had its say, because it
-	// is not a quality argument at all: it is the user's budget overruling the
-	// result. And it deliberately does NOT touch -maxrate. An encoder ceiling
-	// makes several CQ steps measure the same size and the same score, which
-	// is precisely the false plateau the saturation brake must never see
-	// (measured 2026-07-27) — capping the SEARCH keeps every step honest.
-	costCapNote := ""
-	if budget, cerr := autoCQCostCapTarget(sc, tmpDir, profile, windows,
-		sampleSec, appSettings.autoCQMaxSourcePercent, cq); cerr != nil {
-		// A cap that cannot be worked out must never fail the analysis; the
-		// file simply keeps the quality-driven pick, as in every version
-		// before this one.
-		if debugMode && appSettings.autoCQMaxSourcePercent > 0 {
-			pDetail.Printf("Auto-CQ cost cap detail: %v\n", cerr)
+	// Saving prediction (since 2.0.0, replaces the cost cap): what the chosen
+	// CQ costs at the sample windows against the source at exactly those
+	// seconds, extended to the whole file. processFile remuxes instead when it
+	// stays under the minimum saving. Near that minimum the few analysis
+	// windows are not trusted — the size probe encodes stretches across the
+	// whole film and its answer replaces the first prediction.
+	saving, savingKnown := 0.0, false
+	savingSource := fmt.Sprintf("from the %d analysis windows", len(windows))
+	videoKbps := float64(determineBitrateKbps(stats))
+	if sourceKbps := autoCQWindowSourceKbps(profile, windows, bucketLen); sourceKbps > 0 {
+		if kbps := sampleKbpsAt(cq); kbps > 0 {
+			saving, savingKnown = autoCQExpectedSavingPercent(stats.FileSizeMB, videoKbps,
+				stats.DurationSec, kbps/sourceKbps)
 		}
-	} else if budget.unreachable {
-		// Say it out loud. Silence here would look like the cap simply did not
-		// apply, and the user would have no way to tell an unreachable cap from
-		// a file that was already cheap enough.
-		costCapNote = fmt.Sprintf(
-			"  · note: the %.4g%% cost cap was left alone — this source is already compressed so hard that even CQ %d would still spend %.0f%% of it, so capping would cost picture without saving anything",
-			appSettings.autoCQMaxSourcePercent, sc.clampMax,
-			budget.sharePct(budget.thriftiestKbps))
-	} else if budget.fires(cq) {
-		capped := budget.pick
-		score, merr := measure(capped)
+	}
+	if savingKnown && autoCQSizeProbeNeeded(saving, in.minSavePct) {
+		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: checking the size at %d spots...", autoCQSizeProbeSpots))
+		share, perr := sizeProbeShare(cq)
 		switch {
-		case merr != nil && ctx.Err() != nil:
-			return fail("cost cap measurement", merr)
-		case merr != nil:
-			// Anchors and search were fine, only the confirming measurement
-			// failed. Keep the capped pick with an estimated score: the cap is
-			// the point of this step, and dropping it here would hand back
-			// exactly the oversized file it exists to prevent.
-			pDetail.Printf("Auto-CQ cost cap detail: %v\n", merr)
-			predicted = vmafLow + slope*float64(capped-sc.anchorLow)
-			verifyNote = fmt.Sprintf(
-				" (cost cap %.0f%%: CQ %d would spend %.0f%% of the source, using CQ %d — measurement failed, estimate kept)",
-				appSettings.autoCQMaxSourcePercent, cq, budget.sharePct(budget.pickKbps), capped)
-			cq = capped
+		case perr != nil && ctx.Err() != nil:
+			return fail("size probe", perr)
+		case perr != nil:
+			// The first prediction stands; the finished file is judged anyway.
+			pDetail.Printf("Auto-CQ size probe detail: %v\n", perr)
+			savingSource += " — the size probe failed"
 		default:
-			// Report what the capped encode really costs, not what the model
-			// predicted — the sample for it now exists.
-			realShare := budget.sharePct(budget.pickKbps)
-			if realKbps, kerr := autoCQSampleKbps(tmpDir, capped, sampleSec); kerr == nil {
-				realShare = budget.sharePct(realKbps)
+			if probed, ok := autoCQExpectedSavingPercent(stats.FileSizeMB, videoKbps,
+				stats.DurationSec, share); ok {
+				savingSource = fmt.Sprintf("size probe at %d spots across the film; the analysis windows said %s",
+					autoCQSizeProbeSpots, autoCQSavingText(saving))
+				saving = probed
 			}
-			verifyNote = fmt.Sprintf(
-				" (cost cap %.0f%%: CQ %d would spend %.0f%% of the source — CQ %d measured %.1f at %.0f%%)",
-				appSettings.autoCQMaxSourcePercent, cq, budget.sharePct(budget.pickKbps),
-				capped, score, realShare)
-			cq, predicted = capped, score
 		}
 	}
 
 	_ = spinner.Stop()
 	if ctx.Err() != nil {
-		return 0, false
+		return autoCQResult{}, false
 	}
 	// Die Kopfzeile nennt NUR die Entscheidung. Bis 1.29.0 stand die
 	// Begründung mit im selben Satz, und die enthält oft eine zweite CQ-Zahl
@@ -1659,9 +1737,13 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if noteText != "" {
 		fmt.Println(pterm.Gray("  · " + noteText))
 	}
-	// Dieselbe Auskunft noch einmal für eine Oberfläche — als Ereignis, nicht
-	// als Text zum Zerlegen.
-	emitCQ(cq, predicted, target, noteText)
+	// Whether the file is re-encoded at all hangs on this number, so it stands
+	// right under the decision.
+	if savingKnown {
+		fmt.Println(pterm.Gray(fmt.Sprintf("  · expected file: %s (%s)", autoCQSavingText(saving), savingSource)))
+	} else {
+		fmt.Println(pterm.Gray("  · expected file: cannot be predicted for this one — the finished file is checked instead"))
+	}
 	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
 		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,
 		formatDuration(time.Since(analysisStart).Seconds()))))
@@ -1674,29 +1756,9 @@ func autoDetectCQ(ctx context.Context, filePath string, stats *VideoStats,
 	if gapNote != "" {
 		fmt.Println(pterm.Gray(gapNote))
 	}
-	if costCapNote != "" {
-		fmt.Println(pterm.Gray(costCapNote))
-	}
-	// An unreachable target on a cap-limited source says something about the
-	// configured ceiling, not about the material. Without this line the plateau
-	// message reads as "the source is exhausted" while the real limit is a
-	// setting the user can change.
-	//
-	// The second half used to promise "a higher cap buys quality at the price of
-	// size". A measurement over three high-bitrate 50/60 fps sources (2026-08-15,
-	// caps 8000/11000/12000) disproved that: the cap only holds back the high CQ
-	// steps, and Auto-CQ never picks those — at the step it does pick, raising
-	// the cap bought 0.04 VMAF for up to 4 % more size. Saying otherwise sends
-	// the reader chasing a setting that cannot help.
-	if plateauLevel > 0 {
-		if sourceKbps, capLimited := autoCQCapLimitsQuality(stats, maxBitrate); capLimited {
-			fmt.Println(pterm.Gray(fmt.Sprintf(
-				"  · note: the %s bitrate cap sets this ceiling, not the source (source runs at %.1f Mbit/s) — raising it was measured to add size, not quality",
-				maxBitrate, float64(sourceKbps)/1000)))
-		}
-	}
 	if profileErr != nil && debugMode {
 		fmt.Println(pterm.Gray("  · bitrate profile skipped: " + profileErr.Error()))
 	}
-	return cq, true
+	return autoCQResult{cq: cq, vmaf: predicted, note: noteText,
+		savingPct: saving, savingKnown: savingKnown}, true
 }

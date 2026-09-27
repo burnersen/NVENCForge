@@ -148,16 +148,15 @@ func TestSettingsScreenShowsEveryEncoderKnob(t *testing.T) {
 	s.bFrames = 3
 	s.nvencPreset = "p4"
 	s.nvencLookahead = 24
-	s.maxBitrate1080p = 7500
+	s.minSavePercent = 15
 	s.autoCQTargetVMAF = 94
-	s.autoCQTolerance = 1.5
 	s.casStrength = 0
 	s.audioKbpsPerChannel = 80
 	s.fallbackAudioBitrate = 160
 	s.gpuDecode = true
 	s.gpuDecodeMaxMbit = 42
 
-	out := settingsScreen(t, s, &AppConfig{autoCQ: true, maxBitrateKbps: s.maxBitrate1080p})
+	out := settingsScreen(t, s, &AppConfig{autoCQ: true})
 
 	// Jeder Eintrag: Beschriftung UND der Wert, der wirklich gefahren wird.
 	want := []string{
@@ -165,9 +164,8 @@ func TestSettingsScreenShowsEveryEncoderKnob(t *testing.T) {
 		"B-frames", "3",
 		"NVENC preset", "p4",
 		"Lookahead", "24",
-		"Max bitrate", "7500",
+		"Min. saving", "15%",
 		"Quality target", "VMAF 94",
-		"92.5", // Ziel minus Toleranz = das echte Suchziel
 		"Decoding", "42",
 		"Sharpening", "off",
 		"Audio", "80",

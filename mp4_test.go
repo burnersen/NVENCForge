@@ -131,11 +131,11 @@ func TestEightBitSwitch(t *testing.T) {
 	defer func(prev bool) { eightBitActive = prev }(eightBitActive)
 
 	eightBitActive = false
-	if got := buildNVENCOptsWithCQ(26, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "p010le") ||
+	if got := buildNVENCOptsWithCQ(26, 240); !hasPair(got, "-pix_fmt", "p010le") ||
 		!hasPair(got, "-profile:v", "main10") {
 		t.Errorf("Vorgabe muss 10 Bit bleiben (main10/p010le): %v", got)
 	}
-	if got := buildX265OptsWithCQ(18, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "yuv420p10le") {
+	if got := buildX265OptsWithCQ(18, 240); !hasPair(got, "-pix_fmt", "yuv420p10le") {
 		t.Errorf("x265-Vorgabe muss yuv420p10le bleiben: %v", got)
 	}
 	if f := buildVideoFilter(true, false, false, cropRect{}); !strings.HasSuffix(f, ",format=p010le") {
@@ -143,18 +143,18 @@ func TestEightBitSwitch(t *testing.T) {
 	}
 
 	eightBitActive = true
-	if got := buildNVENCOptsWithCQ(26, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "yuv420p") ||
+	if got := buildNVENCOptsWithCQ(26, 240); !hasPair(got, "-pix_fmt", "yuv420p") ||
 		!hasPair(got, "-profile:v", "main") {
 		t.Errorf("-8bit: NVENC muss main/yuv420p nutzen: %v", got)
 	}
-	if got := buildAV1OptsWithCQ(32, "6000k", "12000k", 240); !hasPair(got, "-pix_fmt", "yuv420p") {
+	if got := buildAV1OptsWithCQ(32, 240); !hasPair(got, "-pix_fmt", "yuv420p") {
 		t.Errorf("-8bit: AV1 muss yuv420p nutzen: %v", got)
 	}
-	if got := buildX265OptsWithCQ(18, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "yuv420p") ||
+	if got := buildX265OptsWithCQ(18, 240); !hasPair(got, "-pix_fmt", "yuv420p") ||
 		!hasPair(got, "-profile:v", "main") {
 		t.Errorf("-8bit: x265 muss main/yuv420p nutzen: %v", got)
 	}
-	if got := buildSVTAV1OptsWithCQ(24, "6000k", "12000k", 240); !hasPair(got, "-pix_fmt", "yuv420p") {
+	if got := buildSVTAV1OptsWithCQ(24, 240); !hasPair(got, "-pix_fmt", "yuv420p") {
 		t.Errorf("-8bit: SVT-AV1 muss yuv420p nutzen: %v", got)
 	}
 	// Die Filterkette muss mitziehen: bliebe sie auf p010le, würde FFmpeg
@@ -214,14 +214,14 @@ func TestGPUScaleChain(t *testing.T) {
 
 	// Der entscheidende Punkt: kein -pix_fmt, solange die Bilder oben liegen.
 	gpuFramesStayOnCard = true
-	if got := buildNVENCOptsWithCQ(26, "8000k", "16000k", 240); hasFlag(got, "-pix_fmt") {
+	if got := buildNVENCOptsWithCQ(26, 240); hasFlag(got, "-pix_fmt") {
 		t.Errorf("Encoder darf bei Bildern im Grafikspeicher kein -pix_fmt setzen: %v", got)
 	}
-	if got := buildAV1OptsWithCQ(32, "6000k", "12000k", 240); hasFlag(got, "-pix_fmt") {
+	if got := buildAV1OptsWithCQ(32, 240); hasFlag(got, "-pix_fmt") {
 		t.Errorf("AV1-Encoder darf bei Bildern im Grafikspeicher kein -pix_fmt setzen: %v", got)
 	}
 	gpuFramesStayOnCard = false
-	if got := buildNVENCOptsWithCQ(26, "8000k", "16000k", 240); !hasPair(got, "-pix_fmt", "p010le") {
+	if got := buildNVENCOptsWithCQ(26, 240); !hasPair(got, "-pix_fmt", "p010le") {
 		t.Errorf("auf dem üblichen Weg muss -pix_fmt gesetzt sein: %v", got)
 	}
 }

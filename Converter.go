@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/pterm/pterm"
 )
@@ -663,23 +666,20 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 	stats.FileSizeMB = getFileSizeMB(filePath)
 
-	// resultCodec is the codec the OUTPUT will actually carry: the target codec
+	// resultCodec is the codec the OUTPUT is expected to carry: the target codec
 	// for a real re-encode, but the unchanged source codec when the source is
-	// lean enough to be only remuxed (mirrors the doConvert/doRemux switch
-	// below). The skip check compares against it, so a finished .h265 never
-	// blocks a -av1 run and vice versa — different codec mode, different output.
+	// only remuxed before any analysis (upfrontRemuxReason — the same rule the
+	// switch below uses). The skip check compares against it, so a finished
+	// .h265 never blocks a -av1 run and vice versa — different codec mode,
+	// different output.
 	targetCodec := "hevc"
 	if cfg.av1 {
 		targetCodec = "av1"
 	}
 	resultCodec := targetCodec
-	{
-		doScale := needsScaling(cfg, stats.Width, stats.Height)
-		srcKbps := determineBitrateKbps(stats)
-		calc := cappedTargetKbps(srcKbps, outputHeightFor(stats, doScale), cfg.maxBitrateKbps)
-		if !(doScale || calc < srcKbps) {
-			resultCodec = stats.VideoCodec
-		}
+	if upfrontRemuxReason(stats, needsScaling(cfg, stats.Width, stats.Height),
+		determineBitrateKbps(stats)) != "" {
+		resultCodec = stats.VideoCodec
 	}
 
 	// srcID identifies the exact source file (name incl. extension); it is
@@ -691,6 +691,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	isOurFinishedOutput := func(cs *VideoStats) bool {
 		if !durationsClose(cs.DurationSec, stats.DurationSec) {
 			return false // different length → different source
+		}
+		// Since 2.0.0 a file can also end up remuxed AFTER the analysis, when
+		// re-encoding would not save minSavePercent — which resultCodec cannot
+		// know in advance. Such a remux keeps the source codec and carries our
+		// source tag, so an output with the source codec and exactly OUR tag is
+		// ours as well. Without the tag match it stays foreign.
+		if strings.EqualFold(cs.VideoCodec, stats.VideoCodec) && strings.EqualFold(cs.SourceTag, srcID) {
+			return true
 		}
 		if !strings.EqualFold(cs.VideoCodec, resultCodec) {
 			return false // other codec mode's output → not this run's result
@@ -740,9 +748,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			result.Skipped = true
 			return result
 		}
-		if !strings.EqualFold(candStats.VideoCodec, resultCodec) {
+		if !strings.EqualFold(candStats.VideoCodec, resultCodec) &&
+			!strings.EqualFold(candStats.VideoCodec, stats.VideoCodec) {
 			// Same source in the OTHER codec mode (e.g. a .h265 while we make
 			// .av1): leave it untouched and write our own differently-named output.
+			// A file in the SOURCE codec is not such a case: this run may still
+			// decide to remux after the analysis and would then need exactly that
+			// name — so a foreign one counts as a collision.
 			continue
 		}
 		// Same cleaned name but a different source (different length, or same
@@ -832,7 +844,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	fps := float64(stats.FPSNum) / float64(stats.FPSDen)
 	// Größe und Gesamt-Bitrate der Quelle gehören in diese Zeile: die Größe ist
 	// der Maßstab, an dem am Ende der Erfolg gemessen wird, und die Bitrate sagt
-	// vorab, ob überhaupt Luft nach unten ist bzw. ob der Deckel greifen wird.
+	// vorab, ob überhaupt Luft nach unten ist.
 	// Vorher standen beide Werte nirgends, bevor der Encode schon lief.
 	sourceFacts := pterm.LightWhite(fmt.Sprintf("%.0f MB", stats.FileSizeMB))
 	if stats.DurationSec > 0 && stats.FileSizeMB > 0 {
@@ -860,18 +872,11 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		pInfo.Printf("%s %s\n", pterm.LightMagenta("›"), stats.FPSNote)
 	}
 
-	// HDR-Policy (per Datei, leckt nie in SDR-Dateien): nur noch Erkennung +
-	// Hinweis. Der Bitraten-Deckel wird durch HDR NICHT mehr angehoben — er
-	// richtet sich allein nach dem Modus: 1080p (Standard) → maxBitrate1080p
-	// (8000), behaltenes 4K (-original) → maxBitrateOriginal (22000). Die
-	// HDR-Signalisierung (PQ/BT.2020-Tags) trägt buildColorOpts unabhängig.
-	effCfg := *cfg
-	hdrKind := videoHDRKind(stats)
-	if hdrKind != "" {
-		pInfo.Printf("%s HDR detected (%s) — bitrate cap %sk (by resolution mode).\n",
-			pterm.LightMagenta("›"),
-			strings.ToUpper(hdrKind),
-			pterm.LightCyan(fmt.Sprintf("%d", effCfg.maxBitrateKbps)))
+	// HDR-Policy (per Datei, leckt nie in SDR-Dateien): nur Erkennung und
+	// Hinweis. Die HDR-Signalisierung (PQ/BT.2020-Tags) trägt buildColorOpts.
+	if hdrKind := videoHDRKind(stats); hdrKind != "" {
+		pInfo.Printf("%s HDR detected (%s) — its colour tags are carried over.\n",
+			pterm.LightMagenta("›"), strings.ToUpper(hdrKind))
 	}
 
 	bitrateKbps := determineBitrateKbps(stats)
@@ -923,20 +928,15 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		hwaccelOpts = append(hwaccelOpts, "-hwaccel_output_format", "cuda")
 	}
 
-	// Source-derived bitrate cap (restored from 1.1.2, refined with the video
-	// expert's matrix): aim for 80% of the source video bitrate so the re-encode is
-	// guaranteed to shrink the file, never below the per-resolution floor, never
-	// above the per-mode ceiling. -cq (unchanged) still drives the picture; calcKbps
-	// only feeds -maxrate/-bufsize. The fixed per-mode ceiling used in 1.1.3 never
-	// bit for low/mid-bitrate sources, so -cq alone let those files grow — the
-	// post-encode safety net then discarded the encode and remuxed, so the tool
-	// stopped actually compressing. The cap fixes that at the source.
-	calcKbps := cappedTargetKbps(bitrateKbps, outputHeightFor(stats, doScale), effCfg.maxBitrateKbps)
-	// reEncodeWorthwhile: if we are NOT downscaling and even the floor cannot
-	// undercut the source (calcKbps ≥ source), a re-encode can only lose quality
-	// (and risk growing), so we remux instead. Codec-agnostic — this catches the
-	// highly-compressed H.264 case the user hit as well as already-lean HEVC/AV1.
-	reEncodeWorthwhile := doScale || calcKbps < bitrateKbps
+	// Which path? Since 2.0.0 only three things decide: the VMAF target, the
+	// resolution and the minimum saving — there is no bitrate cap any more.
+	// Before any analysis only two cases are settled (upfrontRemuxReason):
+	// pictures below 720p and sources already at the floor of their resolution
+	// are remuxed. Everything else is measured by Auto-CQ, and its prediction
+	// decides further down whether re-encoding pays off. A source that already
+	// has the target codec takes the same way: a fat HEVC file from a phone is
+	// shrunk further, a lean one is only renamed or remuxed.
+	remuxReason := upfrontRemuxReason(stats, doScale, bitrateKbps)
 
 	// -av1 swaps the target codec: encoder opts, output suffix, "already
 	// converted" detection and validation all follow targetCodec.
@@ -945,8 +945,6 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		targetCodec, outSuffix, codecLabel = "av1", ".av1", "AV1"
 	}
 
-	maxBR := fmt.Sprintf("%dk", calcKbps)
-	bufBR := fmt.Sprintf("%dk", calcKbps*2)
 	gopSize := calcGOP(stats.FPSNum, stats.FPSDen)
 	// Der Encoder ergibt sich aus Zielcodec (-av1) und Backend (-cpu); die
 	// Aufrufstelle unterscheidet nur noch, WELCHER Qualitätswert gilt:
@@ -959,7 +957,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		// beim Argument-Einlesen abgeschaltet.
 		cqValue = cfg.forcedCQ
 	}
-	nvencOpts := buildVideoOpts(cqValue, maxBR, bufBR, gopSize)
+	nvencOpts := buildVideoOpts(cqValue, gopSize)
 	// HDR signalling is carried by the color tags copied 1:1 from the source in
 	// buildColorOpts (primaries/transfer/colorspace/range — only when present, so
 	// nothing is fabricated). Mastering-display / MaxCLL static metadata rides
@@ -968,59 +966,21 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// is exactly what has aborted HDR conversions in the past.
 	nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
 
-	doConvert, doRemux := false, false
-	switch {
-	case strings.EqualFold(stats.VideoCodec, targetCodec) && ext == ".mkv" && !cfg.mp4Mode &&
-		!doScale && bitrateKbps <= effCfg.maxBitrateKbps && allAudioSafeAAC(stats.AudioStreams):
-		// Der Prüfmodus darf die Quelle NICHT anfassen — auch nicht durch das
-		// Umbenennen hier. Die Prüfung steht in diesem Zweig und nicht hinter
-		// dem switch, weil dieser Fall sein Ergebnis sofort ausführt und
-		// zurückkehrt, statt nur doConvert/doRemux zu setzen.
-		if cfg.cqCheckOnly {
-			pInfo.Printf("%s CQ check: already %s-MKV (%d kbps) — no CQ search runs for it.\n",
-				pterm.LightMagenta("›"), codecLabel, bitrateKbps)
-			fmt.Println()
-			result.Skipped = true
-			return result
-		}
-		newPath := filepath.Join(dir, base+outSuffix+ext)
-		if _, statErr := os.Stat(newPath); statErr == nil {
-			fmt.Println(pterm.Gray(fmt.Sprintf(
-				"  Already %s-MKV (%d kbps) – skipped (target name exists: %s).",
-				codecLabel, bitrateKbps, filepath.Base(newPath))))
-		} else if err := os.Rename(filePath, newPath); err == nil {
-			pOK.Printf("Already %s-MKV (%d kbps) – renamed to %s.\n",
-				codecLabel, bitrateKbps, filepath.Base(newPath))
-		} else {
-			pWarn.Printf("Already %s-MKV (%d kbps) – skipped (rename: %v).\n",
-				codecLabel, bitrateKbps, err)
-		}
-		fmt.Println()
-		result.Skipped = true
-		return result
-	case strings.EqualFold(stats.VideoCodec, targetCodec) && !doScale &&
-		bitrateKbps <= effCfg.maxBitrateKbps:
-		doRemux = true
-	case !reEncodeWorthwhile:
-		// Source already lean: even the resolution floor cannot undercut it, so a
-		// re-encode would only burn GPU time and lose quality (the post-encode
-		// safety net would discard it anyway). Remux instead — codec-agnostic, so
-		// this also covers highly-compressed H.264, exactly the case reported.
-		pInfo.Printf("%s Source already lean (%d kbps, target floor would be %d kbps) — remuxing instead of re-encoding.\n",
-			pterm.LightMagenta("›"), bitrateKbps, calcKbps)
-		doRemux = true
-	default:
-		doConvert = true
+	doConvert, doRemux := remuxReason == "", remuxReason != ""
+	if doRemux {
+		pInfo.Printf("%s %s — remuxing instead of re-encoding.\n",
+			pterm.LightMagenta("›"), upperFirst(remuxReason))
 	}
 
-	// -cqcheck: Dateien, die ohnehin nur umgepackt würden, durchlaufen gar
+	// -cqcheck: Dateien, die ohnehin nicht neu kodiert würden, durchlaufen gar
 	// keine CQ-Suche. Das muss dastehen — sonst sieht der Prüfmodus hier aus,
 	// als wäre die Analyse fehlgeschlagen.
 	if cfg.cqCheckOnly && !doConvert {
-		pInfo.Printf("%s CQ check: this file would only be remuxed — no CQ search runs for it.\n",
+		pInfo.Printf("%s CQ check: this file would not be re-encoded — no CQ search runs for it.\n",
 			pterm.LightMagenta("›"))
 		fmt.Println()
 		result.Skipped = true
+		result.ErrMsg = "would only be remuxed: " + remuxReason
 		return result
 	}
 
@@ -1051,18 +1011,77 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		// simply stays in effect.
 		if cfg.autoCQ {
 			scale := activeAutoCQScale(cfg.av1)
-			if cq, ok := autoDetectCQ(ctx, filePath, stats, filterChain, maxBR, bufBR, gopSize, doScale, scale); ok {
-				nvencOpts = scale.buildOpts(cq, maxBR, bufBR, gopSize)
+			minSave := minSaveFor(doScale)
+			encWidth, encHeight := encodedFrameSize(stats, doScale, crop)
+			analysis, ok := autoDetectCQ(ctx, autoCQInput{
+				filePath: filePath, stats: stats, filterChain: filterChain, gop: gopSize,
+				doScale: doScale, encWidth: encWidth, encHeight: encHeight, minSavePct: minSave,
+			}, scale)
+			if ok {
+				nvencOpts = scale.buildOpts(analysis.cq, gopSize)
 				nvencOpts = append(nvencOpts, buildColorOpts(stats)...)
 			}
+			// The analysis also predicted what re-encoding saves. Below the
+			// minimum the picture is not worth touching: remux instead, BEFORE a
+			// single frame is encoded. Without a prediction (analysis failed,
+			// source profile unreadable) the file is encoded and judged
+			// afterwards, as before 2.0.0.
+			worthIt := !ok || !analysis.savingKnown || analysis.savingPct >= minSave
+			// Die CQ-Wahl geht als Ereignis an eine Oberfläche — aber nur für
+			// eine Datei, die wirklich neu kodiert wird (siehe autoCQResult).
+			if ok && worthIt {
+				emitCQ(analysis.cq, analysis.vmaf, appSettings.autoCQTargetVMAF, analysis.note)
+			}
+			notWorthIt := fmt.Sprintf("expected %s, the minimum saving is %.4g%%",
+				autoCQSavingText(analysis.savingPct), minSave)
 			// Die Suche hat gerade gemeldet, was sie wählen würde — im
 			// Prüfmodus ist damit alles getan. Auch ein Fehlschlag endet hier:
 			// die Analyse hat stattgefunden, ihr Ergebnis steht oben.
 			if cfg.cqCheckOnly {
+				if !worthIt {
+					pInfo.Printf("%s CQ check: this file would only be remuxed — %s.\n",
+						pterm.LightMagenta("›"), notWorthIt)
+					result.ErrMsg = "would only be remuxed: " + notWorthIt
+				}
 				fmt.Println()
 				result.Skipped = true
 				return result
 			}
+			if !worthIt {
+				pInfo.Printf("%s Not worth re-encoding: %s — remuxing instead.\n",
+					pterm.LightMagenta("›"), notWorthIt)
+				doConvert, doRemux = false, true
+				vfOpts, vfOptsCPU = nil, nil
+			}
+		}
+	}
+
+	// Not re-encoded: an MKV whose picture already has the target codec IS the
+	// result — it only gets its suffix instead of a byte-for-byte copy. Every
+	// other file is remuxed, as far as that is possible losslessly.
+	if doRemux && canRenameInPlace(stats, targetCodec, ext, cfg.mp4Mode, doScale) {
+		newPath := filepath.Join(dir, base+outSuffix+ext)
+		if _, statErr := os.Stat(newPath); statErr == nil {
+			fmt.Println(pterm.Gray(fmt.Sprintf(
+				"  Already %s-MKV (%d kbps) – skipped (target name exists: %s).",
+				codecLabel, bitrateKbps, filepath.Base(newPath))))
+		} else if err := os.Rename(filePath, newPath); err == nil {
+			pOK.Printf("Already %s-MKV (%d kbps) – renamed to %s.\n",
+				codecLabel, bitrateKbps, filepath.Base(newPath))
+		} else {
+			pWarn.Printf("Already %s-MKV (%d kbps) – skipped (rename: %v).\n",
+				codecLabel, bitrateKbps, err)
+		}
+		fmt.Println()
+		result.Skipped = true
+		return result
+	}
+	if doRemux {
+		if reason := remuxNotLossless(ctx, filePath); reason != "" {
+			pWarn.Printf("Left untouched: not re-encoded, and %s.\n", reason)
+			fmt.Println()
+			result.Skipped = true
+			return result
 		}
 	}
 
@@ -1243,11 +1262,16 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	outSizeMB := getFileSizeMB(outputFile)
 	savedMB := stats.FileSizeMB - outSizeMB
 
-	if savedMB <= 0 && doConvert {
+	// The prediction before the encode can be off (it knows only a few seconds
+	// of the film), so the finished file is judged against the same minimum.
+	if minSave := minSaveFor(doScale); doConvert && !encodeSavesEnough(stats.FileSizeMB, outSizeMB, minSave) {
+		verdict := fmt.Sprintf("(+%.0f MB larger)", -savedMB)
+		if savedMB > 0 {
+			verdict = fmt.Sprintf("(only %.0f%% smaller, the minimum is %.4g%%)",
+				savedMB/stats.FileSizeMB*100, minSave)
+		}
 		pOK.Printf("%.0f MB  →  %.0f MB   %s — %s discarded\n",
-			stats.FileSizeMB, outSizeMB,
-			pterm.LightRed(fmt.Sprintf("(+%.0f MB larger)", -savedMB)),
-			codecLabel)
+			stats.FileSizeMB, outSizeMB, pterm.LightRed(verdict), codecLabel)
 		_ = os.Remove(outputFile)
 
 		if ext == ".mkv" {
@@ -1270,6 +1294,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			result.SavedMB = 0
 			result.Success = true
 			fmt.Println()
+			return result
+		}
+
+		if reason := remuxNotLossless(ctx, filePath); reason != "" {
+			pWarn.Printf("Left untouched: %s.\n", reason)
+			fmt.Println()
+			result.Skipped = true
 			return result
 		}
 
@@ -1438,10 +1469,10 @@ func parseFrameRate(rate string) (num, den int, ok bool) {
 // kleinste gemeinsame Nenner der Zeitbasis, keine echte Bildrate — an einer
 // echten 60-fps-Datei meldete ffprobe dort 300/1 (gemessen 2026-08-20). Alles,
 // was auf dieser Zahl aufbaut, geht dann schief: Auto-CQ filtert die Fenster
-// auf 300 fps, misst fünffach doppelte Bilder, läuft mit 7,2 statt 4,0 Mbit/s
-// in den Bitraten-Deckel — dort ist CQ wirkungslos, die Anker liegen fast
-// gleich, die Sättigungs-Bremse hält das für ein Plateau und wählt ein zu
-// weiches CQ. Zusätzlich wird der Keyframe-Abstand für 300 fps berechnet und
+// auf 300 fps, misst fünffach doppelte Bilder, lief damals (bis 1.34.0) mit
+// 7,2 statt 4,0 Mbit/s in den Bitraten-Deckel — dort war CQ wirkungslos, die
+// Anker lagen fast gleich, die Sättigungs-Bremse hielt das für ein Plateau und
+// wählte ein zu weiches CQ. Zusätzlich wird der Keyframe-Abstand für 300 fps berechnet und
 // die Analyse dauert fünfmal so lange.
 //
 // avg_frame_rate ist Bilder geteilt durch Laufzeit und trifft in diesem Fall
@@ -2157,19 +2188,13 @@ func determineBitrateKbps(s *VideoStats) int64 {
 	return estVideoKbps
 }
 
-// outputHeightFor returns the height the encoder will actually write: the source
-// height, or the downscale short side (maxResolution) when scaling. The bitrate
-// floor keys off the OUTPUT resolution, not the possibly-larger source.
-func outputHeightFor(s *VideoStats, doScale bool) int {
-	if doScale {
-		return appSettings.maxResolution
-	}
-	return s.Height
-}
-
-// bitrateFloorKbps is the absolute minimum target bitrate per output resolution —
-// a safety net so very low-bitrate sources don't turn to mush. Buckets agreed
-// with the video expert (output height in px → kbps).
+// bitrateFloorKbps is the video bitrate per resolution at or below which a
+// source counts as lean: re-encoding it could only lose picture, so it is
+// remuxed without an analysis. Buckets agreed with the video expert (height in
+// px → kbps); CloudForge uses the same 1500 for 1080p. Until 2.0.0 the same
+// numbers were also the lower clamp of -maxrate, which no longer exists — the
+// rule itself is unchanged: the old "max(80 % of source, floor) < source" was
+// exactly "source > floor".
 func bitrateFloorKbps(height int) int64 {
 	switch {
 	case height <= 720:
@@ -2183,26 +2208,163 @@ func bitrateFloorKbps(height int) int64 {
 	}
 }
 
-// bitrateTargetPercent is the share of the source video bitrate the encode aims
-// at before the per-mode ceiling applies, so a re-encode shrinks the file even
-// when the ceiling is generous. autoCQCapLimitsQuality repeats this arithmetic
-// to tell a ceiling-limited Auto-CQ analysis from a genuinely exhausted source.
-const bitrateTargetPercent = 80
+// Below these edges a picture counts as smaller than 720p.
+const (
+	shortEdge720p = 720
+	longEdge720p  = 1280
+)
 
-// cappedTargetKbps restores the source-derived ceiling dropped in 1.1.3: target
-// bitrateTargetPercent of the source video bitrate (so the re-encode shrinks),
-// clamped UP to the resolution floor and DOWN to the per-mode ceiling. It only
-// sets -maxrate/-bufsize; -cq still governs the picture. The ceiling is applied
-// last so an explicit -NNNN override always wins, even over the floor.
-func cappedTargetKbps(sourceKbps int64, outHeight int, ceiling int64) int64 {
-	target := sourceKbps * bitrateTargetPercent / 100
-	if floor := bitrateFloorKbps(outHeight); target < floor {
-		target = floor
+// below720p reports whether BOTH edges of a video are smaller than those of
+// 720p (portrait counts the same, turned). Such files are only remuxed, as in
+// CloudForge (user's choice 2026-09-27): measured the way they look on a Full HD
+// screen they hardly ever reach the target, and there is little to save on
+// them anyway. 0 means unknown and never counts as small.
+func below720p(width, height int) bool {
+	if width <= 0 || height <= 0 {
+		return false
 	}
-	if ceiling > 0 && target > ceiling {
-		target = ceiling
+	long, short := max(width, height), min(width, height)
+	return long < longEdge720p && short < shortEdge720p
+}
+
+// upfrontRemuxReason says why a file is only remuxed before any analysis runs,
+// or "" when it goes on to the quality search. It is the ONE place of this
+// rule: the skip check at the top of processFile and the switch that picks the
+// path both ask it, so the two can never drift apart. A file that is scaled
+// down is always re-encoded — the smaller picture is what maxResolution asks for.
+func upfrontRemuxReason(s *VideoStats, doScale bool, sourceKbps int64) string {
+	switch {
+	case doScale:
+		return ""
+	case below720p(s.Width, s.Height):
+		return fmt.Sprintf("resolution %dx%d is below 720p", s.Width, s.Height)
+	case sourceKbps <= bitrateFloorKbps(s.Height):
+		return fmt.Sprintf("source already lean (%d kbps, floor for %dp is %d kbps)",
+			sourceKbps, s.Height, bitrateFloorKbps(s.Height))
 	}
-	return target
+	return ""
+}
+
+// upperFirst capitalises the first letter, so a reason can open a sentence.
+func upperFirst(s string) string {
+	for i, r := range s {
+		return string(unicode.ToUpper(r)) + s[i+utf8.RuneLen(r):]
+	}
+	return s
+}
+
+// canRenameInPlace reports whether a file that is not re-encoded is already
+// the result as it stands: an MKV whose picture has the target codec and whose
+// sound needs no conversion. Renaming it to its output suffix saves a
+// byte-for-byte copy of the whole film. Not in -mp4 mode (the result must be an
+// MP4) and never when scaling down (then it is re-encoded anyway).
+func canRenameInPlace(s *VideoStats, targetCodec, ext string, mp4Mode, doScale bool) bool {
+	return strings.EqualFold(s.VideoCodec, targetCodec) && ext == ".mkv" &&
+		!mp4Mode && !doScale && allAudioSafeAAC(s.AudioStreams)
+}
+
+// prerollProbePackets: that many video packets from the start are enough to
+// find a hidden pre-roll — it always sits at the very front and reaches at most
+// up to the next keyframe (same figure as CloudForge).
+const prerollProbePackets = 30
+
+// remuxNotLossless returns why a lossless remux of this file is impossible, or
+// "" when it is fine.
+//
+// An MP4 that was cut without re-encoding has to store its video from the
+// keyframe BEFORE the cut and hides the frames up to the cut through an edit
+// list, marking their packets "discard". Matroska knows no such hiding: after a
+// stream-copy remux those frames show up again and picture and sound can drift
+// apart. Measured 2026-09-26 (CloudForge) on such a cut: 4 s of pre-roll, 49.1
+// instead of 45.1 s after remuxing — on a long film that even stays inside the
+// allowed duration tolerance, so the result check would not catch it.
+// Re-encoding is not affected: decoding applies the edit list.
+//
+// The file is then left untouched, like CloudForge does. A probe that fails
+// counts as "not possible" too — leaving a file alone is always safe.
+func remuxNotLossless(ctx context.Context, path string) string {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags",
+		"-read_intervals", "%+#"+strconv.Itoa(prerollProbePackets), "-of", "csv=p=0", path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+	out, err := cmd.Output()
+	switch {
+	case err != nil:
+		return fmt.Sprintf("the start of its video could not be read to check that a remux is lossless (%v)", err)
+	case prerollInPacketFlags(string(out)):
+		return "a lossless remux is not possible: it starts with hidden frames (cut without re-encoding)"
+	}
+	return ""
+}
+
+// prerollInPacketFlags reads ffprobe's packet flags ("K_" keyframe, "D"
+// discard, "C" corrupt, "_" none): any discard flag is a hidden pre-roll. Its
+// own function so it can be tested without ffprobe.
+func prerollInPacketFlags(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "D") {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeSavesEnough reports whether a finished re-encode is worth keeping: it
+// must come out smaller than its source by at least minSavePct percent of the
+// whole file. At 0 only "smaller at all" counts — the rule before 2.0.0. An
+// unknown source size (0) never lets an encode pass, as before.
+func encodeSavesEnough(sourceMB, resultMB, minSavePct float64) bool {
+	saved := sourceMB - resultMB
+	if saved <= 0 {
+		return false
+	}
+	return saved/sourceMB*100 >= minSavePct
+}
+
+// minSaveFor returns the saving (percent of the whole file) a re-encode must
+// reach to be kept. A downscaled file only has to come out smaller than its
+// source: the smaller picture is the user's explicit maxResolution wish, and
+// keeping the bigger original instead would ignore it. The rule "never larger"
+// held before 2.0.0 too.
+func minSaveFor(doScale bool) float64 {
+	if doScale {
+		return 0
+	}
+	return appSettings.minSavePercent
+}
+
+// encodedFrameSize returns the picture size the encoder writes, mirroring
+// buildVideoFilter: the crop rectangle or the source trimmed to even edges,
+// then fitted into the maxResolution box when scaling down. Auto-CQ needs it
+// to decide whether VMAF is measured enlarged to Full HD.
+func encodedFrameSize(s *VideoStats, doScale bool, crop cropRect) (int, int) {
+	width, height := s.Width/2*2, s.Height/2*2
+	if crop.valid() {
+		width, height = crop.w, crop.h
+	}
+	if !doScale || width <= 0 || height <= 0 {
+		return width, height
+	}
+	short := appSettings.maxResolution
+	long := short * 16 / 9
+	boxW, boxH := long, short
+	if width < height {
+		boxW, boxH = short, long
+	}
+	factor := math.Min(float64(boxW)/float64(width), float64(boxH)/float64(height))
+	if factor >= 1 {
+		return width, height
+	}
+	return evenFloor(float64(width) * factor), evenFloor(float64(height) * factor)
+}
+
+// evenFloor rounds a pixel count down to an even number, like the encoder's
+// force_divisible_by=2 does.
+func evenFloor(v float64) int {
+	return int(v) / 2 * 2
 }
 
 // remuxSuffix maps a (passed-through) source video codec to the output-name
@@ -2441,6 +2603,11 @@ func videoIsInterlaced(s *VideoStats) bool {
 // settings of the real encode. The fixed value for manual mode comes from
 // activeManualCQ (targetCQ here), so all four encoder backends are chosen in
 // one place.
+// Since 2.0.0 none of the four builders sets -maxrate/-bufsize: a peak cap on
+// 80 % of the source's AVERAGE rate starved exactly the hard scenes and made
+// several CQ steps measure alike in the analysis (false plateaus, measured
+// 2026-07-27). The CQ alone decides the picture; that a result really gets
+// smaller is checked in processFile against minSavePercent.
 // AQ options use the dash spellings (-spatial-aq/-temporal-aq): FFmpeg
 // master removed the old underscore aliases in 2026, and the dash form
 // exists in every supported build.
@@ -2456,10 +2623,9 @@ func videoIsInterlaced(s *VideoStats) bool {
 // did not need them. Higher values measured monotonically worse AND bigger
 // (aq 12 = +10% size for -0.52 VMAF, aq 15 = +16% for -1.22). Do not "restore"
 // the 8 - it costs size for nothing.
-func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
+func buildNVENCOptsWithCQ(cq int, gop int) []string {
 	opts := []string{
-		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
-		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
+		"-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq), "-b:v", "0",
 		"-profile:v", hevcProfileName(),
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
@@ -2489,10 +2655,9 @@ func buildNVENCOptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string 
 // -aq-strength shares the INI key with H.265 and was measured separately for
 // AV1 on 2026-08-15 (CQ 32, two sources): 8 -> 2 gave -4.2% and -24.2% size at
 // +0.47 / -0.23 VMAF, and the worst frame improved in both cases.
-func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
+func buildAV1OptsWithCQ(cq int, gop int) []string {
 	opts := []string{
-		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq),
-		"-b:v", "0", "-maxrate", maxBitrate, "-bufsize", bufsize,
+		"-c:v", "av1_nvenc", "-rc", "vbr", "-cq", strconv.Itoa(cq), "-b:v", "0",
 		"-preset", appSettings.nvencPreset, "-tune", "hq",
 		"-multipass", "qres", "-rc-lookahead", strconv.Itoa(appSettings.nvencLookahead), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop), "-spatial-aq", "1", "-temporal-aq", "1",
@@ -2506,8 +2671,8 @@ func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 // ----------------------------------------------------------------------------
 
 // buildX265OptsWithCQ ist das CPU-Gegenstück zu buildNVENCOptsWithCQ. Alles,
-// was das Bild bestimmt, bleibt gleich (10 Bit, Bitraten-Deckel, GOP) — nur
-// der Encoder wechselt auf libx265. Die NVENC-eigenen Regler (Lookahead,
+// was das Bild bestimmt, bleibt gleich (10 Bit, GOP) — nur der Encoder
+// wechselt auf libx265. Die NVENC-eigenen Regler (Lookahead,
 // B-Frames, spatial/temporal AQ, multipass) haben hier bewusst KEIN
 // Gegenstück: x265 steuert das über sein Preset selbst und besser, als
 // einzeln durchgereichte Werte es könnten.
@@ -2519,10 +2684,9 @@ func buildAV1OptsWithCQ(cq int, maxBitrate, bufsize string, gop int) []string {
 //
 // log-level=error unterdrückt x265' gesprächige Statuszeilen, die sonst die
 // Fortschrittsanzeige in runFFmpeg überschreiben würden.
-func buildX265OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string {
+func buildX265OptsWithCQ(crf int, gop int) []string {
 	opts := []string{
 		"-c:v", "libx265", "-crf", strconv.Itoa(crf),
-		"-maxrate", maxBitrate, "-bufsize", bufsize,
 		"-profile:v", hevcProfileName(), "-pix_fmt", cpuEncodePixFmt(),
 		"-preset", appSettings.cpuPreset, "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop),
@@ -2542,10 +2706,9 @@ func buildX265OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string 
 // 12/13 bildet SVT-AV1 4.x selbst auf 11 ab, siehe svtMaxPreset).
 // Die Thread-Begrenzung heißt hier lp (logical processors) — libsvtav1
 // ignoriert das allgemeine -threads.
-func buildSVTAV1OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []string {
+func buildSVTAV1OptsWithCQ(crf int, gop int) []string {
 	opts := []string{
 		"-c:v", "libsvtav1", "-crf", strconv.Itoa(crf),
-		"-maxrate", maxBitrate, "-bufsize", bufsize,
 		"-pix_fmt", cpuEncodePixFmt(),
 		"-preset", strconv.Itoa(appSettings.cpuAV1Preset), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop),
@@ -2560,7 +2723,7 @@ func buildSVTAV1OptsWithCQ(crf int, maxBitrate, bufsize string, gop int) []strin
 // den Zielcodec. Alle vier Bauer haben dieselbe Signatur, damit -cq und
 // Auto-CQ nur den Qualitätswert austauschen müssen und die Aufrufstellen
 // nichts über GPU oder CPU wissen.
-func activeVideoOptsBuilder(av1 bool) func(cq int, maxBitrate, bufsize string, gop int) []string {
+func activeVideoOptsBuilder(av1 bool) func(cq int, gop int) []string {
 	switch {
 	case av1 && cpuModeActive:
 		return buildSVTAV1OptsWithCQ
@@ -2638,8 +2801,8 @@ func buildColorOpts(s *VideoStats) []string {
 // videoHDRKind classifies the primary video stream by its transfer function:
 // "pq" (HDR10, SMPTE ST 2084), "hlg" (Hybrid Log-Gamma) or "" (SDR). Real HDR
 // streams always carry the transfer tag, so keying on it avoids false positives
-// on plain BT.2020-primaries SDR material. Used only to raise the bitrate cap;
-// the HDR tags themselves are copied from the source by buildColorOpts.
+// on plain BT.2020-primaries SDR material. Used only for the HDR notice; the
+// HDR tags themselves are copied from the source by buildColorOpts.
 func videoHDRKind(s *VideoStats) string {
 	switch strings.ToLower(strings.TrimSpace(s.ColorTransfer)) {
 	case "smpte2084", "smptest2084":

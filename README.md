@@ -66,30 +66,27 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 On first run NVENCForge fetches a tested FFmpeg build automatically: no setup, no dependencies. It deliberately uses its **own** copy rather than whatever happens to be in your `PATH` — every quality value in this tool was measured against a known build. Want your own instead? Put `ffmpeg.exe` and `ffprobe.exe` next to the EXE; a local copy always wins and nothing is downloaded.
 
-**Some real numbers** — not a curated test set, but nine files straight out of everyday use on an RTX 5070 Ti, 4 h 50 min of source material in total, all with default settings (anything above 1080p downscaled to 1080p).
+**Some real numbers** — five 1080p films straight out of everyday use plus a 720p and a 480p clip, encoded to AV1 on an RTX 5070 Ti and measured on 27 Sep 2026: the previous version 1.34.0 (still with its bitrate caps) against 2.0.0 at the default target VMAF 96 and at 97.
 
-| Source material | Auto-CQ | Before | After | Saved |
-|---|---|---|---|---|
-| 1080p · 25 fps · 10.0 Mbit/s · 38 min | CQ 28 · target reached · VMAF 96.6 | 2 884 MB | 1 005 MB | **−65 %** |
-| 4K → 1080p · 30 fps · 10.4 Mbit/s · 41 min | CQ 30 · target reached · VMAF 96.7 | 3 157 MB | 758 MB | **−76 %** |
-| 1080p · 60 fps · 7.0 Mbit/s · 64 min | CQ 32 · cost cap · VMAF 89.5 | 3 375 MB | 1 331 MB | **−61 %** |
-| 1080p · 60 fps · 6.3 Mbit/s · 63 min | CQ 31 · cost cap · VMAF 89.7 | 2 956 MB | 1 289 MB | **−56 %** |
-| 1080p · 60 fps · 6.4 Mbit/s · 22 min | CQ 31 · cost cap · VMAF 91.6 | 1 060 MB | 444 MB | **−58 %** |
-| 1080p · 60 fps · 6.5 Mbit/s · 24 min | CQ 31 · cost cap · VMAF 92.8 | 1 154 MB | 500 MB | **−57 %** |
-| 1080p · 30 fps · 3.4 Mbit/s · 16 min | CQ 31 · cost cap · VMAF 92.3 | 401 MB | 183 MB | **−54 %** |
-| 1080p · 25 fps · 2.9 Mbit/s · 13 min | CQ 32 · cost cap · VMAF 93.7 | 284 MB | 118 MB | **−58 %** |
-| 1080p · 25 fps · 3.4 Mbit/s · 10 min | CQ 30 · quality plateau · VMAF 90.3 | 248 MB | 157 MB | **−37 %** |
-| **Whole batch (9 files)** | | **15 519 MB** | **5 785 MB** | **−9 734 MB (−62 %)** |
+| Source material | 1.34.0 (bitrate caps) | 2.0.0 · target 96 (default) | 2.0.0 · target 97 |
+|---|---|---|---|
+| 1080p · 30 fps · 11.7 Mbit/s · 48 min | CQ 37 · VMAF 97.1 | CQ 38 · VMAF 96.3 · re-encoded, ~79 % smaller | CQ 36 · VMAF 97.3 · re-encoded, **−81 %** (4 154 → 776 MB) |
+| 1080p · 60 fps · 10.7 Mbit/s · 19 min | CQ 32 · VMAF 96.0 | CQ 33 · VMAF 96.4 · re-encoded, ~35 % smaller | CQ 31 · VMAF 97.2 · re-encoded, **−23 %** (1 507 → 1 165 MB) |
+| 1080p · 30 fps · 3.1 Mbit/s · 53 min | CQ 32 · VMAF 92.0 | CQ 35 · VMAF 96.2 · re-encoded, ~28 % smaller | CQ 33 · VMAF 97.2 · repackaged: only ~16 % smaller |
+| 1080p · 60 fps · 12.2 Mbit/s · 40 min | CQ 32 · VMAF 91.7 | CQ 30 · VMAF 96.1 · repackaged: only ~2 % smaller | CQ 27 · VMAF 97.3 · repackaged: would grow ~9 % |
+| 1080p · 60 fps · 12.2 Mbit/s · 32 min | CQ 32 · VMAF 91.5 | CQ 29 · VMAF 96.5 · repackaged: would grow ~2 % | CQ 27 · VMAF 97.4 · repackaged: would grow ~21 % |
+| 720p · 30 fps · 2.7 Mbit/s · 5 min clip | CQ 28 · VMAF 96.7 (measured at 720p) | CQ 29 · VMAF 96.4 · repackaged: only ~16 % smaller | CQ 27 · VMAF 97.2 · repackaged: only ~5 % smaller |
+| 480p · 30 fps · 1.5 Mbit/s · 5 min clip | CQ 36 · VMAF 96.7 (measured at 480p) | repackaged: below 720p | repackaged: below 720p |
 
-**Reading the middle column.** *CQ* is the quality dial: the lower the number, the more bits the encoder spends. Most tools make you pick one value for everything; NVENCForge measures the right one for each file, scored with *VMAF* (a 0–100 picture-quality score, where 100 means identical to the source). Three things can end that search, and the log always names the one that did:
+**Reading the table.** *CQ* is the quality dial: the lower the number, the more bits the encoder spends. NVENCForge measures the right one for each file, scored with *VMAF* (a 0–100 picture-quality score, where 100 means identical to the source).
 
-- **target reached** — the measured CQ hits the quality target, 97 by default.
-- **cost cap** — reaching the target would have cost more than 45 % of the source's own bitrate, so the search stopped one step earlier. That limit is a setting of yours (`autoCQMaxSourcePercent`), and `0` switches it off.
-- **quality plateau** — the file was already compressed so hard that extra bits stopped buying picture. Here the cap was deliberately *not* applied: even CQ 34 would still spend 47 % of that source, so enforcing a limit would have cost quality without saving anything.
+The 1.34.0 column is the uncomfortable part: on four of the five films the bitrate caps, not the quality search, decided the picture — its two test settings (CQ 24 and CQ 32) scored *exactly* the same, because the cap cut both down to the same size. Three of those films came out at VMAF 91–92 without anyone having asked for it.
 
-So seven of these nine files stayed below the quality target **on purpose**. Take the 64-minute row: hitting VMAF 97 would have meant CQ 30 and half of the source's bitrate, so the search settled on CQ 32 at 38 % — a few VMAF points traded for a third of the file size. Set the cap to `0` and those same files chase the target instead, and come out bigger.
+2.0.0 has no caps. Every re-encode holds the target, and a file that would not get at least 20 % smaller (`minSavePercent`) is repackaged losslessly instead — the picture stays exactly as it is. Values marked **~** are the saving the analysis predicted before encoding (from a size probe across the whole film wherever it was close to the limit); the two bold results were encoded in full and landed at 23 % (predicted 23 %) and 81 % (predicted 76 %).
 
-A reality check on these figures: the encoder is CQ-based (constant quality) in every mode, so a file shrinks to whatever the measured quality level needs. Bulky or inefficiently encoded sources give up a lot, already-lean ones give up little, and some get skipped or repackaged entirely because re-encoding wouldn't help them at all. That skip logic is a feature, not a shortcoming. In the default mode (no flags) material above 1080p is also downscaled to 1080p — that is where the −76 % row comes from.
+Grainy 60 fps films are the telling case: to really look like their source they need about as many bits as the source already spends, so re-encoding them would only cost picture. That is also why the default target is 96 — at 97 only two of the five films were worth re-encoding, at 96 three.
+
+A reality check on these figures: the encoder is CQ-based (constant quality) in every mode, so a file shrinks to whatever the measured quality level needs. Bulky or inefficiently encoded sources give up a lot, already-lean ones give up little, and many get repackaged instead because re-encoding wouldn't help them. That is a feature, not a shortcoming. In the default mode (no flags) material above 1080p is also downscaled to 1080p.
 
 > **A word of honesty:** NVENCForge re-encodes, and re-encoding is lossy. It shines on bulky, already-compressed or inefficient files where the space saving is worth a quality hit you won't notice in normal playback. It is **not** an archival tool: keep untouched masters of anything irreplaceable. Originals are moved aside into an `originals` folder, never deleted — but treat that as a safety net, not a backup.
 
@@ -114,8 +111,8 @@ A reality check on these figures: the encoder is CQ-based (constant quality) in 
 
 Short answer: **yes — and never bigger.** Before touching anything, NVENCForge reads each file and picks one of two paths:
 
-- **Worth re-encoding?** It shrinks the video at a constant quality level, with a safety cap calculated from the source's own bitrate (it aims for clearly below the original). So a real conversion is reliably **smaller than the source** — and if a result ever came out bigger, it's thrown away automatically.
-- **Already lean?** Some files are so efficiently compressed that re-encoding would only make them *bigger* (yes, that really happens). NVENCForge spots this up front and simply repackages the file in seconds instead of wasting minutes of GPU time on a pointless encode.
+- **Worth re-encoding?** The quality analysis also predicts how much smaller the whole file gets. Only when that is at least **20 %** (`minSavePercent`) is the video re-encoded, at a constant quality level. Close to that limit, ten more spots across the film are encoded to be sure, and the finished file is checked once more — a result that misses the minimum is thrown away automatically. (A 4K file that is scaled down to 1080p only has to come out smaller at all: the smaller picture is what you asked for.)
+- **Not worth it?** Some files are so efficiently compressed that re-encoding would barely help or even make them *bigger* (yes, that really happens). NVENCForge then simply repackages the file losslessly in seconds — the picture stays exactly as it is. Videos below 720p and sources that are already at the bitrate floor of their resolution take this path without any measuring.
 
 You can tell the two apart at a glance by the filename:
 
@@ -130,7 +127,7 @@ The finished files land in an `output` subfolder, and each source that was conve
 
 ## ✨ What NVENCForge does
 
-- 🧠 **Smart, not brute-force.** Probes every file first: already-efficient videos are remuxed or skipped instead of re-encoded. Quality is constant (CQ), and a per-file bitrate cap derived from the source keeps every re-encode reliably **smaller than the original** — never bigger, with no fixed-bitrate butchering.
+- 🧠 **Smart, not brute-force.** Probes every file first: videos that would not get at least 20 % smaller are repackaged losslessly instead of re-encoded. Quality is constant (CQ) with **no bitrate cap** — the measured quality target alone decides the picture, so every re-encode is both **smaller than the original** and as good as you asked for.
 - 🎚️ **Auto-CQ — the right quality level, measured per file.** Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; see [Auto-CQ](#auto-cq).
 - ⚡ **The picture stays on the graphics card.** 4K sources are decoded **and** downscaled on the GPU (NVDEC + `scale_cuda`, Lanczos) instead of being shuttled through system memory. Decoding is **bit-identical** — verified by comparing frame hashes, not by eyeballing it. Sources above a configurable bitrate ceiling stay on the CPU on purpose, and any decoder hiccup silently falls back.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected by their transfer function. Colour tags are copied straight from the source, **never fabricated** — a made-up value is exactly what has broken HDR conversions in the past.
@@ -155,11 +152,14 @@ Before each encode, a short per-file analysis runs — typically well under a mi
 
 1. **Scan.** The bitrate profile is read *without decoding*, and short sample windows are placed on the demanding scenes. The hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels using *exactly* the settings of the real encode, then scored with **VMAF** (Netflix's perceptual quality metric, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** The CQ that hits the target (default: VMAF 97) is derived from the anchors — and then confirmed with one more real measurement. No blind trust in interpolation.
+3. **Pick & verify.** The CQ that hits the target (default: VMAF 96) is derived from the anchors — and then measured itself. The target is a **floor**: if the pick misses it, the next steps are measured until one holds it; if it clears it by a wide margin, one step thriftier is tried. No blind trust in interpolation.
+4. **Worth it?** The same samples predict how much smaller the whole file gets. Below `minSavePercent` (20 % by default) the file is repackaged losslessly instead — see [Will my files actually get smaller?](#-will-my-files-actually-get-smaller)
 
-Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum. On such files that routinely saves a third of the size at no visible cost. And it never buys quality nobody can see: once one more CQ step gains too little VMAF to justify the space it costs, the search stops there. That test runs both ways: quality is only given up when the file really gets smaller. On a source that is already squeezed dry, four CQ steps were measured to buy 1 % of file size for 0.7 VMAF — there it keeps the picture instead.
+Pictures smaller than 1080p are measured the way they look on a Full HD screen: both sides are enlarged to 1080p before the comparison. Measured in their own small size, they score far better than they look full-screen (720p: 96.2 in its own size against 92.9 enlarged).
 
-Grainy or very busy films are the opposite case — the target *is* reachable there, just expensive: film grain is random detail, so the encoder has to pay for it frame after frame while VMAF rewards it like real picture content. That is what `autoCQMaxSourcePercent` is for: it puts a spending limit on the search — `45` by default, meaning the search never uses more than 45 % of the source bitrate. Whenever it steps in, the log says so, and `0` switches it off. Files that were already compressed hard are deliberately left alone — they need a *bigger* share of their own bitrate, not a smaller one, so a limit they can't meet would only cost picture quality without saving anything.
+Auto-CQ is also honest about its limits: on heavily pre-compressed sources the reachable quality **saturates** below the target — no CQ can restore detail that's already gone. Rather than pointlessly escalating to expensive quality levels, it detects the plateau and moves to cheaper ones that provably stay near the reachable maximum — every step confirmed by a real measurement. And it never buys quality nobody can see: once one more CQ step gains too little VMAF to justify the space it costs, the search stops there. That test runs both ways: quality is only given up when the file really gets smaller. On a source that is already squeezed dry, four CQ steps were measured to buy 1 % of file size for 0.7 VMAF — there it keeps the picture instead.
+
+Grainy or very busy films are the opposite case — the target *is* reachable there, just expensive: film grain is random detail, so the encoder has to pay for it frame after frame. Since 2.0.0 there is deliberately **no bitrate cap** for that: a cap can only push the picture below the target you asked for. Such a file is re-encoded at the target when that still saves the minimum — and repackaged untouched when it does not.
 
 For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 
@@ -194,8 +194,7 @@ NVENCForge.exe -join [video + audio/subtitle files]
 |---|---|
 | *(none)* | Convert every supported video in the current folder |
 | `-help` / `-h` / `-?` | Print the complete option list and exit — no download, no GPU probe |
-| `-NNNN` | Max target bitrate in kbps (e.g. `-10000`) |
-| `-orig` / `-original` | Keep original resolution (no 1080p downscale), raised bitrate cap |
+| `-orig` / `-original` | Keep original resolution (no 1080p downscale) |
 | `-downscale` | Scale down as configured after all, even if `keepResolution=true` |
 | `-copyaudio` / `-ca` | Copy all audio 1:1, no AAC re-encode |
 | `-aac` | Re-encode audio to AAC where needed, even if `audioMode=copy` |
@@ -272,16 +271,16 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 Everything lives in `NVENCForge_Config.ini` next to the EXE — auto-created, and **you don't have to touch it at all.** The defaults are the measured ones. An invalid value is reset individually in the file with a warning, leaving your comments and everything else untouched. Settings added by a newer version are filled in automatically at their proper place, so an old config file never quietly misses a feature — your previous file is kept as `.bak`.
 
-The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
+The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `minSavePercent`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
 
 **Since 1.23.0 the basic decisions live there too** — `codec`, `container`, `bitDepth`, `audioMode`, `keepResolution` and `keepSource`. Those used to exist only as a command-line switch, so "always AV1" or "always MP4" had to be repeated on every run. Each of them has a switch *and* a counter-switch (`-av1`/`-h265`, `-mp4`/`-mkv`, `-8bit`/`-10bit`, `-copyaudio`/`-aac`, `-original`/`-downscale`, `-keep`/`-nokeep`), so a single run can go either way.
 
-The three worth knowing about:
+The four worth knowing about:
 
 | Key | Default | In one line |
 |---|---|---|
-| `autoCQTargetVMAF` | `97` | The quality target Auto-CQ aims for |
-| `autoCQMaxSourcePercent` | `45` | Spending limit for Auto-CQ, as a share of the source bitrate. Keeps grainy films from costing half the original; already-compressed sources are left alone, `0` switches it off |
+| `autoCQTargetVMAF` | `96` | The quality target Auto-CQ aims for — a floor, not an average |
+| `minSavePercent` | `20` | How much smaller a file must get to be re-encoded; anything less is repackaged losslessly. `0` only rejects results that come out larger |
 | `retireMode` | `folder` | Where originals go: an `originals` folder next to the source (instant, nothing deleted), or `recyclebin` |
 | `gpuDecode` | `true` | Decode on the GPU; bit-identical, just faster. Sources above `gpuDecodeMaxMbit` (50) use the CPU on purpose |
 

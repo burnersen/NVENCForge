@@ -45,7 +45,7 @@ func TestAQStrengthReachesEncoders(t *testing.T) {
 	appSettings.nvencLookahead = 32
 	nvencAdvancedAQ = true
 
-	hevc := strings.Join(buildNVENCOptsWithCQ(30, "8000k", "16000k", 240), " ")
+	hevc := strings.Join(buildNVENCOptsWithCQ(30, 240), " ")
 	if !strings.Contains(hevc, "-aq-strength 5") {
 		t.Errorf("H.265 must pass the configured AQ strength\n%s", hevc)
 	}
@@ -53,7 +53,7 @@ func TestAQStrengthReachesEncoders(t *testing.T) {
 		t.Errorf("H.265 still carries the old hard-wired 8\n%s", hevc)
 	}
 
-	av1 := strings.Join(buildAV1OptsWithCQ(32, "6000k", "12000k", 240), " ")
+	av1 := strings.Join(buildAV1OptsWithCQ(32, 240), " ")
 	if !strings.Contains(av1, "-aq-strength 5") {
 		t.Errorf("AV1 must pass the configured AQ strength\n%s", av1)
 	}

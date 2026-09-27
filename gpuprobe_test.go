@@ -178,13 +178,13 @@ func TestRefModeReachesEncoder(t *testing.T) {
 	appSettings.bFrames = 4
 
 	nvencBFrameRefMode = true
-	with := strings.Join(buildNVENCOptsWithCQ(30, "8000k", "16000k", 240), " ")
+	with := strings.Join(buildNVENCOptsWithCQ(30, 240), " ")
 	if !strings.Contains(with, "-b_ref_mode 2") {
 		t.Errorf("a capable card must still get -b_ref_mode\n%s", with)
 	}
 
 	nvencBFrameRefMode = false
-	without := strings.Join(buildNVENCOptsWithCQ(30, "8000k", "16000k", 240), " ")
+	without := strings.Join(buildNVENCOptsWithCQ(30, 240), " ")
 	if strings.Contains(without, "-b_ref_mode") {
 		t.Errorf("-b_ref_mode must disappear when the GPU rejects it\n%s", without)
 	}

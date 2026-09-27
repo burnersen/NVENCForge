@@ -33,9 +33,9 @@ func TestBuildCPUEncoderOpts(t *testing.T) {
 	appSettings.cpuAV1Preset = 6
 	appSettings.cpuThreads = 0
 
-	x265 := strings.Join(buildX265OptsWithCQ(19, "8000k", "16000k", 120), " ")
+	x265 := strings.Join(buildX265OptsWithCQ(19, 120), " ")
 	for _, want := range []string{
-		"-c:v libx265", "-crf 19", "-maxrate 8000k", "-bufsize 16000k",
+		"-c:v libx265", "-crf 19",
 		"-profile:v main10", "-pix_fmt yuv420p10le", "-preset fast",
 		"-g 120", "-fps_mode cfr",
 	} {
@@ -51,9 +51,9 @@ func TestBuildCPUEncoderOpts(t *testing.T) {
 		}
 	}
 
-	svt := strings.Join(buildSVTAV1OptsWithCQ(24, "6000k", "12000k", 96), " ")
+	svt := strings.Join(buildSVTAV1OptsWithCQ(24, 96), " ")
 	for _, want := range []string{
-		"-c:v libsvtav1", "-crf 24", "-maxrate 6000k", "-bufsize 12000k",
+		"-c:v libsvtav1", "-crf 24",
 		"-pix_fmt yuv420p10le", "-preset 6", "-g 96",
 	} {
 		if !strings.Contains(svt, want) {
@@ -63,6 +63,12 @@ func TestBuildCPUEncoderOpts(t *testing.T) {
 	// SVT-AV1 has no profile option; passing one aborts the encode.
 	if strings.Contains(svt, "-profile") {
 		t.Errorf("svt opts must not set a profile\n%s", svt)
+	}
+	// 2.0.0: no bitrate cap on any encoder — the CRF alone decides the picture.
+	for _, opts := range []string{x265, svt} {
+		if strings.Contains(opts, "-maxrate") || strings.Contains(opts, "-bufsize") {
+			t.Errorf("CPU encoder still carries a bitrate cap\n%s", opts)
+		}
 	}
 }
 
@@ -74,18 +80,18 @@ func TestCPUThreadLimit(t *testing.T) {
 	defer func() { appSettings = prev }()
 
 	appSettings.cpuThreads = 0
-	if got := strings.Join(buildX265OptsWithCQ(19, "8000k", "16000k", 120), " "); strings.Contains(got, "-threads") {
+	if got := strings.Join(buildX265OptsWithCQ(19, 120), " "); strings.Contains(got, "-threads") {
 		t.Errorf("cpuThreads=0 must not emit -threads\n%s", got)
 	}
-	if got := strings.Join(buildSVTAV1OptsWithCQ(24, "6000k", "12000k", 96), " "); strings.Contains(got, "lp=") {
+	if got := strings.Join(buildSVTAV1OptsWithCQ(24, 96), " "); strings.Contains(got, "lp=") {
 		t.Errorf("cpuThreads=0 must not emit lp=\n%s", got)
 	}
 
 	appSettings.cpuThreads = 8
-	if got := strings.Join(buildX265OptsWithCQ(19, "8000k", "16000k", 120), " "); !strings.Contains(got, "-threads 8") {
+	if got := strings.Join(buildX265OptsWithCQ(19, 120), " "); !strings.Contains(got, "-threads 8") {
 		t.Errorf("x265 opts missing -threads 8\n%s", got)
 	}
-	if got := strings.Join(buildSVTAV1OptsWithCQ(24, "6000k", "12000k", 96), " "); !strings.Contains(got, "lp=8") {
+	if got := strings.Join(buildSVTAV1OptsWithCQ(24, 96), " "); !strings.Contains(got, "lp=8") {
 		t.Errorf("svt opts missing lp=8\n%s", got)
 	}
 }
@@ -115,7 +121,7 @@ func TestActiveBackendSelection(t *testing.T) {
 	}
 	for _, c := range cases {
 		withCPUMode(c.cpu, func() {
-			opts := strings.Join(activeVideoOptsBuilder(c.av1)(20, "8000k", "16000k", 120), " ")
+			opts := strings.Join(activeVideoOptsBuilder(c.av1)(20, 120), " ")
 			if !strings.Contains(opts, c.wantEncStr) {
 				t.Errorf("%s: encoder %q not found\n%s", c.name, c.wantEncStr, opts)
 			}
@@ -153,8 +159,8 @@ func TestCPUAutoCQScales(t *testing.T) {
 			t.Errorf("%s: fallback %d outside clamp [%d, %d]",
 				sc.codecLabel, cq, sc.clampMin, sc.clampMax)
 		}
-		if sc.saturationSlope <= 0 || sc.climbToleranceFactor <= 0 || sc.maxStepDown <= 0 {
-			t.Errorf("%s: slope/factor/stepDown must all be positive", sc.codecLabel)
+		if sc.saturationSlope <= 0 || sc.maxStepDown <= 0 {
+			t.Errorf("%s: slope and stepDown must both be positive", sc.codecLabel)
 		}
 		if sc.minGainPerStep <= 0 {
 			t.Errorf("%s: minGainPerStep must be positive", sc.codecLabel)
@@ -178,13 +184,6 @@ func TestCPUAutoCQScales(t *testing.T) {
 	if svtav1AutoCQScale.minGainPerStep != 0.12 || svtav1AutoCQScale.saturationSlope != 0.04 {
 		t.Errorf("svt minGainPerStep/saturationSlope = %.2f/%.2f, want 0.12/0.04 (SVT-AV1 4.2 step width)",
 			svtav1AutoCQScale.minGainPerStep, svtav1AutoCQScale.saturationSlope)
-	}
-	// The climb may not spend more picture for size than before: the step-width
-	// rule would have raised it to 2.5, which contradicts the user's call to
-	// value the picture over the last percent of space.
-	if svtav1AutoCQScale.climbToleranceFactor != 1.5 {
-		t.Errorf("svt climbToleranceFactor = %.2f, want 1.5 (kept on purpose)",
-			svtav1AutoCQScale.climbToleranceFactor)
 	}
 	// Same reasoning as the av1_nvenc fallback: an unmeasurable clip must land
 	// near the quality target, not on the lean manual value.
@@ -212,10 +211,9 @@ func TestCPUSampleEncodesMatchRealEncode(t *testing.T) {
 			av1  bool
 			want string
 		}{{false, "-c:v libx265"}, {true, "-c:v libsvtav1"}} {
-			real := strings.Join(activeVideoOptsBuilder(c.av1)(20, "8000k", "16000k", 120), " ")
+			real := strings.Join(activeVideoOptsBuilder(c.av1)(20, 120), " ")
 			sample := strings.Join(buildAutoCQEncodeArgs("C:\\videos\\in.mp4", windows, nil, chain,
-				30000, 1001, 20, "8000k", "16000k", 120, "sample.mkv",
-				activeAutoCQScale(c.av1).buildOpts), " ")
+				30000, 1001, 20, 120, "sample.mkv", activeAutoCQScale(c.av1).buildOpts), " ")
 			if !strings.Contains(sample, real) {
 				t.Errorf("sample encode does not carry the real options\nreal:   %s\nsample: %s", real, sample)
 			}

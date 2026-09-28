@@ -15,12 +15,12 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 [![NVIDIA NVENC](https://img.shields.io/badge/GPU-NVIDIA%20NVENC-76B900?logo=nvidia)](#-requirements)
 [![AV1 Ready](https://img.shields.io/badge/AV1-RTX%2040%2B-orange)](TECHNICAL.md#av1-depth)
 [![Written in Go](https://img.shields.io/badge/Made%20with-Go-00ADD8?logo=go)](TECHNICAL.md#building)
-[![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue)](#-license)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue)](#-license)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/burnersen)
 
 **[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
 
-*Free for personal & noncommercial use — [source-available](#-license), never for resale.*
+*Free for everyone, at home or at work — open source under the [GPLv3](#-license).*
 
 <img src=".github/screenshot.png" alt="NVENCForge converting a 1080p clip: Auto-CQ measures three sample windows, settles on CQ 32 for a VMAF target of 95.5, and the 263 MB source is heading for about 154 MB - 41 percent smaller" width="840">
 
@@ -135,7 +135,7 @@ The finished files land in an `output` subfolder, and each source that was conve
 - 🚦 **Resilient by design.** Per-file locks, a stall watchdog for frozen encodes, and a multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down a whole batch.
 - 👯 **Parallel out of the box.** Start the same command in two terminals; instances lock files individually and split the work automatically.
 - 🎛️ **DaVinci-Resolve-safe audio.** DTS, TrueHD, EAC3, FLAC, Opus & >5.1 layouts become AAC that Resolve actually imports — or stay 1:1 with `-copyaudio`.
-- 🔓 **Source-available.** The complete source of every release lives [right here on GitHub](https://github.com/burnersen/NVENCForge) — read it, audit it, or build it yourself.
+- 🔓 **Open source.** The complete source of every release lives [right here on GitHub](https://github.com/burnersen/NVENCForge) under the GPLv3 — read it, audit it, change it, or build it yourself.
 - 🌍 **Unicode-safe filename cleanup.** `Movie (2016) [BluRay] x264.mkv` → `Movie.2016.h265.mkv`. Every script in the world survives, release-group noise doesn't.
 
 > The full mechanics behind each of these — all eight categories of safety nets — are on the **[technical page →](TECHNICAL.md#under-the-hood)**
@@ -318,12 +318,26 @@ NVENCForge is a personal hobby project, built over two months of evenings to fit
 
 ## 📜 License
 
-NVENCForge is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
-Free to use, study, modify and share for any **noncommercial** purpose: personal use, hobby, education, research. **Commercial use, resale or bundling into paid products is not permitted** without a separate license from the author. Want a commercial license? Open an issue or reach out.
+NVENCForge is free software under the [GNU General Public License, version 3](LICENSE) — that version only (`GPL-3.0-only`).
+
+- **Use it:** Anyone may use NVENCForge free of charge, at home or at work, and read, change and share its source code.
+- **The one condition:** Whoever passes on NVENCForge or parts of it — unchanged, changed or built into a program of their own — must include the complete source code and pass everything on under the same license. A closed, paid product with NVENCForge inside is therefore not possible.
+- **Free of charge:** NVENCForge is and stays free. The official source is [github.com/burnersen/NVENCForge](https://github.com/burnersen/NVENCForge) — anyone asking money for NVENCForge is selling you what you can get here for free.
+- **A separate license for companies:** Want to build NVENCForge into a product that is not meant to be under the GPLv3? You can ask the author for a separate license — just [open an issue](https://github.com/burnersen/NVENCForge/issues).
 
 ### FFmpeg
 
 NVENCForge does **not** bundle FFmpeg. On first run it downloads an official static build from the [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) project (GPL-licensed) onto your machine, or you provide your own copy. FFmpeg is a separate work by the [FFmpeg project](https://ffmpeg.org) under its own license; NVENCForge invokes it as an external program. This software uses libraries from the FFmpeg project under the GPL.
+
+### Third-party components
+
+The exe is built with these Go libraries. Each keeps its own license, and all of them are compatible with the GPLv3:
+
+- **MIT License:** [pterm](https://github.com/pterm/pterm) with [atomicgo/cursor](https://github.com/atomicgo/cursor), [atomicgo/keyboard](https://github.com/atomicgo/keyboard) and [atomicgo/schedule](https://github.com/atomicgo/schedule), [gookit/color](https://github.com/gookit/color), [lithammer/fuzzysearch](https://github.com/lithammer/fuzzysearch), [mattn/go-runewidth](https://github.com/mattn/go-runewidth), [rivo/uniseg](https://github.com/rivo/uniseg), [xo/terminfo](https://github.com/xo/terminfo)
+- **Apache License 2.0:** [containerd/console](https://github.com/containerd/console)
+- **BSD 3-Clause License:** the [Go standard library](https://go.dev/LICENSE) and [golang.org/x/sys](https://github.com/golang/sys), [x/term](https://github.com/golang/term), [x/text](https://github.com/golang/text)
+
+Their copyright notices and full license texts are in the repositories linked above.
 
 ---
 
@@ -333,7 +347,7 @@ NVENCForge does **not** bundle FFmpeg. On first run it downloads an official sta
 
 **Please don't be shy** — [open an issue](../../issues), even a one-liner. A quick "it just worked, thanks", a "this part confused me", a bug report, a wish for the next version: it's all welcome, and no question is too small. Honestly, even knowing the tool is being used out there is motivating. If you're not sure how to start, just say hi.
 
-Forks and pull requests for noncommercial improvements are very welcome too. When reporting a bug, the console output helps a lot — run with `-debug` for the full detail.
+Forks and pull requests are very welcome too. When reporting a bug, the console output helps a lot — run with `-debug` for the full detail.
 
 ---
 
@@ -345,7 +359,7 @@ NVENCForge is free and made in my spare time, on my own hardware and electricity
 
 ## ⚠️ Disclaimer
 
-NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved into an `originals` folder after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See the *No Liability* clause of the [license](LICENSE.md).
+NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved into an `originals` folder after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See sections 15 and 16 of the [license](LICENSE).
 
 ---
 

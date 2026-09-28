@@ -1,8 +1,8 @@
 //go:build windows && amd64
 
-// NVENCForge — Required Notice: Copyright (c) 2026 burnersen — NVENCForge
-// Licensed under the PolyForm Noncommercial License 1.0.0 (non-commercial use only).
-// Full terms: LICENSE.md · https://polyformproject.org/licenses/noncommercial/1.0.0
+// NVENCForge (https://github.com/burnersen/NVENCForge)
+// Copyright (C) 2026 burnersen
+// SPDX-License-Identifier: GPL-3.0-only
 
 // NVENCForge — H265 Batch-Konverter + DaVinci Resolve Workflow + Split/Join
 //
@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "2.0.0"
+const appVersion = "2.0.1"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)

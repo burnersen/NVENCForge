@@ -1,8 +1,8 @@
 //go:build windows && amd64
 
-// NVENCForge — Required Notice: Copyright (c) 2026 burnersen — NVENCForge
-// Licensed under the PolyForm Noncommercial License 1.0.0 (non-commercial use only).
-// Full terms: LICENSE.md · https://polyformproject.org/licenses/noncommercial/1.0.0
+// NVENCForge (https://github.com/burnersen/NVENCForge)
+// Copyright (C) 2026 burnersen
+// SPDX-License-Identifier: GPL-3.0-only
 
 package main
 
@@ -448,6 +448,22 @@ OUTPUT & REQUIREMENTS
 
   Press Ctrl+C during a conversion to stop; the partial result is
   saved as a playable ".preview.mkv" instead of being discarded.
+
+LICENSE
+  NVENCForge - Copyright (C) 2026 burnersen
+  Free software under the GNU General Public License, version 3
+  only (GPL-3.0-only). Anyone may use it free of charge, at home
+  or at work, and study, change and share it. Whoever passes it
+  on - changed or not, or built into a program of their own -
+  must include the complete source code and keep the same
+  license. There is NO WARRANTY, to the extent permitted by law
+  (sections 15 and 16 of the license).
+
+  NVENCForge is and stays free. The official source is
+    https://github.com/burnersen/NVENCForge
+  Anyone asking money for NVENCForge is selling you what you can
+  get there for free. The full license text is the file LICENSE:
+    https://github.com/burnersen/NVENCForge/blob/main/LICENSE
 `
 
 // syncHelpFile writes the user-facing manual next to the executable and
@@ -583,5 +599,6 @@ func printConsoleHelp() {
 	option("-help, -h, -?, /?", "this list")
 	plain("NVENCForge_Help.txt", "the full manual, written next to the exe")
 	plain("NVENCForge_Config.ini", "all settings, with an explanation per entry")
+	plain("License", "GPLv3 (free software, no warranty) - details in the manual")
 	fmt.Println()
 }

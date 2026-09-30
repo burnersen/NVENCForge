@@ -687,10 +687,14 @@ func autoCQThriftyStep(sc autoCQScale, target float64, pick autoCQPoint, scoreAt
 
 const (
 	// autoCQSizeProbeSpots: how many stretches the size probe encodes across
-	// the whole film — CloudForge's figure (user's choice 2026-09-27). There,
-	// 3-5 analysis windows missed whole films by up to 13 points, always on
-	// the optimistic side, while evenly spread spots came within 2-5 points.
-	autoCQSizeProbeSpots = 10
+	// the whole film — CloudForge's figure. There, 3-5 analysis windows missed
+	// whole films by up to 13 points, always on the optimistic side, while
+	// evenly spread spots came within 2-5 points. Ten spots were not always
+	// enough: a film that grew harder towards its end came out at 80.0 % with
+	// ten and 86.8 % with twenty; the finished encode measured 85.7 %
+	// (CloudForge 0.16.0, 2026-09-29). Short films get fewer, see
+	// autoCQSizeProbeCount.
+	autoCQSizeProbeSpots = 20
 
 	// autoCQSizeProbeBand: how close (in percentage points) the first
 	// prediction has to lie to the minimum saving for the size probe to run.
@@ -754,6 +758,17 @@ func autoCQSizeProbeWindows(durationSec, length float64, count int) [][2]float64
 		windows = append(windows, [2]float64{start, length})
 	}
 	return windows
+}
+
+// autoCQSizeProbeCount returns how many size-probe stretches fit into the film
+// side by side: autoCQSizeProbeSpots, fewer when the film is too short for
+// them. Overlapping stretches would encode the same seconds twice and learn
+// nothing new from them. At least one stretch is always probed.
+func autoCQSizeProbeCount(durationSec, length float64) int {
+	if durationSec <= 0 || length <= 0 {
+		return 1
+	}
+	return max(1, min(autoCQSizeProbeSpots, int(durationSec/length)))
 }
 
 // ----------------------------------------------------------------------------
@@ -1487,8 +1502,9 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	// costs there against the source at exactly those seconds (0.42 = 42 %).
 	// Batches of autoCQSizeProbeBatch keep the number of decoders at what the
 	// analysis itself uses.
+	probeSpots := autoCQSizeProbeCount(stats.DurationSec, bucketLen)
 	sizeProbeShare := func(atCQ int) (float64, error) {
-		spots := autoCQSizeProbeWindows(stats.DurationSec, bucketLen, autoCQSizeProbeSpots)
+		spots := autoCQSizeProbeWindows(stats.DurationSec, bucketLen, probeSpots)
 		sourceKbps := autoCQWindowSourceKbps(profile, spots, bucketLen)
 		if sourceKbps <= 0 {
 			return 0, errors.New("no source bitrate profile for the probe spots")
@@ -1701,7 +1717,7 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 		}
 	}
 	if savingKnown && autoCQSizeProbeNeeded(saving, in.minSavePct) {
-		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: checking the size at %d spots...", autoCQSizeProbeSpots))
+		spinner.UpdateText(autoCQSpinnerText("Auto-CQ: checking the size at %d spots...", probeSpots))
 		share, perr := sizeProbeShare(cq)
 		switch {
 		case perr != nil && ctx.Err() != nil:
@@ -1714,7 +1730,7 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 			if probed, ok := autoCQExpectedSavingPercent(stats.FileSizeMB, videoKbps,
 				stats.DurationSec, share); ok {
 				savingSource = fmt.Sprintf("size probe at %d spots across the film; the analysis windows said %s",
-					autoCQSizeProbeSpots, autoCQSavingText(saving))
+					probeSpots, autoCQSavingText(saving))
 				saving = probed
 			}
 		}

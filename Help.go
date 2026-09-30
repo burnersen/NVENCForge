@@ -88,9 +88,10 @@ CONVERSION OPTIONS
                  original sound untouched. (alias: -ca)
                  Set audioMode=copy in the config file to make this
                  the permanent behaviour.
-  -aac           Re-encode to AAC where the target needs it after
-                 all, even when audioMode=copy stands in the config
-                 file. Counterpart to -copyaudio.
+  -aac           Re-encode the tracks DaVinci Resolve cannot read
+                 (AC3, DTS, TrueHD, FLAC ...) to AAC after all, even
+                 when audioMode=copy stands in the config file - in
+                 an MKV too. Counterpart to -copyaudio.
   -av1           Encode AV1 instead of H.265 (needs an RTX 40
                  series GPU or newer). Same quality at roughly
                  25-30% smaller files; output is ".av1.mkv".
@@ -151,9 +152,10 @@ CONVERSION OPTIONS
                  Auto-CQ and the file names.
                  It is much slower - roughly 40 minutes per hour of
                  1080p video on a modern 8-core CPU, clearly more
-                 on older machines. Speed, quality and how many
-                 cores may be used are set with the "cpu..." keys
-                 in the config file; "encoder=cpu" there makes CPU
+                 on older machines. Speed, quality, SVT-AV1's own
+                 tuning (tune, Variance Boost) and how many cores
+                 may be used are set with the "cpu..." keys in the
+                 config file; "encoder=cpu" there makes CPU
                  mode permanent. If no Nvidia card is found at
                  startup, NVENCForge offers CPU mode by itself
                  instead of refusing to run.
@@ -566,7 +568,7 @@ func printConsoleHelp() {
 	option("-original, -orig", "keep the source resolution (no downscale to 1080p)")
 	option("-downscale", "scale down as configured, even if keepResolution=true")
 	option("-copyaudio, -ca", "copy all audio tracks 1:1 (no AAC re-encode)")
-	option("-aac", "re-encode audio to AAC where needed, even if audioMode=copy")
+	option("-aac", "re-encode audio DaVinci cannot read to AAC, even if audioMode=copy")
 	option("-av1", "encode AV1 instead of H.265 (needs an RTX 40 or newer)")
 	option("-h265", "force H.265 for this run - beats -av1 and codec=av1")
 	option("-mp4", "write a .mp4 that plays almost everywhere, instead of .mkv")

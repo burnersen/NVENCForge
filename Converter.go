@@ -393,19 +393,50 @@ func attemptStep(idx, total int) string {
 	return fmt.Sprintf(" — retry %d/%d", idx+1, total)
 }
 
+// countAACTracks returns how many tracks the "copy" rungs still re-encode:
+// outside -copyaudio mode every track DaVinci Resolve cannot read goes to AAC
+// (needsAudioReencode), whatever the container.
+func countAACTracks(streams []AudioStreamInfo, pureCopy bool) int {
+	if pureCopy {
+		return 0
+	}
+	n := 0
+	for _, s := range streams {
+		if needsAudioReencode(s.Codec, s.Layout, s.Channels, s.SampleRate) {
+			n++
+		}
+	}
+	return n
+}
+
+// keptAudioText describes the sound of a "copy" rung the way it really comes
+// out. Until 2.1.0 it always said "audio 1:1", even while AC3 or DTS tracks
+// were being re-encoded to AAC.
+func keptAudioText(aacTracks, audioTracks int) string {
+	switch {
+	case aacTracks <= 0:
+		return "audio 1:1"
+	case aacTracks >= audioTracks:
+		return "audio → AAC (formats DaVinci Resolve cannot read)"
+	default:
+		return fmt.Sprintf("audio 1:1 except %d of %d tracks → AAC", aacTracks, audioTracks)
+	}
+}
+
 // buildCascadeAttempts assembles only the rungs that can actually differ for
 // this source: SUBS rungs need subtitles, AAC rungs need audio that is not in
 // -copyaudio mode, the VIDEO-ONLY rung needs audio it could drop. This avoids
-// re-running byte-identical FFmpeg calls after a failure.
-func buildCascadeAttempts(hasSubs, hasAudio, pureCopy bool) []cascadeAttempt {
+// re-running byte-identical FFmpeg calls after a failure. keptAudio is what the
+// "copy" rungs do to the sound (keptAudioText).
+func buildCascadeAttempts(hasSubs, hasAudio, pureCopy bool, keptAudio string) []cascadeAttempt {
 	var at []cascadeAttempt
 	if hasSubs {
-		at = append(at, cascadeAttempt{"SUBS+ACOPY", "subtitles kept, audio 1:1", true, true, false})
+		at = append(at, cascadeAttempt{"SUBS+ACOPY", "subtitles kept, " + keptAudio, true, true, false})
 		if hasAudio && !pureCopy {
 			at = append(at, cascadeAttempt{"SUBS+AAC", "subtitles kept, audio → AAC", false, true, false})
 		}
 	}
-	at = append(at, cascadeAttempt{"NO-SUBS+ACOPY", "no subtitles, audio 1:1", true, false, false})
+	at = append(at, cascadeAttempt{"NO-SUBS+ACOPY", "no subtitles, " + keptAudio, true, false, false})
 	if hasAudio && !pureCopy {
 		at = append(at, cascadeAttempt{"NO-SUBS+AAC", "no subtitles, audio → AAC", false, false, false})
 	}
@@ -1119,8 +1150,9 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// fix a broken video encode). A rung that exits 0 but fails validation
 	// counts as failed, so the next rung still gets its chance.
 	runCascade := func(buildArgs func(convJob) []string, stageName string) {
+		keptAudio := keptAudioText(countAACTracks(stats.AudioStreams, cfg.copyAudio), len(stats.AudioStreams))
 		attempts := buildCascadeAttempts(
-			len(stats.SubCodecs) > 0, len(stats.AudioStreams) > 0, cfg.copyAudio)
+			len(stats.SubCodecs) > 0, len(stats.AudioStreams) > 0, cfg.copyAudio, keptAudio)
 		subsFailed := false
 		videoFailed := false
 		audioModeFailed := map[bool]bool{}
@@ -2650,8 +2682,13 @@ func buildNVENCOptsWithCQ(cq int, gop int) []string {
 }
 
 // buildAV1OptsWithCQ mirrors buildNVENCOptsWithCQ for av1_nvenc. Differences:
-// own CQ scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), no
-// B-frame options (not exposed by av1_nvenc), AQ flags use hyphens.
+// own CQ scale (1-63, av1TargetCQ), no -profile (Main covers 8/10-bit), AQ
+// flags use hyphens, and no B-frame options: av1_nvenc does take -bf and
+// -b_ref_mode, but on its own already picks 5 B-frames with b_ref_mode middle —
+// the output was bit-identical to "-bf 5" (RTX 5070 Ti, 2026-09-30). Measured
+// at equal VMAF on two films, nothing beat that: -bf 6/7 +3 to +16 % size,
+// b_ref_mode 0 +20 %, -tf_level 4 +1 to +5 % at 40-65 % more time,
+// -lookahead_level 2 between -4 and +5 %.
 // -aq-strength shares the INI key with H.265 and was measured separately for
 // AV1 on 2026-08-15 (CQ 32, two sources): 8 -> 2 gave -4.2% and -24.2% size at
 // +0.47 / -0.23 VMAF, and the worst frame improved in both cases.
@@ -2713,10 +2750,42 @@ func buildSVTAV1OptsWithCQ(crf int, gop int) []string {
 		"-preset", strconv.Itoa(appSettings.cpuAV1Preset), "-fps_mode", "cfr",
 		"-g", strconv.Itoa(gop),
 	}
-	if appSettings.cpuThreads > 0 {
-		opts = append(opts, "-svtav1-params", "lp="+strconv.Itoa(appSettings.cpuThreads))
+	if params := svtAV1Params(appSettings); params != "" {
+		opts = append(opts, "-svtav1-params", params)
 	}
 	return opts
+}
+
+// svtTuningText fasst tune und Variance Boost für die Übersicht der aktiven
+// Einstellungen zusammen ("tune vq, Variance Boost 2/5" = Stärke 2, Oktil 5).
+func svtTuningText(s AppSettings) string {
+	boost := "Variance Boost off"
+	if s.cpuAV1VarianceBoost {
+		boost = fmt.Sprintf("Variance Boost %d/%d", s.cpuAV1VarianceBoostStrength, s.cpuAV1VarianceOctile)
+	}
+	return "tune " + s.cpuAV1Tune + ", " + boost
+}
+
+// svtAV1Params sammelt, was über -svtav1-params an SVT-AV1 geht. Was auf SVTs
+// eigenem Standard steht (tune psnr, Variance Boost aus, alle Kerne), wird gar
+// nicht übergeben — die Befehlszeile bleibt dann dieselbe wie vor 2.1.0. Mit
+// Variance Boost gehen Stärke und Oktil immer ausdrücklich mit, damit eine
+// neuere SVT-Fassung mit anderen Standardwerten nichts still verändert
+// (wie CloudForge 0.18.0).
+func svtAV1Params(s AppSettings) string {
+	var params []string
+	if s.cpuThreads > 0 {
+		params = append(params, "lp="+strconv.Itoa(s.cpuThreads))
+	}
+	if s.cpuAV1Tune == svtTuneVQ {
+		params = append(params, "tune=0")
+	}
+	if s.cpuAV1VarianceBoost {
+		params = append(params, "enable-variance-boost=1",
+			"variance-boost-strength="+strconv.Itoa(s.cpuAV1VarianceBoostStrength),
+			"variance-octile="+strconv.Itoa(s.cpuAV1VarianceOctile))
+	}
+	return strings.Join(params, ":")
 }
 
 // activeVideoOptsBuilder liefert den Options-Bauer des aktiven Backends für

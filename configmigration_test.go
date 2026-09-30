@@ -223,27 +223,81 @@ func TestRemoveRetiredEntries(t *testing.T) {
 	}
 }
 
-// TestRefreshStaleComments: der Text zu autoCQTargetVMAF nannte den
-// weggefallenen Kosten-Deckel — er wird durch den aktuellen ersetzt, der Wert
-// des Nutzers bleibt. Texte ohne Verweis bleiben, wie sie sind.
+// TestRefreshStaleComments: jede Erklärung eines bekannten Schlüssels, die von
+// der Vorlage abweicht, wird durch die aktuelle ersetzt — der Text zu
+// autoCQTargetVMAF nannte den weggefallenen Kosten-Deckel, die zu casStrength
+// und autoCQPlateauTolerance sind einfach älter. Die Werte des Nutzers und seine
+// eigene Notiz (durch eine Leerzeile getrennt) bleiben; weggefallene Schlüssel
+// fasst diese Stufe nicht an, die entfernt removeRetiredEntries.
 func TestRefreshStaleComments(t *testing.T) {
-	got, refreshed := refreshStaleComments(oldINI134, configBlocksFromTemplate(), retiredConfigKeys)
+	got, refreshed := refreshStaleComments(oldINI134, configBlocksFromTemplate())
 
-	if len(refreshed) != 1 || refreshed[0] != "autoCQTargetVMAF" {
-		t.Fatalf("aufgefrischt: %v, erwartet genau autoCQTargetVMAF", refreshed)
+	for _, key := range []string{"autoCQTargetVMAF", "casStrength", "autoCQPlateauTolerance"} {
+		if !contains(refreshed, key) {
+			t.Errorf("%s wurde nicht aufgefrischt (%v)", key, refreshed)
+		}
 	}
-	if strings.Contains(got, "hand in hand") {
-		t.Error("der veraltete Text zum VMAF-Ziel steht noch da")
+	for _, key := range retiredConfigKeys {
+		if contains(refreshed, key) {
+			t.Errorf("der weggefallene Schlüssel %s wurde aufgefrischt", key)
+		}
+	}
+	// Der alte casStrength-Text war EIN Satz direkt vor "Allowed" — der aktuelle
+	// beginnt genauso, geht aber weiter.
+	if strings.Contains(got, "hand in hand") || strings.Contains(got, "# Sharpening applied after downscaling.\n# Allowed") {
+		t.Errorf("ein veralteter Text steht noch da:\n%s", got)
 	}
 	if !strings.Contains(got, "The target is a floor") {
 		t.Errorf("der neue Text zum VMAF-Ziel fehlt:\n%s", got)
 	}
-	if !strings.Contains(got, "autoCQTargetVMAF=96.5") {
-		t.Error("der Wert des Nutzers wurde verändert")
+	for _, kept := range []string{"# meine Notiz", "autoCQTargetVMAF=96.5", "casStrength=0.3", "autoCQPlateauTolerance=3"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("%q ist verschwunden oder verändert:\n%s", kept, got)
+		}
 	}
-	// Die kurze Erklärung zu casStrength nennt nichts Entferntes und bleibt.
-	if !strings.Contains(got, "# Sharpening applied after downscaling.\n# Allowed") {
-		t.Error("eine Erklärung ohne Verweis wurde angefasst")
+
+	// Ein zweiter Durchlauf und eine Datei im Stand der Vorlage bleiben unberührt —
+	// sonst entstünde bei jedem Start eine neue Sicherung.
+	if again, more := refreshStaleComments(got, configBlocksFromTemplate()); again != got || len(more) != 0 {
+		t.Errorf("ein zweiter Durchlauf hat noch etwas geändert: %v", more)
+	}
+	current := buildDefaultConfigText()
+	if same, none := refreshStaleComments(current, configBlocksFromTemplate()); same != current || len(none) != 0 {
+		t.Errorf("eine aktuelle INI wurde angefasst: %v", none)
+	}
+}
+
+// TestRefreshStaleCommentsCatchesChangedTexts ist der Fall aus der INI des
+// Nutzers (30.09.2026): der Text zu cpuAV1Preset nannte noch "0 to 13", der zu
+// audioMode versprach AAC nur "where the target file needs it". Beide nennen
+// keinen entfernten Schlüssel und blieben bis 2.0.1 deshalb für immer stehen.
+func TestRefreshStaleCommentsCatchesChangedTexts(t *testing.T) {
+	old := "# What happens to the sound.\r\n" +
+		"# \"aac\" re-encodes to AAC where the target file needs it and copies the\r\n" +
+		"# track 1:1 where it does not.\r\n" +
+		"# Allowed: aac, copy   |   Default: aac\r\n" +
+		"audioMode=copy\r\n" +
+		"\r\n" +
+		"# Same idea for AV1 on the processor. 0 is slowest/best,\r\n" +
+		"# 13 is fastest. 6 is the sweet spot; above 8 quality drops off.\r\n" +
+		"# Allowed: 0 to 13   |   Default: 6\r\n" +
+		"cpuAV1Preset=9\r\n"
+
+	got, refreshed := refreshStaleComments(old, configBlocksFromTemplate())
+	if !contains(refreshed, "audioMode") || !contains(refreshed, "cpuAV1Preset") {
+		t.Fatalf("aufgefrischt: %v, erwartet audioMode und cpuAV1Preset", refreshed)
+	}
+	if strings.Contains(got, "where the target file needs it") || strings.Contains(got, "0 to 13") {
+		t.Errorf("ein veralteter Text steht noch da:\n%s", got)
+	}
+	if !strings.Contains(got, "DaVinci Resolve cannot read") {
+		t.Errorf("der neue Text zu audioMode fehlt:\n%s", got)
+	}
+	if !strings.Contains(got, "audioMode=copy\r\n") || !strings.Contains(got, "cpuAV1Preset=9\r\n") {
+		t.Errorf("ein Wert des Nutzers wurde verändert:\n%s", got)
+	}
+	if strings.Contains(strings.ReplaceAll(got, "\r\n", ""), "\n") {
+		t.Error("in eine CRLF-Datei wurden nackte LF-Zeilen geschrieben")
 	}
 }
 
@@ -262,7 +316,7 @@ func TestUpdateConfigEntriesMigrates134(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unerwarteter Fehler: %v", err)
 	}
-	if len(update.removed) != 3 || len(update.refreshed) != 1 || !contains(update.added, "minSavePercent") {
+	if len(update.removed) != 3 || !contains(update.refreshed, "autoCQTargetVMAF") || !contains(update.added, "minSavePercent") {
 		t.Errorf("Bilanz stimmt nicht: %+v", update)
 	}
 	backup, err := os.ReadFile(path + configBackupSuffix)

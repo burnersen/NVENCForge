@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "2.0.1"
+const appVersion = "2.1.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1814,6 +1814,9 @@ func printActiveSettings(cfg *AppConfig) {
 		}
 		addQuality("CPU preset", presetVal)
 		addQuality("Threads", threadsVal)
+		if cfg != nil && cfg.av1 {
+			addQuality("SVT tuning", svtTuningText(s))
+		}
 	} else {
 		addQuality("NVENC preset", s.nvencPreset)
 		addQuality("AQ strength", fmt.Sprintf("%d", s.aqStrength))

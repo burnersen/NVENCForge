@@ -238,6 +238,40 @@ func TestAutoCQSizeProbeWindows(t *testing.T) {
 	}
 }
 
+// TestAutoCQSizeProbeCount: twenty stretches for a normal film (CloudForge
+// 0.16.0 measured ten as too few), fewer for a short one, so no two stretches
+// cover the same seconds — overlapping ones would encode those seconds twice.
+func TestAutoCQSizeProbeCount(t *testing.T) {
+	cases := []struct {
+		durationSec, length float64
+		want                int
+	}{
+		{3600, 8, 20},
+		{160, 8, 20}, // exactly twenty stretches side by side
+		{159, 8, 19},
+		{100, 8, 12},
+		{5, 8, 1}, // shorter than one stretch: still one probe
+		{0, 8, 1},
+		{100, 0, 1},
+	}
+	for _, c := range cases {
+		if got := autoCQSizeProbeCount(c.durationSec, c.length); got != c.want {
+			t.Errorf("%.0f s film, %.0f s stretches: %d spots, want %d",
+				c.durationSec, c.length, got, c.want)
+		}
+	}
+
+	for _, duration := range []float64{100, 159, 160, 1000, 7200} {
+		windows := autoCQSizeProbeWindows(duration, 8, autoCQSizeProbeCount(duration, 8))
+		for i := 1; i < len(windows); i++ {
+			if windows[i][0] < windows[i-1][0]+windows[i-1][1]-1e-9 {
+				t.Errorf("%.0f s film: stretch %d %v overlaps stretch %d %v",
+					duration, i, windows[i], i-1, windows[i-1])
+			}
+		}
+	}
+}
+
 // TestMinSavePercentParsing covers the value check of the key that replaced
 // the cost cap in 2.0.0.
 func TestMinSavePercentParsing(t *testing.T) {

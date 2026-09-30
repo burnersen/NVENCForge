@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -89,6 +90,10 @@ type AppSettings struct {
 	encoder                     string
 	cpuPreset                   string
 	cpuAV1Preset                int
+	cpuAV1Tune                  string
+	cpuAV1VarianceBoost         bool
+	cpuAV1VarianceBoostStrength int
+	cpuAV1VarianceOctile        int
 	cpuTargetCRF                int
 	cpuAV1TargetCRF             int
 	cpuThreads                  int
@@ -130,23 +135,30 @@ func defaultAppSettings() AppSettings {
 		// Umgewandelt wird nur, was mindestens so viel spart; alles andere wird
 		// verlustfrei umgepackt. 20 ist die Wahl des Nutzers aus CloudForge
 		// (2026-09-27): darunter lohnt der Bildverlust eines Neukodierens nicht.
-		minSavePercent:   20,
-		encoder:          encoderNvidia,
-		cpuPreset:        "fast",
-		cpuAV1Preset:     6,
-		cpuTargetCRF:     18,
-		cpuAV1TargetCRF:  32,
-		cpuThreads:       0,
-		gpuDecode:        true,
-		gpuDecodeMaxMbit: gpuDecodeDefaultMaxMbit,
-		retireMode:       retireModeFolder,
-		autoCrop:         false,
-		codec:            codecH265,
-		container:        containerMKV,
-		audioMode:        audioModeAAC,
-		bitDepth:         bitDepth10,
-		keepSource:       false,
-		keepResolution:   false,
+		minSavePercent: 20,
+		encoder:        encoderNvidia,
+		cpuPreset:      "fast",
+		cpuAV1Preset:   6,
+		// Die SVT-AV1-Schalter stehen ab Werk auf SVTs eigenem Standard (wie in
+		// CloudForge: der Nutzer probiert sie selbst). Stärke 2 und Oktil 5 sind
+		// SVTs Werte, falls Variance Boost eingeschaltet wird.
+		cpuAV1Tune:                  svtTunePSNR,
+		cpuAV1VarianceBoost:         false,
+		cpuAV1VarianceBoostStrength: 2,
+		cpuAV1VarianceOctile:        5,
+		cpuTargetCRF:                18,
+		cpuAV1TargetCRF:             32,
+		cpuThreads:                  0,
+		gpuDecode:                   true,
+		gpuDecodeMaxMbit:            gpuDecodeDefaultMaxMbit,
+		retireMode:                  retireModeFolder,
+		autoCrop:                    false,
+		codec:                       codecH265,
+		container:                   containerMKV,
+		audioMode:                   audioModeAAC,
+		bitDepth:                    bitDepth10,
+		keepSource:                  false,
+		keepResolution:              false,
 	}
 }
 
@@ -220,6 +232,14 @@ const (
 	bitDepth8  = 8
 )
 
+// Worauf SVT-AV1 seine Entscheidungen ausrichtet (cpuAV1Tune, nur Prozessor-AV1).
+// "psnr" ist SVTs eigener Standard und wird deshalb gar nicht erst übergeben;
+// "vq" (visual quality) ist SVTs tune 0.
+const (
+	svtTunePSNR = "psnr"
+	svtTuneVQ   = "vq"
+)
+
 // cpuModeActive gilt für den ganzen Lauf: gesetzt durch das Flag -cpu, den
 // INI-Schlüssel encoder=cpu oder den Rückfall, wenn keine NVENC-Karte
 // gefunden wurde. Die Options-Bauer lesen es, damit an den Aufrufstellen
@@ -280,8 +300,8 @@ func loadOrCreateAppConfig() {
 				len(update.removed), strings.Join(update.removed, ", "))
 		}
 		if len(update.refreshed) > 0 {
-			pInfo.Printf("Config: explanation updated for: %s\n",
-				strings.Join(update.refreshed, ", "))
+			pInfo.Printf("Config: explanation text updated for %d setting(s), values unchanged: %s\n",
+				len(update.refreshed), strings.Join(update.refreshed, ", "))
 		}
 		pInfo.Printf("        Your previous file was kept as %s\n",
 			filepath.Base(path)+configBackupSuffix)
@@ -337,6 +357,10 @@ func defaultConfigStrings() map[string]string {
 		"encoder":                     d.encoder,
 		"cpuPreset":                   d.cpuPreset,
 		"cpuAV1Preset":                strconv.Itoa(d.cpuAV1Preset),
+		"cpuAV1Tune":                  d.cpuAV1Tune,
+		"cpuAV1VarianceBoost":         strconv.FormatBool(d.cpuAV1VarianceBoost),
+		"cpuAV1VarianceBoostStrength": strconv.Itoa(d.cpuAV1VarianceBoostStrength),
+		"cpuAV1VarianceOctile":        strconv.Itoa(d.cpuAV1VarianceOctile),
 		"cpuTargetCRF":                strconv.Itoa(d.cpuTargetCRF),
 		"cpuAV1TargetCRF":             strconv.Itoa(d.cpuAV1TargetCRF),
 		"cpuThreads":                  strconv.Itoa(d.cpuThreads),
@@ -587,6 +611,30 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 			default:
 				bad(key, val)
 			}
+		case "cpuAV1Tune":
+			if m := strings.ToLower(val); m == svtTunePSNR || m == svtTuneVQ {
+				s.cpuAV1Tune = m
+			} else {
+				bad(key, val)
+			}
+		case "cpuAV1VarianceBoost":
+			if b, e := strconv.ParseBool(val); e == nil {
+				s.cpuAV1VarianceBoost = b
+			} else {
+				bad(key, val)
+			}
+		case "cpuAV1VarianceBoostStrength":
+			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 4 {
+				s.cpuAV1VarianceBoostStrength = n
+			} else {
+				bad(key, val)
+			}
+		case "cpuAV1VarianceOctile":
+			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 8 {
+				s.cpuAV1VarianceOctile = n
+			} else {
+				bad(key, val)
+			}
 		case "cpuTargetCRF":
 			if n, e := strconv.Atoi(val); e == nil && n >= 1 && n <= 51 {
 				s.cpuTargetCRF = n
@@ -807,8 +855,11 @@ The -8bit option switches a single run over, -10bit back.`)
 
 	configEntry("audioMode", d.audioMode, "aac, copy",
 		`What happens to the sound.
-"aac" re-encodes to AAC where the target file needs it and copies the
-track 1:1 where it does not.
+"aac" re-encodes every track DaVinci Resolve cannot read to AAC - AC3,
+E-AC3, DTS, TrueHD, Opus, Vorbis and FLAC, more than six channels (7.1
+is mixed down to 5.1), a few 5.1 layouts and anything above 48 kHz -
+even in an MKV that could hold it as it is. All other tracks are
+copied 1:1.
 "copy" never re-encodes: the original sound goes in untouched. That
 keeps it bit-perfect - but not every audio format fits into an MP4.
 The -copyaudio option switches a single run over, -aac back.`)
@@ -965,6 +1016,36 @@ little quality for three to four times the encoding time.`)
 11 is fastest. Measured: 6 matches the GPU's file size and
 reaches VMAF 97 on most material; 9 is almost three times as
 fast but needs about 45% more data; 10 and 11 rarely reach 96.`)
+
+	configEntry("cpuAV1Tune", d.cpuAV1Tune, "psnr, vq",
+		`What SVT-AV1 tunes its decisions for (processor AV1 only).
+"psnr" is SVT-AV1's own standard: it aims at the measurable
+numbers the quality score builds on. "vq" (visual quality) aims at
+what the eye sees - fine detail and grain hold up better, but VMAF
+rates it lower at the same size, so the automatic search spends
+more space to reach its target. One test at the same CRF: 13%
+larger, same speed. Try it on your own material and judge by eye.`)
+
+	configEntry("cpuAV1VarianceBoost", d.cpuAV1VarianceBoost, "true, false",
+		`Variance Boost (processor AV1 only): SVT-AV1 gives flat,
+low-contrast areas - skies, walls, skin, dark scenes - extra
+quality, because blocking and banding show there first. VMAF hardly
+notices, so the automatic search pays for it with larger files.
+One test at the same CRF: 75% larger and about 10% slower; the
+automatic search evens out part of that. The two settings below
+only apply when this is true.`)
+
+	configEntry("cpuAV1VarianceBoostStrength", d.cpuAV1VarianceBoostStrength, "1 to 4",
+		`How strongly Variance Boost lifts flat areas (only with
+cpuAV1VarianceBoost=true). SVT-AV1's own guide: 1 for animation,
+2 for most live-action film (its standard), 3 for material mixing
+still images or dark horror scenes, 4 is very aggressive and meant
+for special cases only.`)
+
+	configEntry("cpuAV1VarianceOctile", d.cpuAV1VarianceOctile, "1 to 8",
+		`Which blocks count as flat enough for Variance Boost (only with
+cpuAV1VarianceBoost=true). Lower values boost more blocks and cost
+more space. SVT-AV1 recommends 4 to 7; 5 is its standard.`)
 
 	configEntry("cpuTargetCRF", d.cpuTargetCRF, "1 to 51",
 		`Fixed quality for H.265 on the processor when the automatic
@@ -1290,25 +1371,19 @@ func removeRetiredEntries(content string, retired []string) (string, []string) {
 }
 
 // refreshStaleComments ersetzt die Erklärung eines noch gültigen Eintrags durch
-// die aktuelle aus der Vorlage — aber nur, wenn sie einen weggefallenen
-// Schlüssel nennt. Anlass: der Text zu autoCQTargetVMAF verwies bis 1.34.0 auf
-// den Kosten-Deckel, und die Oberfläche zeigt genau diesen Text als Hilfe an.
-// Ein Hinweis auf eine Einstellung, die es nicht mehr gibt, führt in die Irre.
-// Der Wert selbst bleibt, wie er ist.
-func refreshStaleComments(content string, blocks []configBlock, retired []string) (string, []string) {
+// die aktuelle aus der Vorlage, sobald sie davon abweicht. Die Oberfläche zeigt
+// genau diesen Text als Hilfe an, ein veralteter führt dort in die Irre: bis
+// 1.34.0 verwies der zu autoCQTargetVMAF auf den weggefallenen Kosten-Deckel,
+// bis 2.0.1 behauptete der zu audioMode, AAC entstehe nur, wo die Zieldatei es
+// brauche. Bis 2.0.1 wurde nur ein Text aufgefrischt, der einen entfernten
+// Schlüssel nennt — jede andere Textänderung kam in schon vorhandenen INIs nie
+// an (dort stand bei cpuAV1Preset noch "0 to 13", gültig ist 0 bis 11).
+// Der Wert selbst bleibt, wie er ist; eigene Notizen, die eine Leerzeile vom
+// Eintrag trennt, ebenso.
+func refreshStaleComments(content string, blocks []configBlock) (string, []string) {
 	template := make(map[string][]string, len(blocks))
 	for _, block := range blocks {
 		template[block.key] = block.lines[:len(block.lines)-1] // ohne die Wertzeile
-	}
-	mentionsRetired := func(comment []string) bool {
-		for _, line := range comment {
-			for _, key := range retired {
-				if strings.Contains(line, key) {
-					return true
-				}
-			}
-		}
-		return false
 	}
 
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
@@ -1321,7 +1396,7 @@ func refreshStaleComments(content string, blocks []configBlock, retired []string
 			start := commentLinesAbove(lines, i)
 			// Die Kommentarzeilen darüber stehen schon in out — sie werden dort
 			// ersetzt, falls sie veraltet sind.
-			if mentionsRetired(lines[start:i]) {
+			if !slices.Equal(lines[start:i], fresh) {
 				out = append(out[:len(out)-(i-start)], fresh...)
 				refreshed = append(refreshed, key)
 			}
@@ -1355,7 +1430,7 @@ func updateConfigEntries(path string) (configUpdate, error) {
 	}
 
 	blocks := configBlocksFromTemplate()
-	updated, refreshed := refreshStaleComments(string(content), blocks, retiredConfigKeys)
+	updated, refreshed := refreshStaleComments(string(content), blocks)
 	updated, removed := removeRetiredEntries(updated, retiredConfigKeys)
 	updated, added := insertMissingEntries(updated, blocks)
 	update := configUpdate{added: added, removed: removed, refreshed: refreshed}

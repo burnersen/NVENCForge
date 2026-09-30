@@ -292,3 +292,114 @@ func TestSVTPresetCeilingWarning(t *testing.T) {
 		}
 	}
 }
+
+// TestSVTTuningParams pins what cpuAV1Tune and Variance Boost (2.1.0) put on
+// the SVT-AV1 command line. At the defaults nothing may change: the command
+// stays exactly what 2.0.1 ran. Switched on, strength and octile always travel
+// along explicitly, and everything goes into ONE -svtav1-params — FFmpeg keeps
+// only the last one given.
+func TestSVTTuningParams(t *testing.T) {
+	prev := appSettings
+	defer func() { appSettings = prev }()
+
+	appSettings = defaultAppSettings()
+	if got := strings.Join(buildSVTAV1OptsWithCQ(24, 96), " "); strings.Contains(got, "-svtav1-params") {
+		t.Errorf("defaults must not pass any SVT parameter\n%s", got)
+	}
+
+	cases := []struct {
+		name             string
+		threads          int
+		tune             string
+		boost            bool
+		strength, octile int
+		want             string
+	}{
+		{"tune vq", 0, svtTuneVQ, false, 2, 5, "tune=0"},
+		{"boost 3/7", 0, svtTunePSNR, true, 3, 7,
+			"enable-variance-boost=1:variance-boost-strength=3:variance-octile=7"},
+		{"everything", 8, svtTuneVQ, true, 2, 5,
+			"lp=8:tune=0:enable-variance-boost=1:variance-boost-strength=2:variance-octile=5"},
+		{"strength and octile alone do nothing", 0, svtTunePSNR, false, 4, 1, ""},
+	}
+	for _, c := range cases {
+		appSettings = defaultAppSettings()
+		appSettings.cpuThreads = c.threads
+		appSettings.cpuAV1Tune = c.tune
+		appSettings.cpuAV1VarianceBoost = c.boost
+		appSettings.cpuAV1VarianceBoostStrength = c.strength
+		appSettings.cpuAV1VarianceOctile = c.octile
+
+		opts := buildSVTAV1OptsWithCQ(24, 96)
+		if got := strings.Count(strings.Join(opts, " "), "-svtav1-params"); got > 1 {
+			t.Errorf("%s: -svtav1-params given %d times", c.name, got)
+		}
+		got := ""
+		for i := 0; i+1 < len(opts); i++ {
+			if opts[i] == "-svtav1-params" {
+				got = opts[i+1]
+			}
+		}
+		if got != c.want {
+			t.Errorf("%s: -svtav1-params %q, want %q", c.name, got, c.want)
+		}
+
+		// The graphics card is not affected by any of it.
+		if nv := strings.Join(buildAV1OptsWithCQ(32, 96), " "); strings.Contains(nv, "svtav1") || strings.Contains(nv, "variance") {
+			t.Errorf("%s: SVT settings leaked into av1_nvenc\n%s", c.name, nv)
+		}
+	}
+}
+
+// TestSVTTuningParsing: the four keys accept exactly their documented values;
+// anything else is reported and falls back to the default.
+func TestSVTTuningParsing(t *testing.T) {
+	d := defaultAppSettings()
+	cases := []struct {
+		line    string
+		wantBad bool
+		check   func(s AppSettings) bool
+	}{
+		{"cpuAV1Tune=VQ", false, func(s AppSettings) bool { return s.cpuAV1Tune == svtTuneVQ }},
+		{"cpuAV1Tune=psnr", false, func(s AppSettings) bool { return s.cpuAV1Tune == svtTunePSNR }},
+		{"cpuAV1Tune=ssim", true, func(s AppSettings) bool { return s.cpuAV1Tune == d.cpuAV1Tune }},
+		{"cpuAV1VarianceBoost=true", false, func(s AppSettings) bool { return s.cpuAV1VarianceBoost }},
+		{"cpuAV1VarianceBoost=ja", true, func(s AppSettings) bool { return !s.cpuAV1VarianceBoost }},
+		{"cpuAV1VarianceBoostStrength=1", false, func(s AppSettings) bool { return s.cpuAV1VarianceBoostStrength == 1 }},
+		{"cpuAV1VarianceBoostStrength=4", false, func(s AppSettings) bool { return s.cpuAV1VarianceBoostStrength == 4 }},
+		{"cpuAV1VarianceBoostStrength=0", true, func(s AppSettings) bool { return s.cpuAV1VarianceBoostStrength == 2 }},
+		{"cpuAV1VarianceBoostStrength=5", true, func(s AppSettings) bool { return s.cpuAV1VarianceBoostStrength == 2 }},
+		{"cpuAV1VarianceOctile=1", false, func(s AppSettings) bool { return s.cpuAV1VarianceOctile == 1 }},
+		{"cpuAV1VarianceOctile=8", false, func(s AppSettings) bool { return s.cpuAV1VarianceOctile == 8 }},
+		{"cpuAV1VarianceOctile=9", true, func(s AppSettings) bool { return s.cpuAV1VarianceOctile == 5 }},
+		{"cpuAV1VarianceOctile=", true, func(s AppSettings) bool { return s.cpuAV1VarianceOctile == 5 }},
+	}
+	for _, c := range cases {
+		path := filepath.Join(t.TempDir(), "NVENCForge_Config.ini")
+		if err := os.WriteFile(path, []byte(c.line+"\r\n"), 0644); err != nil {
+			t.Fatalf("cannot write test config: %v", err)
+		}
+		s, invalids, _ := parseAppConfig(path)
+		if gotBad := len(invalids) > 0; gotBad != c.wantBad {
+			t.Errorf("%s: rejected = %v, want %v", c.line, gotBad, c.wantBad)
+		}
+		if !c.check(s) {
+			t.Errorf("%s: wrong value after parsing (%+v)", c.line, s)
+		}
+	}
+}
+
+// TestSVTTuningText: the settings overview names what SVT-AV1 really gets.
+func TestSVTTuningText(t *testing.T) {
+	s := defaultAppSettings()
+	if got := svtTuningText(s); got != "tune psnr, Variance Boost off" {
+		t.Errorf("defaults: %q", got)
+	}
+	s.cpuAV1Tune = svtTuneVQ
+	s.cpuAV1VarianceBoost = true
+	s.cpuAV1VarianceBoostStrength = 3
+	s.cpuAV1VarianceOctile = 6
+	if got := svtTuningText(s); got != "tune vq, Variance Boost 3/6" {
+		t.Errorf("switched on: %q", got)
+	}
+}

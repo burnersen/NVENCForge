@@ -35,7 +35,7 @@ func TestBuildCascadeAttempts(t *testing.T) {
 		{"subs, no audio", true, false, false, 2},
 	}
 	for _, c := range cases {
-		got := buildCascadeAttempts(c.hasSubs, c.hasAudio, c.pureCopy)
+		got := buildCascadeAttempts(c.hasSubs, c.hasAudio, c.pureCopy, "audio 1:1")
 		if len(got) != c.want {
 			t.Errorf("%s: got %d attempts %v, want %d", c.name, len(got), labels(got), c.want)
 		}
@@ -49,6 +49,40 @@ func TestBuildCascadeAttempts(t *testing.T) {
 		}
 		if c.hasAudio && got[len(got)-1].noAudio == false {
 			t.Errorf("%s: last rung must be VIDEO-ONLY when audio exists", c.name)
+		}
+	}
+}
+
+// TestKeptAudioText: the "copy" rungs say what really happens to the sound.
+// In audioMode=aac they still re-encode every track DaVinci Resolve cannot
+// read; until 2.1.0 the log said "audio 1:1" even then.
+func TestKeptAudioText(t *testing.T) {
+	ac3 := AudioStreamInfo{Codec: "ac3", Layout: "5.1(side)", Channels: 6, SampleRate: 48000}
+	aac := AudioStreamInfo{Codec: "aac", Layout: "stereo", Channels: 2, SampleRate: 48000}
+	dts := AudioStreamInfo{Codec: "dts", Layout: "5.1(side)", Channels: 6, SampleRate: 48000}
+	cases := []struct {
+		name     string
+		streams  []AudioStreamInfo
+		pureCopy bool
+		want     string
+	}{
+		{"AAC stereo only", []AudioStreamInfo{aac}, false, "audio 1:1"},
+		{"AC3 in aac mode", []AudioStreamInfo{ac3}, false, "audio → AAC (formats DaVinci Resolve cannot read)"},
+		{"AC3 + AAC in aac mode", []AudioStreamInfo{ac3, aac}, false, "audio 1:1 except 1 of 2 tracks → AAC"},
+		{"AC3 + DTS + AAC in aac mode", []AudioStreamInfo{ac3, dts, aac}, false, "audio 1:1 except 2 of 3 tracks → AAC"},
+		{"AC3 with -copyaudio", []AudioStreamInfo{ac3, dts}, true, "audio 1:1"},
+	}
+	for _, c := range cases {
+		got := keptAudioText(countAACTracks(c.streams, c.pureCopy), len(c.streams))
+		if got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// The text must reach both "copy" rungs, not only be computed.
+	for _, a := range buildCascadeAttempts(true, true, false, "audio 1:1 except 1 of 2 tracks → AAC") {
+		if a.audioCopy && !a.noAudio && !strings.HasSuffix(a.human, "audio 1:1 except 1 of 2 tracks → AAC") {
+			t.Errorf("rung %s says %q", a.label, a.human)
 		}
 	}
 }

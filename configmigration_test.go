@@ -332,12 +332,14 @@ func TestUpdateConfigEntriesMigrates134(t *testing.T) {
 	if strings.Contains(strings.ReplaceAll(got, "\r\n", ""), "\n") {
 		t.Error("in eine CRLF-Datei wurden nackte LF-Zeilen geschrieben")
 	}
-	// Die Mindestersparnis steht direkt hinter dem VMAF-Ziel, wie in der Vorlage.
+	// Die Mindestersparnis steht hinter den beiden VMAF-Zielen, wie in der
+	// Vorlage (seit 2.2.0 liegt das Perzentil-Ziel dazwischen).
 	target := strings.Index(got, "autoCQTargetVMAF=96.5")
-	minSave := strings.Index(got, "minSavePercent=20")
+	percentileTarget := strings.Index(got, "autoCQTargetVMAFPercentile=92")
+	minSave := strings.Index(got, "minSavePercent=7")
 	cas := strings.Index(got, "casStrength=0.3")
-	if target < 0 || minSave < target || cas < minSave {
-		t.Errorf("minSavePercent steht nicht hinter dem VMAF-Ziel:\n%s", got)
+	if target < 0 || percentileTarget < target || minSave < percentileTarget || cas < minSave {
+		t.Errorf("Perzentil-Ziel und minSavePercent stehen nicht hinter dem VMAF-Ziel:\n%s", got)
 	}
 
 	parsed, invalids, warns := parseAppConfig(path)

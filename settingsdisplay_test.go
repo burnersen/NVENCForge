@@ -150,6 +150,7 @@ func TestSettingsScreenShowsEveryEncoderKnob(t *testing.T) {
 	s.nvencLookahead = 24
 	s.minSavePercent = 15
 	s.autoCQTargetVMAF = 94
+	s.autoCQTargetVMAFPercentile = 91.5
 	s.casStrength = 0
 	s.audioKbpsPerChannel = 80
 	s.fallbackAudioBitrate = 160
@@ -165,7 +166,7 @@ func TestSettingsScreenShowsEveryEncoderKnob(t *testing.T) {
 		"NVENC preset", "p4",
 		"Lookahead", "24",
 		"Min. saving", "15%",
-		"Quality target", "VMAF 94",
+		"Quality target", "VMAF 91.5 at 5th pct, 94 mean",
 		"Decoding", "42",
 		"Sharpening", "off",
 		"Audio", "80",

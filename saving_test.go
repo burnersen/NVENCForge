@@ -313,8 +313,8 @@ func TestMinSavePercentParsing(t *testing.T) {
 			}
 		})
 	}
-	if got := defaultAppSettings().minSavePercent; got != 20 {
-		t.Errorf("default minSavePercent = %.4g, want 20 (the user's choice from CloudForge)", got)
+	if got := defaultAppSettings().minSavePercent; got != 7 {
+		t.Errorf("default minSavePercent = %.4g, want 7 (the user's choice, as in CloudForge 0.20.0)", got)
 	}
 }
 

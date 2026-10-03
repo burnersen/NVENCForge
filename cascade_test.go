@@ -120,6 +120,8 @@ func TestResetInvalidConfigLines(t *testing.T) {
 		"nvencPreset=p8\n" +
 		"autoCQ=vielleicht\n" +
 		"autoCQTargetVMAF=120\n" +
+		"autoCQVMAFPercentile=60\n" +
+		"autoCQTargetVMAFPercentile=40\n" +
 		"minSavePercent=-1\n" +
 		"autoCQPlateauTolerance=11\n" +
 		"unknownKey=keepme\n"
@@ -129,8 +131,8 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	}
 
 	_, invalids, _ := parseAppConfig(path)
-	if len(invalids) != 7 {
-		t.Fatalf("got %d invalid settings, want 7 (%v)", len(invalids), invalids)
+	if len(invalids) != 9 {
+		t.Fatalf("got %d invalid settings, want 9 (%v)", len(invalids), invalids)
 	}
 	if err := resetInvalidConfigLines(path, invalids); err != nil {
 		t.Fatalf("reset failed: %v", err)
@@ -142,16 +144,18 @@ func TestResetInvalidConfigLines(t *testing.T) {
 	}
 	got := string(raw)
 	for _, want := range []string{
-		"# my notes",                 // comment untouched
-		"targetCQ=26",                // reset to default
-		"casStrength=0.2",            // valid value untouched
-		"maxResolution=1080",         // reset to default
-		"nvencPreset=p5",             // reset to default
-		"autoCQ=true",                // reset to default
-		"autoCQTargetVMAF=96",        // reset to default
-		"minSavePercent=20",          // reset to default
-		"autoCQPlateauTolerance=1.5", // reset to default
-		"unknownKey=keepme",          // unknown key untouched
+		"# my notes",                    // comment untouched
+		"targetCQ=26",                   // reset to default
+		"casStrength=0.2",               // valid value untouched
+		"maxResolution=1080",            // reset to default
+		"nvencPreset=p5",                // reset to default
+		"autoCQ=true",                   // reset to default
+		"autoCQTargetVMAF=95",           // reset to default
+		"autoCQVMAFPercentile=5",        // reset to default
+		"autoCQTargetVMAFPercentile=92", // reset to default
+		"minSavePercent=7",              // reset to default
+		"autoCQPlateauTolerance=0.5",    // reset to default
+		"unknownKey=keepme",             // unknown key untouched
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("config after reset missing %q\n---\n%s", want, got)

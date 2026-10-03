@@ -84,7 +84,17 @@ The 1.34.0 column is the uncomfortable part: on four of the five films the bitra
 
 2.0.0 has no caps. Every re-encode holds the target, and a file that would not get at least 20 % smaller (`minSavePercent`) is repackaged losslessly instead — the picture stays exactly as it is. Values marked **~** are the saving the analysis predicted before encoding (from a size probe across the whole film wherever it was close to the limit); the two bold results were encoded in full and landed at 23 % (predicted 23 %) and 81 % (predicted 76 %).
 
-Grainy 60 fps films are the telling case: to really look like their source they need about as many bits as the source already spends, so re-encoding them would only cost picture. That is also why the default target is 96 — at 97 only two of the five films were worth re-encoding, at 96 three.
+Grainy 60 fps films are the telling case: to really look like their source they need about as many bits as the source already spends, so re-encoding them would only cost picture. That is also why 2.0.0 settled on a target of 96 — at 97 only two of the five films were worth re-encoding, at 96 three.
+
+**What 2.2.0 changes** — the same analysis, now judging the weakest frames too (5th percentile ≥ 92, average ≥ 95, minimum saving 7 %), on three of the films above, measured on 3 Oct 2026 with `-cqcheck`:
+
+| Source material | 2.1.0 · average ≥ 96 | 2.2.0 · weakest 5 % ≥ 92, average ≥ 95 |
+|---|---|---|
+| 1080p · 60 fps · 10.7 Mbit/s · 19 min | CQ 33 · VMAF 96.4 · ~35 % smaller | CQ 34 · VMAF 95.9, 5th percentile 92.6 · ~41 % smaller |
+| 1080p · 30 fps · 11.7 Mbit/s · 48 min | CQ 38 · VMAF 96.3 · ~79 % smaller | CQ 38 · VMAF 96.3, 5th percentile 92.2 · ~79 % smaller |
+| 1080p · 30 fps · 3.1 Mbit/s · 53 min | CQ 35 · VMAF 96.2 · ~29 % smaller | CQ 31 · VMAF 98.0, 5th percentile 92.2 · ~1 % smaller → repackaged |
+
+The even film gets smaller, because its weakest frames are close to its average. The last one is the opposite case: at CQ 35 its weakest 5 % of frames scored only 89.3 although the average looked fine. Lifting them would cost almost as many bits as the source spends, so 2.2.0 leaves the picture untouched instead of quietly making those scenes worse.
 
 A reality check on these figures: the encoder is CQ-based (constant quality) in every mode, so a file shrinks to whatever the measured quality level needs. Bulky or inefficiently encoded sources give up a lot, already-lean ones give up little, and many get repackaged instead because re-encoding wouldn't help them. That is a feature, not a shortcoming. In the default mode (no flags) material above 1080p is also downscaled to 1080p.
 
@@ -111,7 +121,7 @@ A reality check on these figures: the encoder is CQ-based (constant quality) in 
 
 Short answer: **yes — and never bigger.** Before touching anything, NVENCForge reads each file and picks one of two paths:
 
-- **Worth re-encoding?** The quality analysis also predicts how much smaller the whole file gets. Only when that is at least **20 %** (`minSavePercent`) is the video re-encoded, at a constant quality level. Close to that limit, ten more spots across the film are encoded to be sure, and the finished file is checked once more — a result that misses the minimum is thrown away automatically. (A 4K file that is scaled down to 1080p only has to come out smaller at all: the smaller picture is what you asked for.)
+- **Worth re-encoding?** The quality analysis also predicts how much smaller the whole file gets. Only when that is at least **7 %** (`minSavePercent`) is the video re-encoded, at a constant quality level. Close to that limit, twenty more spots across the film are encoded to be sure, and the finished file is checked once more — a result that misses the minimum is thrown away automatically. (A 4K file that is scaled down to 1080p only has to come out smaller at all: the smaller picture is what you asked for.)
 - **Not worth it?** Some files are so efficiently compressed that re-encoding would barely help or even make them *bigger* (yes, that really happens). NVENCForge then simply repackages the file losslessly in seconds — the picture stays exactly as it is. Videos below 720p and sources that are already at the bitrate floor of their resolution take this path without any measuring.
 
 You can tell the two apart at a glance by the filename:
@@ -152,8 +162,8 @@ Before each encode, a short per-file analysis runs — typically well under a mi
 
 1. **Scan.** The bitrate profile is read *without decoding*, and short sample windows are placed on the demanding scenes. The hardest scene is always included, so easy scenes can't paint a rosy picture.
 2. **Probe.** Those windows are test-encoded at two anchor quality levels using *exactly* the settings of the real encode, then scored with **VMAF** (Netflix's perceptual quality metric, 0–100, where ~95+ is visually transparent to most viewers).
-3. **Pick & verify.** The CQ that hits the target (default: VMAF 96) is derived from the anchors — and then measured itself. The target is a **floor**: if the pick misses it, the next steps are measured until one holds it; if it clears it by a wide margin, one step thriftier is tried. No blind trust in interpolation.
-4. **Worth it?** The same samples predict how much smaller the whole file gets. Below `minSavePercent` (20 % by default) the file is repackaged losslessly instead — see [Will my files actually get smaller?](#-will-my-files-actually-get-smaller)
+3. **Pick & verify.** The CQ that hits the target is derived from the anchors — and then measured itself. Since 2.2.0 the target looks at the **weakest frames**, not just the average: 95 % of the measured frames must score at least **92**, and the average must still reach **95** as a safety net. An average can look fine while a dark or busy scene falls clearly short; the 5th percentile sees it. Films with such scenes get more bits there, even films get fewer — on six test sources the files came out as large on average as with the old average target of 96. The target is a **floor**: if the pick misses it, the next steps are measured until one holds it; if it clears it by a wide margin, one step thriftier is tried. No blind trust in interpolation.
+4. **Worth it?** The same samples predict how much smaller the whole file gets. Below `minSavePercent` (7 % by default) the file is repackaged losslessly instead — see [Will my files actually get smaller?](#-will-my-files-actually-get-smaller)
 
 Pictures smaller than 1080p are measured the way they look on a Full HD screen: both sides are enlarged to 1080p before the comparison. Measured in their own small size, they score far better than they look full-screen (720p: 96.2 in its own size against 92.9 enlarged).
 
@@ -271,16 +281,17 @@ From then on: select any videos → right-click → *Send to* → pick a mode. D
 
 Everything lives in `NVENCForge_Config.ini` next to the EXE — auto-created, and **you don't have to touch it at all.** The defaults are the measured ones. An invalid value is reset individually in the file with a warning, leaving your comments and everything else untouched. Settings added by a newer version are filled in automatically at their proper place, and explanations that changed are brought up to date (your values stay as they are), so an old config file never quietly misses a feature or shows outdated help — your previous file is kept as `.bak`.
 
-The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `minSavePercent`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
+The file is split in two: **PART 1** holds the handful of settings people actually change — `maxResolution`, `autoCQTargetVMAF`, `autoCQTargetVMAFPercentile`, `minSavePercent`, `audioKbpsPerChannel`, `retireMode`, `encoder` — and **PART 2** the expert settings. Every entry explains what it does and which values are allowed.
 
 **Since 1.23.0 the basic decisions live there too** — `codec`, `container`, `bitDepth`, `audioMode`, `keepResolution` and `keepSource`. Those used to exist only as a command-line switch, so "always AV1" or "always MP4" had to be repeated on every run. Each of them has a switch *and* a counter-switch (`-av1`/`-h265`, `-mp4`/`-mkv`, `-8bit`/`-10bit`, `-copyaudio`/`-aac`, `-original`/`-downscale`, `-keep`/`-nokeep`), so a single run can go either way.
 
-The four worth knowing about:
+The five worth knowing about:
 
 | Key | Default | In one line |
 |---|---|---|
-| `autoCQTargetVMAF` | `96` | The quality target Auto-CQ aims for — a floor, not an average |
-| `minSavePercent` | `20` | How much smaller a file must get to be re-encoded; anything less is repackaged losslessly. `0` only rejects results that come out larger |
+| `autoCQTargetVMAFPercentile` | `92` | Quality the weakest frames keep: 95 % of the measured frames score at least this much — a floor |
+| `autoCQTargetVMAF` | `95` | Quality the average keeps, the safety net next to the percentile (`autoCQVMAFPercentile=0` judges the average alone, as up to 2.1.0) |
+| `minSavePercent` | `7` | How much smaller a file must get to be re-encoded; anything less is repackaged losslessly. `0` only rejects results that come out larger |
 | `retireMode` | `folder` | Where originals go: an `originals` folder next to the source (instant, nothing deleted), or `recyclebin` |
 | `gpuDecode` | `true` | Decode on the GPU; bit-identical, just faster. Sources above `gpuDecodeMaxMbit` (50) use the CPU on purpose |
 

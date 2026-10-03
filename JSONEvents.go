@@ -208,8 +208,10 @@ type eventStage struct {
 // ist, hat sich gezeigt: Die Ergebniszeile wurde in 1.30.0 umgeschrieben — ein
 // Textleser hätte den Umbau stillschweigend nicht überlebt.
 //
-// Target ist das Suchziel (Ziel-VMAF minus Toleranz), also der Wert, an dem
-// sich VMAF messen lassen muss.
+// VMAF ist der Mittelwert der gewählten Stufe, Target das Mittelwert-Ziel
+// (autoCQTargetVMAF) — die vertrauten Zahlen. Entscheidet seit 2.2.0 das
+// Perzentil mit (autoCQVMAFPercentile), nennt Note dessen Werte; das Ereignis
+// selbst bleibt gleich, damit eine ältere Oberfläche es weiter versteht.
 type eventCQ struct {
 	Ev     string  `json:"ev"` // "cq"
 	Index  int     `json:"index"`

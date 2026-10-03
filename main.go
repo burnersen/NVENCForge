@@ -51,7 +51,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "2.1.0"
+const appVersion = "2.2.0"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -1788,7 +1788,7 @@ func printActiveSettings(cfg *AppConfig) {
 	}
 	addQuality("Min. saving", minSave)
 	if cfg != nil && cfg.autoCQ {
-		addQuality("Quality target", fmt.Sprintf("VMAF %.4g", s.autoCQTargetVMAF))
+		addQuality("Quality target", autoCQCriterionOf(s).overviewText())
 		addQuality("Plateau tolerance", fmt.Sprintf("%.4g VMAF", s.autoCQPlateauTolerance))
 		// Direkt unter die Toleranz: die eine sagt, wie viel Qualität der
 		// Plateau-Aufstieg ausgeben DARF, die andere, wofür er sie ausgeben

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,8 +33,11 @@ import (
 // (the heaviest scene is always part of the sample), encode them at two
 // anchor CQ values with EXACTLY the settings of the real encode, measure
 // VMAF against the identically filtered source, interpolate the CQ that
-// should hit the configured quality target (autoCQTargetVMAF, default 96),
-// then confirm the pick by measuring it. Since 2.0.0 the target is a FLOOR,
+// should hit the configured quality target, then confirm the pick by
+// measuring it. Since 2.2.0 a measurement holds the target when the 5th
+// percentile of its frame scores reaches autoCQTargetVMAFPercentile AND its
+// mean reaches autoCQTargetVMAF (autoCQCriterion); autoCQVMAFPercentile=0
+// judges the mean alone, as before. Since 2.0.0 the target is a FLOOR,
 // as in CloudForge: a pick that misses it is followed by further measured
 // steps until one holds it, and a pick that clears it by more than
 // autoCQThriftyMargin tries one step thriftier. Only a target that is proven
@@ -1186,15 +1190,30 @@ func buildAutoCQVMAFArgs(sourcePath string, windows [][2]float64, hwaccel []stri
 	return append(args, "-filter_complex", fg.String(), "-f", "null", "-")
 }
 
-// readVMAFScore extracts the pooled mean VMAF from a libvmaf JSON log. The
-// arithmetic mean (not the harmonic mean) is what the anchor calibration in
-// the CQ measurement series was evaluated with.
-func readVMAFScore(logPath string) (float64, error) {
+// autoCQMeasurement is one VMAF measurement of the sample windows: the pooled
+// mean and the low percentile of the per-frame scores (equal to the mean when
+// the search judges the mean alone).
+type autoCQMeasurement struct {
+	mean float64
+	low  float64
+}
+
+// readVMAFMeasurement reads a libvmaf JSON log. The mean is the pooled
+// arithmetic mean (not the harmonic mean) — what the anchor calibration in the
+// CQ measurement series was evaluated with. libvmaf pools no percentiles, so
+// for percentile > 0 the low value is computed from the frames it scored
+// (n_subsample=3: every third frame).
+func readVMAFMeasurement(logPath string, percentile int) (autoCQMeasurement, error) {
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
-		return 0, fmt.Errorf("AutoCQ.go: readVMAFScore: %w", err)
+		return autoCQMeasurement{}, fmt.Errorf("AutoCQ.go: readVMAFMeasurement: %w", err)
 	}
 	var vmafLog struct {
+		Frames []struct {
+			Metrics struct {
+				VMAF float64 `json:"vmaf"`
+			} `json:"metrics"`
+		} `json:"frames"`
 		PooledMetrics struct {
 			VMAF struct {
 				Mean float64 `json:"mean"`
@@ -1202,12 +1221,159 @@ func readVMAFScore(logPath string) (float64, error) {
 		} `json:"pooled_metrics"`
 	}
 	if err := json.Unmarshal(raw, &vmafLog); err != nil {
-		return 0, fmt.Errorf("AutoCQ.go: readVMAFScore: JSON parse error: %w", err)
+		return autoCQMeasurement{}, fmt.Errorf("AutoCQ.go: readVMAFMeasurement: JSON parse error: %w", err)
 	}
-	if vmafLog.PooledMetrics.VMAF.Mean <= 0 {
-		return 0, errors.New("AutoCQ.go: readVMAFScore: no VMAF score in log")
+	mean := vmafLog.PooledMetrics.VMAF.Mean
+	if mean <= 0 {
+		return autoCQMeasurement{}, errors.New("AutoCQ.go: readVMAFMeasurement: no VMAF score in log")
 	}
-	return vmafLog.PooledMetrics.VMAF.Mean, nil
+	measurement := autoCQMeasurement{mean: mean, low: mean}
+	if percentile <= 0 {
+		return measurement, nil
+	}
+	frameScores := make([]float64, 0, len(vmafLog.Frames))
+	for _, frame := range vmafLog.Frames {
+		frameScores = append(frameScores, frame.Metrics.VMAF)
+	}
+	if len(frameScores) == 0 {
+		return autoCQMeasurement{}, errors.New("AutoCQ.go: readVMAFMeasurement: no per-frame scores in log")
+	}
+	measurement.low = vmafPercentile(frameScores, percentile)
+	return measurement, nil
+}
+
+// vmafPercentile returns the given percentile of the scores, interpolated
+// linearly between neighbouring ranks as numpy and CloudForge do: 5 means that
+// 95 % of the frames score at least this much. The input stays untouched.
+func vmafPercentile(scores []float64, percentile int) float64 {
+	sorted := slices.Clone(scores)
+	slices.Sort(sorted)
+	rank := float64(percentile) / 100 * float64(len(sorted)-1)
+	below := int(rank)
+	above := min(below+1, len(sorted)-1)
+	return sorted[below] + (sorted[above]-sorted[below])*(rank-float64(below))
+}
+
+// autoCQCriterion says what a measurement has to hold. Since 2.2.0 the search
+// judges the low percentile of the per-frame scores (autoCQVMAFPercentile,
+// default 5): a mean can look fine while single scenes fall clearly short, and
+// the percentile sees those scenes. The mean target (autoCQTargetVMAF) stays in
+// force beside it as a safety net, so no file comes out worse than the mean
+// target alone allows. That net is the lesson of CloudForge 0.19.0, which
+// judged the percentile alone: a very even film held its percentile target at
+// a mean of 94.4, below the 95 its user had set. Percentile 0 is the mean-only
+// search of 2.1.0 and earlier.
+type autoCQCriterion struct {
+	percentile int
+	targetMean float64
+	targetLow  float64
+}
+
+func autoCQCriterionOf(s AppSettings) autoCQCriterion {
+	return autoCQCriterion{
+		percentile: s.autoCQVMAFPercentile,
+		targetMean: s.autoCQTargetVMAF,
+		targetLow:  s.autoCQTargetVMAFPercentile,
+	}
+}
+
+// target is the one number the search compares its scores with.
+func (c autoCQCriterion) target() float64 {
+	if c.percentile <= 0 {
+		return c.targetMean
+	}
+	return c.targetLow
+}
+
+// score folds a measurement into the one number the search works with. With a
+// percentile it is the lower of the percentile and the mean moved onto the
+// percentile's scale (mean minus the gap between the two targets): a CQ then
+// holds target() exactly when BOTH targets hold, and every rule of the search
+// — interpolation, brakes, plateau climb — keeps working on a single value.
+func (c autoCQCriterion) score(m autoCQMeasurement) float64 {
+	if c.percentile <= 0 {
+		return m.mean
+	}
+	return min(m.low, m.mean-(c.targetMean-c.targetLow))
+}
+
+// meanFloor turns a score that was never measured (an interpolated pick) back
+// into what it promises for the mean: with the safety net that is at least
+// the score plus the gap between the two targets.
+func (c autoCQCriterion) meanFloor(score float64) float64 {
+	if c.percentile <= 0 {
+		return score
+	}
+	return score + (c.targetMean - c.targetLow)
+}
+
+// targetText names the target for the log: "96" with the mean alone,
+// "92 (5th percentile) and 95 (mean)" with the safety net.
+func (c autoCQCriterion) targetText() string {
+	if c.percentile <= 0 {
+		return fmt.Sprintf("%.4g", c.targetMean)
+	}
+	return fmt.Sprintf("%.4g (%s percentile) and %.4g (mean)", c.targetLow, ordinal(c.percentile), c.targetMean)
+}
+
+// overviewText is the short form for the settings overview at startup, where
+// a long value would push the second column off the line.
+func (c autoCQCriterion) overviewText() string {
+	if c.percentile <= 0 {
+		return fmt.Sprintf("VMAF %.4g", c.targetMean)
+	}
+	return fmt.Sprintf("VMAF %.4g at %s pct, %.4g mean", c.targetLow, ordinal(c.percentile), c.targetMean)
+}
+
+// measurementText shows a real measurement: "96.4" with the mean alone,
+// "92.4 at the 5th percentile, mean 95.6" with the safety net.
+func (c autoCQCriterion) measurementText(m autoCQMeasurement, decimals int) string {
+	if c.percentile <= 0 {
+		return strconv.FormatFloat(m.mean, 'f', decimals, 64)
+	}
+	return fmt.Sprintf("%.*f at the %s percentile, mean %.*f",
+		decimals, m.low, ordinal(c.percentile), decimals, m.mean)
+}
+
+// levelText shows a score that is no single measurement, such as a plateau
+// top: with the safety net it lives on the percentile's scale.
+func (c autoCQCriterion) levelText(level float64) string {
+	if c.percentile <= 0 {
+		return fmt.Sprintf("~%.1f", level)
+	}
+	return fmt.Sprintf("~%.1f (%s-percentile scale)", level, ordinal(c.percentile))
+}
+
+// resultText is the bracket of the decision line. With the mean alone it is
+// exactly the line of 2.1.0, "VMAF 96.4, target 96"; with the safety net it
+// names both measured values and both targets. known = false marks a pick
+// that was never measured (verification failed): its score is an estimate.
+func (c autoCQCriterion) resultText(m autoCQMeasurement, known bool, score float64) string {
+	if c.percentile <= 0 {
+		return fmt.Sprintf("VMAF %.1f, target %.4g", score, c.targetMean)
+	}
+	if !known {
+		return fmt.Sprintf("estimated %.1f on the %s-percentile scale, target %s",
+			score, ordinal(c.percentile), c.targetText())
+	}
+	return fmt.Sprintf("VMAF %.1f, %s percentile %.1f — targets %.4g and %.4g",
+		m.mean, ordinal(c.percentile), m.low, c.targetMean, c.targetLow)
+}
+
+// ordinal writes 1 → "1st", 2 → "2nd", 3 → "3rd", 5 → "5th", 11 → "11th".
+func ordinal(n int) string {
+	suffix := "th"
+	switch {
+	case n%100 >= 11 && n%100 <= 13:
+		// 11th, 12th, 13th stay "th"
+	case n%10 == 1:
+		suffix = "st"
+	case n%10 == 2:
+		suffix = "nd"
+	case n%10 == 3:
+		suffix = "rd"
+	}
+	return strconv.Itoa(n) + suffix
 }
 
 // runAutoCQFFmpeg runs one quiet analysis step (sample encode or VMAF
@@ -1266,7 +1432,7 @@ type autoCQInput struct {
 }
 
 // autoCQResult is what the analysis hands back: the CQ to encode with, its
-// VMAF and the reason line, and the predicted saving on the whole file
+// mean VMAF and the reason line, and the predicted saving on the whole file
 // (savingKnown = false when nothing could be predicted — the finished file is
 // judged instead).
 //
@@ -1293,8 +1459,11 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 
 	// The target is a floor since 2.0.0: there is no tolerance below it any
 	// more (the removed autoCQTolerance), only proven-unreachable or
-	// too-expensive targets end below it — and the log says so.
-	target := appSettings.autoCQTargetVMAF
+	// too-expensive targets end below it — and the log says so. Since 2.2.0 it
+	// is usually a pair, percentile and mean, folded into one number per
+	// measurement (autoCQCriterion.score).
+	crit := autoCQCriterionOf(appSettings)
+	target := crit.target()
 
 	windows := autoCQSampleWindows(stats.DurationSec)
 	if windows == nil {
@@ -1336,8 +1505,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	// ohne sagen zu können, warum.
 	emitStage("analyze")
 
-	pInfo.Printf("%s Auto-CQ: analyzing %d sample windows (%.0f s) for VMAF target %.4g%s...\n",
-		pterm.LightMagenta("›"), len(windows), sampleSec, target, measureNote)
+	pInfo.Printf("%s Auto-CQ: analyzing %d sample windows (%.0f s) for VMAF target %s%s...\n",
+		pterm.LightMagenta("›"), len(windows), sampleSec, crit.targetText(), measureNote)
 
 	spinner, _ := pterm.DefaultSpinner.WithText(autoCQSpinnerText(autoCQSpinnerScanText)).Start()
 	analysisStart := time.Now()
@@ -1425,6 +1594,18 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 		return autoCQResult{}, false
 	}
 
+	// measured keeps the real values behind every score, for the log: with
+	// the safety net a score is a folded number, not something VMAF printed.
+	measured := make(map[int]autoCQMeasurement)
+	// shown writes a CQ's measurement for the log; a score that was never
+	// measured (an interpolated pick) keeps its plain number.
+	shown := func(cq int, score float64, decimals int) string {
+		if m, known := measured[cq]; known {
+			return crit.measurementText(m, decimals)
+		}
+		return strconv.FormatFloat(score, 'f', decimals, 64)
+	}
+
 	measure := func(cq int) (float64, error) {
 		sampleName := fmt.Sprintf("sample_cq%d.mkv", cq)
 		logName := fmt.Sprintf("vmaf_cq%d.json", cq)
@@ -1444,11 +1625,12 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 		if err := runAutoCQStep(buildVMAF); err != nil {
 			return 0, fmt.Errorf("VMAF measurement at CQ %d: %w", cq, err)
 		}
-		score, err := readVMAFScore(filepath.Join(tmpDir, logName))
+		measurement, err := readVMAFMeasurement(filepath.Join(tmpDir, logName), crit.percentile)
 		if err != nil {
 			return 0, fmt.Errorf("VMAF result at CQ %d: %w", cq, err)
 		}
-		return score, nil
+		measured[cq] = measurement
+		return crit.score(measurement), nil
 	}
 
 	// scores remembers every measured CQ of this search: no step is ever
@@ -1558,8 +1740,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	saturatedPick := func(level float64) {
 		satCQ, satVMAF := autoCQPlateauPick(sc, vmafLow, vmafHigh)
 		verifyNote = fmt.Sprintf(
-			" (VMAF saturates at ~%.1f — target %.4g unreachable, picking efficient CQ %d)",
-			level, target, satCQ)
+			" (VMAF saturates at %s — target %s unreachable, picking efficient CQ %d)",
+			crit.levelText(level), crit.targetText(), satCQ)
 		cq, predicted = satCQ, satVMAF
 		plateauLevel = level
 		plateauFlat = true // saturation proven by a real sub-anchor measurement
@@ -1573,8 +1755,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	thriftPick := func(at autoCQPoint) {
 		gainPerStep := (at.vmaf - vmafLow) / float64(sc.anchorLow-at.cq)
 		verifyNote = fmt.Sprintf(
-			" (CQ %d measured %.1f — each step below CQ %d buys only %.2f VMAF, not worth the size)",
-			at.cq, at.vmaf, sc.anchorLow, gainPerStep)
+			" (CQ %d measured %s — each step below CQ %d buys only %.2f VMAF, not worth the size)",
+			at.cq, shown(at.cq, at.vmaf, 1), sc.anchorLow, gainPerStep)
 		cq, predicted = sc.anchorLow, vmafLow
 	}
 
@@ -1592,8 +1774,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 			verifyNote = " (anchor measurement)"
 		}
 		if thrifty, ok := autoCQThriftyStep(sc, target, autoCQPoint{cq, verified}, scoreAt); ok {
-			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — one step thriftier still holds the target)",
-				cq, verified)
+			verifyNote = fmt.Sprintf(" (CQ %d measured %s — one step thriftier still holds the target)",
+				cq, shown(cq, verified, 1))
 			cq, predicted = thrifty.cq, thrifty.vmaf
 		}
 	case autoCQSaturated(sc, cq, verified, vmafLow):
@@ -1608,15 +1790,15 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 		}
 		switch hold.outcome {
 		case holdReached:
-			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — stepped down to CQ %d, which holds the target)",
-				missed.cq, missed.vmaf, hold.point.cq)
+			verifyNote = fmt.Sprintf(" (CQ %d measured %s — stepped down to CQ %d, which holds the target)",
+				missed.cq, shown(missed.cq, missed.vmaf, 1), hold.point.cq)
 			cq, predicted = hold.point.cq, hold.point.vmaf
 		case holdClampFloor:
 			// The clamp floor itself measured below the target — proven
 			// unreachable. The curve is NOT saturated here (the brake would
 			// have fired), so the climb gives nothing away on it.
-			verifyNote = fmt.Sprintf(" (measured %.1f — CQ clamp floor reached, target missed)",
-				hold.point.vmaf)
+			verifyNote = fmt.Sprintf(" (measured %s — CQ clamp floor reached, target missed)",
+				shown(hold.point.cq, hold.point.vmaf, 1))
 			cq, predicted = hold.point.cq, hold.point.vmaf
 			plateauLevel = hold.point.vmaf
 		case holdSaturated:
@@ -1624,8 +1806,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 		case holdTooExpensive:
 			thriftPick(hold.point)
 		default: // holdGaveUp: the best measured point so far, below the target
-			verifyNote = fmt.Sprintf(" (CQ %d measured %.1f — the search below the target stopped at CQ %d)",
-				missed.cq, missed.vmaf, hold.point.cq)
+			verifyNote = fmt.Sprintf(" (CQ %d measured %s — the search below the target stopped at CQ %d)",
+				missed.cq, shown(missed.cq, missed.vmaf, 1), hold.point.cq)
 			cq, predicted = hold.point.cq, hold.point.vmaf
 		}
 	}
@@ -1666,7 +1848,7 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 				}
 				break
 			}
-			plateauProbes = append(plateauProbes, fmt.Sprintf("CQ %d = %.2f", rung, score))
+			plateauProbes = append(plateauProbes, fmt.Sprintf("CQ %d = %s", rung, shown(rung, score, 2)))
 			if score < climbFloor {
 				continue
 			}
@@ -1695,8 +1877,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 				savingText = fmt.Sprintf(", file %.0f%% smaller", savedPct)
 			}
 			verifyNote = fmt.Sprintf(
-				" (VMAF plateaus at ~%.1f — target %.4g unreachable, plateau holds to CQ %d%s)",
-				plateauLevel, target, rung, savingText)
+				" (VMAF plateaus at %s — target %s unreachable, plateau holds to CQ %d%s)",
+				crit.levelText(plateauLevel), crit.targetText(), rung, savingText)
 			break
 		}
 	}
@@ -1748,7 +1930,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	// demselben Grund fällt "predicted" weg: in den meisten Zweigen ist der
 	// Wert eine echte Messung, und wo er hochgerechnet ist, sagt das die
 	// Begründungszeile ("interpolated value kept", "estimate kept").
-	pOK.Printf("Auto-CQ: using CQ %d (VMAF %.1f, target %.4g)\n", cq, predicted, target)
+	chosen, chosenKnown := measured[cq]
+	pOK.Printf("Auto-CQ: using CQ %d (%s)\n", cq, crit.resultText(chosen, chosenKnown, predicted))
 	noteText := autoCQNoteText(verifyNote)
 	if noteText != "" {
 		fmt.Println(pterm.Gray("  · " + noteText))
@@ -1760,8 +1943,8 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	} else {
 		fmt.Println(pterm.Gray("  · expected file: cannot be predicted for this one — the finished file is checked instead"))
 	}
-	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %.2f, CQ %d = %.2f · windows: %s · analysis took %s",
-		sc.anchorLow, vmafLow, sc.anchorHigh, vmafHigh, placement,
+	fmt.Println(pterm.Gray(fmt.Sprintf("  · anchors: CQ %d = %s, CQ %d = %s · windows: %s · analysis took %s",
+		sc.anchorLow, shown(sc.anchorLow, vmafLow, 2), sc.anchorHigh, shown(sc.anchorHigh, vmafHigh, 2), placement,
 		formatDuration(time.Since(analysisStart).Seconds()))))
 	if len(plateauProbes) > 0 {
 		fmt.Println(pterm.Gray("  · plateau probes: " + strings.Join(plateauProbes, ", ")))
@@ -1775,6 +1958,12 @@ func autoDetectCQ(ctx context.Context, in autoCQInput, sc autoCQScale) (autoCQRe
 	if profileErr != nil && debugMode {
 		fmt.Println(pterm.Gray("  · bitrate profile skipped: " + profileErr.Error()))
 	}
-	return autoCQResult{cq: cq, vmaf: predicted, note: noteText,
+	// A front-end shows the familiar mean next to the CQ; the note carries the
+	// percentile when it decided.
+	meanVMAF := crit.meanFloor(predicted)
+	if chosenKnown && crit.percentile > 0 {
+		meanVMAF = chosen.mean
+	}
+	return autoCQResult{cq: cq, vmaf: meanVMAF, note: noteText,
 		savingPct: saving, savingKnown: savingKnown}, true
 }

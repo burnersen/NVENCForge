@@ -84,6 +84,8 @@ type AppSettings struct {
 	av1TargetCQ                 int
 	autoCQ                      bool
 	autoCQTargetVMAF            float64
+	autoCQVMAFPercentile        int
+	autoCQTargetVMAFPercentile  float64
 	autoCQPlateauTolerance      float64
 	autoCQPlateauMinSavePercent float64
 	minSavePercent              float64
@@ -126,24 +128,39 @@ func defaultAppSettings() AppSettings {
 		extraFilenameChars:   "",
 		av1TargetCQ:          32,
 		autoCQ:               true,
-		// 96 statt bis 1.34.0 97 (Nutzerwahl 2026-09-27, wie in CloudForge):
-		// ohne Kosten-Deckel ist das Ziel eine echte Untergrenze, und an fünf
-		// echten 1080p-Filmen (AV1) lohnten sich bei 97 zwei, bei 96 drei.
-		autoCQTargetVMAF:            96,
-		autoCQPlateauTolerance:      1.5,
+		// Seit 2.2.0 entscheidet das 5-%-Perzentil der Bildwerte, der
+		// Mittelwert bleibt als Sicherheitsnetz (autoCQCriterion) — beides wie
+		// CloudForge 0.19.1, mit dessen Ergebnissen der Nutzer zufrieden ist
+		// (2026-10-03). Mittelwert 95 statt bis 2.1.0 allein 96: das Netz,
+		// das der Nutzer in CloudForge fährt. Das Perzentil-Ziel 92 ist so
+		// geeicht, dass die Dateien im Schnitt so groß werden wie mit
+		// Mittelwert 96 allein — gemessen 2026-10-03 an den Messfenstern des
+		// Programms (je CQ-Stufe Mittelwert und 5-%-Perzentil): Nvidia-AV1 an
+		// sechs Quellen +0,9 % (einzeln −16 bis +42 %), H.265 an vier +6 %
+		// (91,5 wären +3 %; H.265 springt in groben Stufen). Gleichmäßige
+		// Filme werden kleiner, Filme mit schwachen Szenen größer.
+		autoCQTargetVMAF:           95,
+		autoCQVMAFPercentile:       5,
+		autoCQTargetVMAFPercentile: 92,
+		// 0,5 statt 1,5 (Nutzerentscheidung 2026-09-11, in CloudForge seither
+		// Werk): das Bild ist wichtiger als die letzten Prozent Platz.
+		autoCQPlateauTolerance:      0.5,
 		autoCQPlateauMinSavePercent: 5,
 		// Umgewandelt wird nur, was mindestens so viel spart; alles andere wird
-		// verlustfrei umgepackt. 20 ist die Wahl des Nutzers aus CloudForge
-		// (2026-09-27): darunter lohnt der Bildverlust eines Neukodierens nicht.
-		minSavePercent: 20,
+		// verlustfrei umgepackt. 7 wie CloudForge 0.20.0 (Wahl des Nutzers
+		// 2026-10-03; 2.0.0 bis 2.1.0: 20): die Qualität sichert das VMAF-Ziel,
+		// unter 7 % lohnt die Rechenzeit kaum.
+		minSavePercent: 7,
 		encoder:        encoderNvidia,
 		cpuPreset:      "fast",
-		cpuAV1Preset:   6,
-		// Die SVT-AV1-Schalter stehen ab Werk auf SVTs eigenem Standard (wie in
-		// CloudForge: der Nutzer probiert sie selbst). Stärke 2 und Oktil 5 sind
-		// SVTs Werte, falls Variance Boost eingeschaltet wird.
-		cpuAV1Tune:                  svtTunePSNR,
-		cpuAV1VarianceBoost:         false,
+		// Preset 9 und die beiden SVT-Schalter wie CloudForge 0.20.0 (Wahl des
+		// Nutzers nach seinen Läufen, 2026-10-03). p9 ist gleich gut wie p8
+		// und 35 % schneller (gemessen 2026-09-24); tune vq und Variance Boost
+		// kosten beim VMAF-Ziel etwas Größe, ihr Nutzen ist fürs Auge, nicht
+		// für VMAF. Stärke 2 und Oktil 5 sind SVTs eigene Werte.
+		cpuAV1Preset:                9,
+		cpuAV1Tune:                  svtTuneVQ,
+		cpuAV1VarianceBoost:         true,
 		cpuAV1VarianceBoostStrength: 2,
 		cpuAV1VarianceOctile:        5,
 		cpuTargetCRF:                18,
@@ -351,6 +368,8 @@ func defaultConfigStrings() map[string]string {
 		"av1TargetCQ":                 strconv.Itoa(d.av1TargetCQ),
 		"autoCQ":                      strconv.FormatBool(d.autoCQ),
 		"autoCQTargetVMAF":            strconv.FormatFloat(d.autoCQTargetVMAF, 'f', -1, 64),
+		"autoCQVMAFPercentile":        strconv.Itoa(d.autoCQVMAFPercentile),
+		"autoCQTargetVMAFPercentile":  strconv.FormatFloat(d.autoCQTargetVMAFPercentile, 'f', -1, 64),
 		"autoCQPlateauTolerance":      strconv.FormatFloat(d.autoCQPlateauTolerance, 'f', -1, 64),
 		"autoCQPlateauMinSavePercent": strconv.FormatFloat(d.autoCQPlateauMinSavePercent, 'f', -1, 64),
 		"minSavePercent":              strconv.FormatFloat(d.minSavePercent, 'f', -1, 64),
@@ -546,6 +565,22 @@ func parseAppConfig(path string) (AppSettings, []invalidSetting, []string) {
 		case "autoCQTargetVMAF":
 			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 70 && fv <= 99 {
 				s.autoCQTargetVMAF = fv
+			} else {
+				bad(key, val)
+			}
+		// 0 = am Mittelwert wie bis 2.1.0. Oben bei 50 abgeriegelt: darüber
+		// wäre es kein unteres Perzentil mehr, sondern ein oberes.
+		case "autoCQVMAFPercentile":
+			if n, e := strconv.Atoi(val); e == nil && n >= 0 && n <= 50 {
+				s.autoCQVMAFPercentile = n
+			} else {
+				bad(key, val)
+			}
+		// Tiefer als beim Mittelwert-Ziel erlaubt: das Perzentil liegt immer
+		// unter dem Mittelwert, bei schwierigen Filmen um mehrere Punkte.
+		case "autoCQTargetVMAFPercentile":
+			if fv, e := strconv.ParseFloat(val, 64); e == nil && fv >= 50 && fv <= 99 {
+				s.autoCQTargetVMAFPercentile = fv
 			} else {
 				bad(key, val)
 			}
@@ -898,11 +933,11 @@ go, without converting anything. The -crop option turns cutting on
 for a single run, -nocrop off.`)
 
 	configEntry("autoCQTargetVMAF", d.autoCQTargetVMAF, "70 to 99",
-		`How much visible quality the automatic search aims for, on a scale
-where 100 is identical to the source. 96 is the default. Measured on five
-real 1080p films in AV1: at 96 three of them were worth re-encoding, at
-97 only two - that last point often costs as many bits as the source
-itself. On smooth, evenly lit close-ups 97 keeps a touch more texture.
+		`How much visible quality the automatic search keeps ON AVERAGE, on a
+scale where 100 is identical to the source. 95 is the default. It
+always applies: alone with autoCQVMAFPercentile=0, otherwise as a
+safety net next to autoCQTargetVMAFPercentile - no file comes out worse
+on average than this value allows.
 The target is a floor: the chosen setting is measured and holds it,
 unless the source cannot reach it or only at a price no one would pay -
 the log then says why.
@@ -911,13 +946,25 @@ screen, so a small file cannot score better than it looks.
 Lower values save real space on busy material; below 94 the loss shows
 on anything. Higher = bigger files.`)
 
+	configEntry("autoCQTargetVMAFPercentile", d.autoCQTargetVMAFPercentile, "50 to 99",
+		`How much quality the WEAKEST frames keep: with autoCQVMAFPercentile=5,
+95 % of the measured frames score at least this much. An average can
+look fine while single scenes - dark, busy, fast - fall clearly short;
+this target sees them. Films with such scenes get more bits where they
+need them, even films get fewer - but never below autoCQTargetVMAF on
+average. 92 is the default: measured on six sources in AV1, it gives
+files as large on average as an average target of 96 alone did (one
+film 16 % smaller, one with weak scenes 42 % larger).
+The percentile always lies below the average. Rule of thumb: average
+target minus 3 to 4. Higher = bigger files.`)
+
 	configEntry("minSavePercent", d.minSavePercent, "0 to 90",
 		`How much smaller a file must get to be worth re-encoding, in percent
-of the whole file. The saving is predicted from the quality measurement
-before anything is encoded - close to the limit, ten more spots across
-the film are encoded to be sure - and the finished file is checked
-again. A file that would not save this much is remuxed losslessly
-instead: the picture stays exactly as it is.
+of the whole file. 7 is the default. The saving is predicted from the
+quality measurement before anything is encoded - close to the limit,
+twenty more spots across the film are encoded to be sure - and the
+finished file is checked again. A file that would not save this much is
+remuxed losslessly instead: the picture stays exactly as it is.
 0 only rejects results that come out larger than the source.
 Always remuxed without measuring: videos below 720p, and sources whose
 bitrate is already at the floor for their resolution.
@@ -980,6 +1027,14 @@ mono or low-channel track would end up with far too little bitrate.`)
 makes NVENCForge more than a preset - leave it on.
 -noautocq switches it off for a single run.`)
 
+	configEntry("autoCQVMAFPercentile", d.autoCQVMAFPercentile, "0 to 50",
+		`Which frames the quality search judges. 5 (the default) = the 5th
+percentile of the frame scores, the weakest 5 % of the measured frames:
+autoCQTargetVMAFPercentile is their target, autoCQTargetVMAF stays the
+safety net for the average. 0 = the average alone, as up to 2.1.0.
+Honest note: VMAF itself is not very sensitive in very dark scenes, so
+blocks in deep shadows can stay unnoticed either way.`)
+
 	configEntry("autoCQPlateauTolerance", d.autoCQPlateauTolerance, "0 to 10",
 		`Extra savings allowance for sources that were already heavily
 compressed (streaming rips, for example). Their quality tops out
@@ -1013,9 +1068,10 @@ little quality for three to four times the encoding time.`)
 
 	configEntry("cpuAV1Preset", d.cpuAV1Preset, "0 to 11",
 		`Same idea for AV1 on the processor. 0 is slowest/best,
-11 is fastest. Measured: 6 matches the GPU's file size and
-reaches VMAF 97 on most material; 9 is almost three times as
-fast but needs about 45% more data; 10 and 11 rarely reach 96.`)
+11 is fastest. 9 is the default. Measured: 6 matches the GPU's file
+size and reaches VMAF 97 on most material; 9 is almost three times
+as fast but needs about 45% more data, and it beats 8 (same quality,
+35% faster); 10 and 11 rarely reach 96.`)
 
 	configEntry("cpuAV1Tune", d.cpuAV1Tune, "psnr, vq",
 		`What SVT-AV1 tunes its decisions for (processor AV1 only).
@@ -1024,7 +1080,8 @@ numbers the quality score builds on. "vq" (visual quality) aims at
 what the eye sees - fine detail and grain hold up better, but VMAF
 rates it lower at the same size, so the automatic search spends
 more space to reach its target. One test at the same CRF: 13%
-larger, same speed. Try it on your own material and judge by eye.`)
+larger, same speed. "vq" is the default since 2.2.0, chosen by eye
+after long runs; set "psnr" for SVT-AV1's own behaviour.`)
 
 	configEntry("cpuAV1VarianceBoost", d.cpuAV1VarianceBoost, "true, false",
 		`Variance Boost (processor AV1 only): SVT-AV1 gives flat,
@@ -1032,8 +1089,9 @@ low-contrast areas - skies, walls, skin, dark scenes - extra
 quality, because blocking and banding show there first. VMAF hardly
 notices, so the automatic search pays for it with larger files.
 One test at the same CRF: 75% larger and about 10% slower; the
-automatic search evens out part of that. The two settings below
-only apply when this is true.`)
+automatic search evens out part of that. On (true) by default since
+2.2.0, chosen by eye after long runs. The two settings below only
+apply when this is true.`)
 
 	configEntry("cpuAV1VarianceBoostStrength", d.cpuAV1VarianceBoostStrength, "1 to 4",
 		`How strongly Variance Boost lifts flat areas (only with

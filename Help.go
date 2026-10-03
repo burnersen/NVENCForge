@@ -174,22 +174,26 @@ CONVERSION OPTIONS
                  actual encode starts. It costs a minute or two per
                  file and replaces all guesswork about "which CQ
                  should I use".
-                 The target is "autoCQTargetVMAF" in the config
-                 file (default 96 of 100 - measured on five real
-                 1080p films, 97 made only two of them worth
-                 re-encoding against three at 96; on smooth,
-                 evenly lit close-ups 97 keeps a touch more
-                 texture). It is a floor: if the chosen setting misses it, the
+                 The target is a pair of config keys: the weakest
+                 5 % of the measured frames must reach
+                 "autoCQTargetVMAFPercentile" (default 92 of 100),
+                 and the average must still reach
+                 "autoCQTargetVMAF" (default 95). An average can
+                 look fine while single scenes fall short - the
+                 percentile sees them, and the average is the
+                 safety net. "autoCQVMAFPercentile=0" judges the
+                 average alone, as up to 2.1.0.
+                 The target is a floor: if the chosen setting misses it, the
                  next ones are measured until one holds it; if it
                  clears it by a wide margin, one step thriftier is
                  tried. Pictures smaller than 1080p are measured
                  enlarged to Full HD, the way they look on screen.
                  There is no bitrate cap. What decides whether a
                  file is re-encoded at all is "minSavePercent"
-                 (default 20): the analysis predicts how much
+                 (default 7): the analysis predicts how much
                  smaller the whole file gets, and below that it is
                  remuxed losslessly instead - the picture stays
-                 exactly as it is. Close to the limit, ten more
+                 exactly as it is. Close to the limit, twenty more
                  spots across the film are encoded to be sure, and
                  the finished file is checked once more. Videos
                  below 720p and sources that are already lean are

@@ -378,11 +378,11 @@ func allTracksSelection(stats *VideoStats) mp4TrackSelection {
 // convertedMKVToMP4 handles an already-converted .mkv dropped straight onto
 // -mp4: instead of skipping it as "already converted", an H.265/H.264 file is
 // repackaged losslessly into a compatible <name>.mp4 in the output folder (no
-// second encode) and the original .mkv is KEPT — it is the user's finished
-// archive / DaVinci copy. AV1 plays on neither iPhones nor most TVs and would
-// need a real re-encode from the untouched source (not available here), so it
-// is skipped with a clear hint. The startup header for this file was already
-// printed by the caller.
+// second encode). AV1 is repackaged too, with a note about older devices.
+// Afterwards the original .mkv is retired like after any other conversion
+// (-keep leaves it, otherwise retireMode decides). Until 2.2.0 it was always
+// kept, which ignored an unticked "keep source". The startup header for this
+// file was already printed by the caller.
 func convertedMKVToMP4(ctx context.Context, cfg *AppConfig, filePath string) ProcessResult {
 	result := ProcessResult{InputFile: filePath}
 	dir := filepath.Dir(filePath)
@@ -425,7 +425,8 @@ func convertedMKVToMP4(ctx context.Context, cfg *AppConfig, filePath string) Pro
 		return result
 	}
 
-	if err := writeCompatMP4(ctx, filePath, stats, selectionForFile(ctx, cfg, filePath, stats), outMP4); err != nil {
+	sel := selectionForFile(ctx, cfg, filePath, stats)
+	if err := writeCompatMP4(ctx, filePath, stats, sel, outMP4); err != nil {
 		_ = os.Remove(outMP4)
 		if errors.Is(err, context.Canceled) {
 			result.Skipped = true
@@ -437,10 +438,23 @@ func convertedMKVToMP4(ctx context.Context, cfg *AppConfig, filePath string) Pro
 		fmt.Println()
 		return result
 	}
+	// The original is about to be retired, so the MP4 must hold up first —
+	// the same check every other result passes. Tracks the user deselected in
+	// the track prompt are a choice, not a loss.
+	tracksDropped := len(sel.audio) < len(stats.AudioStreams)
+	if valErr := validateOutput(ctx, outMP4, stats, false, false, tracksDropped, stats.VideoCodec); valErr != nil {
+		removeOrRename(outMP4)
+		result.ErrMsg = fmt.Sprintf("MP4.go: convertedMKVToMP4: MP4 invalid: %v", valErr)
+		result.FailedAt = time.Now()
+		pWarn.Printf("  MP4 failed the result check, original is kept: %v\n", valErr)
+		fmt.Println()
+		return result
+	}
 	if tsErr := copyTimestamps(filePath, outMP4); tsErr != nil {
 		pWarn.Printf("  Could not transfer file timestamps: %v\n", tsErr)
 	}
 	pOK.Printf("    ✓ %s\n", filepath.Base(outMP4))
+	retireOriginal(cfg, filePath)
 	fmt.Println()
 	result.OutputFile = outMP4
 	result.Success = true

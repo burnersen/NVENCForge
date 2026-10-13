@@ -85,7 +85,7 @@ For a single run: `-noautocq` skips the analysis, `-cq NN` forces a fixed level.
 - **Container & audio.** The iOS gallery won't accept MKV at all, and only plays **AAC** audio. `-mp4` delivers MP4 with `+faststart` — so playback starts immediately instead of after a seek to the end of the file — and re-encodes non-AAC tracks (AC3/DTS/…) to AAC where needed.
 - **Tracks.** MP4 carries several audio tracks just fine, but not every player lets you switch, and every extra track costs space. With more than one audio or subtitle track you are **asked which ones to keep** (no answer within 30 seconds keeps them all). Text subtitles go in as `mov_text`; picture subtitles from Blu-rays cannot be stored in MP4 at all and are reported instead of silently dropped.
 
-A fresh source is encoded as usual and then packaged. A file you **already converted** (`.h265.mkv` or `.av1.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is kept.
+A fresh source is encoded as usual and then packaged. A file you **already converted** (`.h265.mkv` or `.av1.mkv`) is just **repackaged losslessly** — no second encode — and the original MKV is then put away like any other original (moved to `originals` or the recycle bin; `-keep` leaves it in place).
 
 `-mp4` works with `-av1` as well: the track is marked **`av01`**, which is the regular way AV1 travels in an MP4. Be aware of what you get, though — current phones, TVs and browsers play it, older ones (including every iPhone before the 15 Pro) cannot. NVENCForge says so once and then does as told; add `-h265` when the file has to run everywhere. *(Up to 1.30.0 `-mp4` switched AV1 off instead — that was a decision the program had no business making.)*
 

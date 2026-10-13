@@ -117,7 +117,8 @@ CONVERSION OPTIONS
                  A fresh source is encoded as usual and then
                  repackaged; a file you ALREADY converted
                  (".h265.mkv") is only repackaged - no second
-                 encode - and the original .mkv is kept.
+                 encode. Its .mkv is then put away like any
+                 other original (-keep leaves it in place).
                  With more than one audio/subtitle track you are
                  asked which ones to keep (no answer within 30 s
                  keeps them all). Text subtitles go in as

@@ -16,8 +16,9 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 [![AV1 Ready](https://img.shields.io/badge/AV1-RTX%2040%2B-orange)](TECHNICAL.md#av1-depth)
 [![Written in Go](https://img.shields.io/badge/Made%20with-Go-00ADD8?logo=go)](TECHNICAL.md#building)
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue)](#-license)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/burnersen)
 
-**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[🌐 Website](https://tech.burnersen.de/en/tools/nvencforge-en/)**
+**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[🌐 Website](https://tech.burnersen.de/en/tools/nvencforge-en/)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
 
 <sub>🇩🇪 Auf Deutsch: [tech.burnersen.de/tools/nvencforge](https://tech.burnersen.de/tools/nvencforge/)</sub>
 
@@ -53,7 +54,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 - [🧩 The other modes](#-the-other-modes)
 - [⚙️ Configuration](#configuration)
 - [💻 Requirements](#-requirements)
-- [📜 License](#-license) · [💬 Feedback](#-feedback--contributions)
+- [📜 License](#-license) · [💬 Feedback](#-feedback--contributions) · [☕ Support](#-support)
 
 > 🔧 **Looking for the deep detail?** Every mode explained in full, every config key, and the complete list of safety nets lives on the **[technical page →](TECHNICAL.md)**
 
@@ -360,6 +361,12 @@ Their copyright notices and full license texts are in the repositories linked ab
 **Please don't be shy** — [open an issue](../../issues), even a one-liner. A quick "it just worked, thanks", a "this part confused me", a bug report, a wish for the next version: it's all welcome, and no question is too small. Honestly, even knowing the tool is being used out there is motivating. If you're not sure how to start, just say hi.
 
 Forks and pull requests are very welcome too. When reporting a bug, the console output helps a lot — run with `-debug` for the full detail.
+
+---
+
+## ☕ Support
+
+NVENCForge is free and made in my spare time, on my own hardware and electricity bill. If it saved you time or a pile of disk space and you'd like to say thanks, you can [drop a little something in the tip jar on Ko-fi](https://ko-fi.com/burnersen) — it keeps the forge hot. 🔥 Completely optional, and either way: thank you for using it!
 
 ---
 

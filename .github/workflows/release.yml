@@ -218,7 +218,7 @@ jobs:
             $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
           }
           if ([string]::IsNullOrWhiteSpace($notes)) {
-            Write-Host "::error::No release text for $tag: add $file or create the tag with 'git tag -a'."
+            Write-Host "::error::No release text for ${tag}: add $file or create the tag with 'git tag -a'."
             exit 1
           }
           # The release page is the download page, so it links the code

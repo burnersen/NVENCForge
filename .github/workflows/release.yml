@@ -229,6 +229,14 @@ jobs:
           } else {
             $footer = "NVENCForge.exe is not code signed, so Windows SmartScreen may warn. [Code signing policy]($policy)"
           }
+          # A friendly line for the people who read release texts: the ones
+          # updating, who are happy enough to stay.
+          $repo = "https://github.com/$env:GITHUB_REPOSITORY"
+          if ($env:SIGNED -eq 'true') {
+              $footer += "`n`n💜 Happy with NVENCForge? A ⭐ on [GitHub]($repo) is the easiest way to let me know, and it helps others find it. Or [tell me what you use it for]($repo/issues/new)."
+          } else {
+              $footer += "`n`n💜 Happy with NVENCForge? A ⭐ on [GitHub]($repo) is the easiest way to let me know, and it helps NVENCForge qualify for free code signing, so the Windows warning goes away for everyone. Or [tell me what you use it for]($repo/issues/new)."
+          }
           "$($notes.TrimEnd())`n`n---`n`n$footer" | Out-File -FilePath release-notes.md -Encoding utf8
 
           # gh release view exits non-zero when the release does not exist yet.

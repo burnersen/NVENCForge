@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (for example v1.25.0)'
+        description: 'Version to release, e.g. v1.25.0: an existing tag is built as it is, a new one is built from main and tagged'
         required: true
       dry_run:
         description: 'Dry run: build and check only, sign and publish nothing'
@@ -55,7 +55,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
           # The annotated tag message becomes the release notes, and that
           # annotation only exists in a clone that carries the tag objects.
           fetch-depth: 0
@@ -69,6 +68,26 @@ jobs:
           # fetches its FFmpeg over HTTPS, so that TLS stack matters.
           go-version: 'stable'
           cache: true
+
+      # Started by hand: an existing tag is built exactly as tagged. A new
+      # version is built from main, and publishing the release creates its
+      # tag on the commit that was built.
+      - name: Commit to build
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            git checkout -q --detach "refs/tags/$env:RELEASE_TAG"
+            Write-Host "Building the existing tag $env:RELEASE_TAG."
+          } elseif ($env:GITHUB_REF_NAME -ne 'main' -and $env:DRY_RUN -ne 'true') {
+            Write-Host "::error::A new version is released from main only, not from $env:GITHUB_REF_NAME."
+            exit 1
+          } else {
+            Write-Host "Tag $env:RELEASE_TAG does not exist yet: building $env:GITHUB_REF_NAME, the release creates the tag."
+          }
+          $global:LASTEXITCODE = 0
 
       # A tag that disagrees with appVersion would ship an exe announcing the
       # wrong version in its own startup header. Cheaper to catch here than to
@@ -188,13 +207,18 @@ jobs:
           $title = "NVENCForge $tag"
           Write-Host "Publishing $tag with NVENCForge.exe ($((Get-Item NVENCForge.exe).Length) bytes)."
 
-          # The release text is the annotated tag message - one source, written
-          # once, at the moment the version is cut. A tag without one is a
-          # mistake worth stopping for, not something to paper over with an
-          # empty release.
-          $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
+          # The release text is .github/release-notes/<tag>.md, or else the
+          # annotated tag message - one source, written once, at the moment
+          # the version is cut. A release without either is a mistake worth
+          # stopping for, not something to paper over with an empty release.
+          $file = ".github/release-notes/$tag.md"
+          if (Test-Path $file) {
+            $notes = [IO.File]::ReadAllText("$PWD/$file")
+          } else {
+            $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
+          }
           if ([string]::IsNullOrWhiteSpace($notes)) {
-            Write-Host "::error::Tag $tag has no annotation - the release notes come from it. Create it with 'git tag -a'."
+            Write-Host "::error::No release text for $tag: add $file or create the tag with 'git tag -a'."
             exit 1
           }
           # The release page is the download page, so it links the code
@@ -205,7 +229,7 @@ jobs:
           } else {
             $footer = "NVENCForge.exe is not code signed, so Windows SmartScreen may warn. [Code signing policy]($policy)"
           }
-          "$notes`n`n---`n`n$footer" | Out-File -FilePath release-notes.md -Encoding utf8
+          "$($notes.TrimEnd())`n`n---`n`n$footer" | Out-File -FilePath release-notes.md -Encoding utf8
 
           # gh release view exits non-zero when the release does not exist yet.
           # Re-running a release (a corrected workflow, a retried build) has to
@@ -220,5 +244,5 @@ jobs:
             gh release edit $tag --title $title --notes-file release-notes.md --draft=false
             gh release upload $tag NVENCForge.exe --clobber
           } else {
-            gh release create $tag NVENCForge.exe --title $title --notes-file release-notes.md
+            gh release create $tag NVENCForge.exe --target (git rev-parse HEAD) --title $title --notes-file release-notes.md
           }

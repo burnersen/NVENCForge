@@ -28,6 +28,12 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 </div>
 
+> 💜 **Using NVENCForge and happy with it?** A ⭐ on GitHub is the easiest way to let me know,
+> and it does more than you'd think: stars are how small projects like this one qualify for
+> free code signing, which makes the Windows warning go away for everyone. Or
+> [tell me what you use it for](https://github.com/burnersen/NVENCForge/issues/new), I read every message.
+> Thanks for being here!
+
 > ### 🖥️ New: there is a window for this now
 >
 > Rather click than type? **[NVENCForgeGUI](https://github.com/burnersen/NVENCForgeGUI)**

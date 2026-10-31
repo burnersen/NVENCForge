@@ -396,7 +396,7 @@ That's it. `build.bat` resolves the dependencies and compiles `NVENCForge.exe` (
 Released exes are built by the [release workflow](.github/workflows/release.yml) on GitHub, which also writes name and version into the file properties (from [`winres/winres.json`](winres/winres.json)) and, once code signing is switched on, has the exe signed: see [`.signpath/README.md`](.signpath/README.md). To get the same file properties locally, run this before `build.bat`:
 
 ```
-go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out rsrc --arch amd64 --product-version 2.2.1 --file-version 2.2.1
+go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out rsrc --arch amd64 --product-version 2.2.2 --file-version 2.2.2
 ```
 
 ---

@@ -1,7 +1,9 @@
 # Code signing with SignPath: prepared, off until switched on
 
-NVENCForge has applied to the [SignPath Foundation](https://signpath.org) for free
-code signing of its Windows files. Everything for it is prepared here and in
+NVENCForge plans to use free code signing from the [SignPath Foundation](https://signpath.org)
+for its Windows files. A first application in October 2026 came too early: the Foundation
+asks for more public visibility (stars, forks, external mentions), and is happy to review
+it again later. Everything for it is prepared here and in
 [`release.yml`](../.github/workflows/release.yml), but **it stays off** until it is
 switched on below. Until then every release is built and published exactly as before,
 unsigned, and its release text says so.

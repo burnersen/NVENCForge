@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for NVENCForge (see
+  ../.github/workflows/release.yml). Copy it into the SignPath project as
+  its default artifact configuration.
+
+  The workflow uploads NVENCForge.exe as a ZIP. Only this file is signed,
+  and only if its file properties name NVENCForge and the version of the
+  release. FFmpeg is never part of a release: NVENCForge downloads it on
+  first run.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <!-- The version of the release, e.g. 2.2.1 (appVersion in main.go). -->
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="NVENCForge.exe" product-name="NVENCForge" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

@@ -3,6 +3,16 @@
 # release asset. Runs on Windows for the same reason CI does - every source
 # file carries //go:build windows && amd64, so a Linux runner finds no
 # packages at all and would report success without building anything.
+#
+# Dry run: tick "dry run" when starting it by hand. The exe is built and
+# checked and stays on the run page as a workflow artifact; nothing is
+# signed or published. Pull requests that change this workflow, winres/ or
+# .signpath/ get a dry run by themselves.
+#
+# Code signing (SignPath Foundation) is prepared but off until the
+# repository has the variable SIGNPATH_ORGANIZATION_ID and the secret
+# SIGNPATH_API_TOKEN; see .signpath/README.md. Without them the exe is
+# released unsigned, exactly as before.
 name: Release
 
 on:
@@ -16,15 +26,31 @@ on:
       tag:
         description: 'Existing tag to release (for example v1.25.0)'
         required: true
+      dry_run:
+        description: 'Dry run: build and check only, sign and publish nothing'
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.signpath/**'
+      - 'winres/**'
 
 # The default token is read-only; publishing a release and uploading its asset
-# both need write access to the repository contents.
+# both need write access to the repository contents. actions: read lets
+# SignPath fetch the unsigned exe from this run.
 permissions:
   contents: write
+  actions: read
+
+env:
+  DRY_RUN: ${{ github.event_name == 'pull_request' || inputs.dry_run == true }}
 
 jobs:
   release:
     runs-on: windows-latest
+    # Includes up to one hour of waiting for the signing approval.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -46,24 +72,34 @@ jobs:
 
       # A tag that disagrees with appVersion would ship an exe announcing the
       # wrong version in its own startup header. Cheaper to catch here than to
-      # replace a published asset afterwards.
+      # replace a published asset afterwards. A pull request has no tag: it
+      # builds the version in main.go.
       - name: Tag matches appVersion
         run: |
-          $tag = "${{ inputs.tag || github.ref_name }}"
           $match = Select-String -Path main.go -Pattern '^const appVersion = "(.+)"' | Select-Object -First 1
           if (-not $match) {
             Write-Host "::error::Could not find appVersion in main.go"
             exit 1
           }
           $inCode = $match.Matches[0].Groups[1].Value
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { $tag = "v$inCode" }
           if ("v$inCode" -ne $tag) {
             Write-Host "::error::Tag $tag does not match appVersion $inCode in main.go"
             exit 1
           }
           Write-Host "Tag $tag matches appVersion $inCode."
+          "TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "VERSION=$inCode" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: go test
         run: go test ./...
+
+      # Name and version in the exe's file properties (right-click >
+      # Properties > Details). SignPath only signs an exe whose properties
+      # name NVENCForge and the version of the release.
+      - name: File properties
+        run: go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out rsrc --arch amd64 --product-version $env:VERSION --file-version $env:VERSION
 
       # -ldflags="-s -w" drops the debug and symbol tables: the same flags
       # every released exe so far was built with, so the asset stays the size
@@ -71,13 +107,84 @@ jobs:
       - name: Build
         run: go build -ldflags="-s -w" -o NVENCForge.exe .
 
+      - name: Check the file properties
+        run: ./.signpath/check-files.ps1 -ProductName NVENCForge -ProductVersion $env:VERSION -Path NVENCForge.exe
+
+      # --- code signing ------------------------------------------------------
+      - name: 'code signing: on or off?'
+        id: signing
+        env:
+          ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          HAS_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        run: |
+          $hasOrganization = -not [string]::IsNullOrWhiteSpace($env:ORGANIZATION_ID)
+          $hasToken = $env:HAS_TOKEN -eq 'true'
+          if ($env:DRY_RUN -eq 'true') {
+            $on = $false
+            Write-Host 'Dry run: nothing is signed.'
+          } elseif ($hasOrganization -ne $hasToken) {
+            Write-Host '::error::Code signing is half set up: SIGNPATH_ORGANIZATION_ID and SIGNPATH_API_TOKEN must both be set, or neither (see .signpath/README.md).'
+            exit 1
+          } else {
+            $on = $hasOrganization -and $hasToken
+            Write-Host ($(if ($on) { 'Code signing is on.' } else { 'Code signing is off: this release is unsigned.' }))
+          }
+          "enabled=$($on.ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: 'code signing: collect the exe'
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          New-Item -ItemType Directory sign/unsigned -Force | Out-Null
+          Copy-Item NVENCForge.exe sign/unsigned/
+
+      - name: 'code signing: upload the exe'
+        id: unsigned
+        if: steps.signing.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned
+          path: sign/unsigned
+          if-no-files-found: error
+
+      - name: 'code signing: sign (approve the request in SignPath)'
+        if: steps.signing.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'NVENCForge' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: sign/signed
+          parameters: |
+            version: "${{ env.VERSION }}"
+
+      - name: 'code signing: take over the signed exe'
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          Copy-Item sign/signed/NVENCForge.exe NVENCForge.exe -Force
+          ./.signpath/check-files.ps1 -ProductName NVENCForge -ProductVersion $env:VERSION -Path NVENCForge.exe -Signed
+
+      - name: 'dry run: keep the exe on the run page'
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run
+          path: NVENCForge.exe
+          retention-days: 7
+
       # gh is preinstalled on GitHub runners and signs in with the token this
       # workflow already holds, so no personal access token is involved.
       - name: Publish release
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ steps.signing.outputs.enabled }}
         run: |
-          $tag = "${{ inputs.tag || github.ref_name }}"
+          $tag = $env:TAG
           $title = "NVENCForge $tag"
           Write-Host "Publishing $tag with NVENCForge.exe ($((Get-Item NVENCForge.exe).Length) bytes)."
 
@@ -90,7 +197,15 @@ jobs:
             Write-Host "::error::Tag $tag has no annotation - the release notes come from it. Create it with 'git tag -a'."
             exit 1
           }
-          $notes | Out-File -FilePath release-notes.md -Encoding utf8
+          # The release page is the download page, so it links the code
+          # signing policy and says whether this exe is signed.
+          $policy = "https://github.com/$env:GITHUB_REPOSITORY/blob/main/CODE_SIGNING.md"
+          if ($env:SIGNED -eq 'true') {
+            $footer = "NVENCForge.exe is signed. Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). [Code signing policy]($policy)"
+          } else {
+            $footer = "NVENCForge.exe is not code signed, so Windows SmartScreen may warn. [Code signing policy]($policy)"
+          }
+          "$notes`n`n---`n`n$footer" | Out-File -FilePath release-notes.md -Encoding utf8
 
           # gh release view exits non-zero when the release does not exist yet.
           # Re-running a release (a corrected workflow, a retried build) has to

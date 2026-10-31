@@ -18,7 +18,7 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue)](#-license)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/burnersen)
 
-**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[🌐 Website](https://tech.burnersen.de/en/tools/nvencforge-en/)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
+**[⬇️ Download the latest release](https://github.com/burnersen/NVENCForge/releases/latest)** · **[🌐 Website](https://tech.burnersen.de/en/tools/nvencforge-en/)** · **[🔏 Code signing policy](CODE_SIGNING.md)** · **[☕ Buy me a coffee](https://ko-fi.com/burnersen)**
 
 <sub>🇩🇪 Auf Deutsch: [tech.burnersen.de/tools/nvencforge](https://tech.burnersen.de/tools/nvencforge/)</sub>
 
@@ -315,7 +315,9 @@ The five worth knowing about:
 
 ## 🛡️ Windows SmartScreen / antivirus warnings
 
-Windows or your antivirus may warn you the first time you run `NVENCForge.exe`. The honest reason: **the EXE is not code-signed.** Signing certificates cost several hundred euros *per year*, and this is a free hobby project with zero income. Unsigned Go binaries are frequent false-positive targets; there is nothing I can do about it except be transparent.
+Windows or your antivirus may warn you the first time you run `NVENCForge.exe`. The honest reason: **the EXE is not code-signed yet.** Signing certificates cost several hundred euros *per year*, and this is a free hobby project with zero income. Free code signing through the [SignPath Foundation](https://signpath.org) is applied for and already prepared; see the [code signing policy](CODE_SIGNING.md). Until then, unsigned Go binaries are frequent false-positive targets, and all I can do is be transparent.
+
+Every release is built by GitHub Actions from this repository ([release workflow](.github/workflows/release.yml)), never on a private PC.
 
 You don't have to trust me blindly: **scan it** on [VirusTotal](https://www.virustotal.com), **read it** — the complete source is in this repository — or **[build it yourself](TECHNICAL.md#building)**.
 
@@ -337,6 +339,10 @@ NVENCForge is free software under the [GNU General Public License, version 3](LI
 - **The one condition:** Whoever passes on NVENCForge or parts of it — unchanged, changed or built into a program of their own — must include the complete source code and pass everything on under the same license. A closed, paid product with NVENCForge inside is therefore not possible.
 - **Free of charge:** NVENCForge is and stays free. The official source is [github.com/burnersen/NVENCForge](https://github.com/burnersen/NVENCForge) — anyone asking money for NVENCForge is selling you what you can get here for free.
 - **A separate license for companies:** Want to build NVENCForge into a product that is not meant to be under the GPLv3? You can ask the author for a separate license — just [open an issue](https://github.com/burnersen/NVENCForge/issues).
+
+### Code signing and privacy
+
+What is signed, who approves it and what NVENCForge sends over the network (only the FFmpeg download): [code signing policy](CODE_SIGNING.md). To uninstall, delete the folder; nothing is written to the registry.
 
 ### FFmpeg
 

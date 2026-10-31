@@ -1,0 +1,22 @@
+{
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "burnersen",
+            "FileDescription": "NVENCForge - H.265 / AV1 NVENC batch encoder",
+            "InternalName": "NVENCForge",
+            "LegalCopyright": "Copyright (C) 2026 burnersen, GPL-3.0-only",
+            "OriginalFilename": "NVENCForge.exe",
+            "ProductName": "NVENCForge"
+          }
+        }
+      }
+    }
+  }
+}

@@ -31,7 +31,7 @@ type AppConfig struct {
 	cpu           bool     // -cpu: auf dem Prozessor encodieren (libx265/libsvtav1) statt auf der GPU
 	mp4Mode       bool     // -mp4 (alt: -apple): Ausgabe als überall abspielbare MP4 (H.265/hvc1 + AAC + faststart) statt MKV
 	eightBit      bool     // -8bit: in 8 Bit encodieren statt in 10 Bit (für alte Geräte, die kein Main10 können)
-	keepSource    bool     // -keep: Originaldatei NICHT in den Papierkorb verschieben (bleibt unangetastet)
+	keepSource    bool     // -keep: Originaldatei bleibt unangetastet — nicht verschoben, nicht umbenannt
 	autoCQ        bool     // -autocq: CQ pro Datei per Stichproben-VMAF-Suche bestimmen (nur H.265)
 	forcedCQ      int      // -cq N: fester CQ nur für diesen Lauf (0 = aus); schlägt Auto-CQ und INI-Ziel-CQ (H.265 1-51, AV1 1-63)
 	autoCrop      bool     // -crop: schwarze Balken erkennen und wegschneiden (Voreinstellung aus)
@@ -988,7 +988,7 @@ The -keep option always wins and leaves the original where it is.`)
 
 	configEntry("keepSource", d.keepSource, "true, false",
 		`Leave the original exactly where it is after a successful conversion,
-instead of moving it away as retireMode says.
+instead of moving it away as retireMode says. It is not renamed either.
 Both files then exist side by side - the result lives in its own
 "output" folder, so nothing is ever overwritten. Keep an eye on your
 free space with this switched on.

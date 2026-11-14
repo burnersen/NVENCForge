@@ -124,10 +124,9 @@ CONVERSION OPTIONS
                  keeps them all). Text subtitles go in as
                  "mov_text"; picture subtitles from Blu-rays cannot
                  be stored in MP4 at all and are reported.
-                 AV1 plays on neither iPhones nor most TVs, so -mp4
-                 always uses H.265 (an existing ".av1.mkv" is
-                 skipped with a hint - re-run -mp4 on the original
-                 source). (alias: -apple, the old name)
+                 An existing ".av1.mkv" is repackaged as well, with
+                 the same note about older devices.
+                 (alias: -apple, the old name)
                  Set container=mp4 in the config file to make this
                  the permanent behaviour.
   -mkv           Write a ".mkv" after all, even when container=mp4
@@ -291,9 +290,10 @@ CONVERSION OPTIONS
   -nocrop        Keep the black bars for this run (overrides
                  autoCrop=true in the config).
   -keep          Keep the original files where they are: after a
-                 successful conversion they are NOT moved at all.
-                 The output lives in its own folder, so nothing is
-                 overwritten. Use this if you want both files.
+                 successful conversion they are neither moved nor
+                 renamed. The output lives in its own folder, so
+                 nothing is overwritten. Use this if you want both
+                 files.
                  Set keepSource=true in the config file to make this
                  the permanent behaviour.
   -nokeep        Move the originals away as retireMode says after

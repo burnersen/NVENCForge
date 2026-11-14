@@ -511,6 +511,31 @@ func durationsClose(a, b float64) bool {
 	return a >= b*0.95 && a <= b*1.05
 }
 
+// finishedOutputCandidates lists every name a finished result of this source
+// may carry in the output folder: one per skip suffix as .mkv, and in a -mp4
+// run the same names as .mp4 as well. Until 2.2.2 only the .mkv names were
+// looked at — but a -mp4 run leaves no .mkv behind, so a second run over a
+// source that was kept (-keep) encoded the whole file again and wrote a
+// numbered twin next to the first MP4.
+//
+// Outside of -mp4 an existing MP4 is deliberately NOT a finished result: who
+// asks for an MKV now has not got one yet.
+func finishedOutputCandidates(outputDir, name string, mp4Mode bool) []string {
+	candidates := make([]string, 0, len(skipSuffixes)*2)
+	for _, suf := range skipSuffixes {
+		candidates = append(candidates, filepath.Join(outputDir, name+suf+".mkv"))
+		if mp4Mode {
+			candidates = append(candidates, filepath.Join(outputDir, name+suf+".mp4"))
+		}
+	}
+	return candidates
+}
+
+// isMP4Path reports whether path names an MP4 file.
+func isMP4Path(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".mp4")
+}
+
 // ----------------------------------------------------------------------------
 // removeOrRename: robust deletion with fallback rename
 // ----------------------------------------------------------------------------
@@ -718,10 +743,18 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// isOurFinishedOutput decides whether an existing output is THIS run's result
 	// (→ skip) or only looks alike: a different codec mode, or a different source
 	// whose cleaned name + duration collide with ours (→ write a numbered output).
+	//
+	// tagless is set for an .mp4 candidate: the MP4 step cannot carry the source
+	// tag over (the muxer drops unknown global keys), so such a file is judged
+	// like a legacy output without a tag — and it may hold the SOURCE codec as
+	// well, because a remux decided after the analysis ends up as an MP4 too.
 	srcID := filepath.Base(filePath)
-	isOurFinishedOutput := func(cs *VideoStats) bool {
+	isOurFinishedOutput := func(cs *VideoStats, tagless bool) bool {
 		if !durationsClose(cs.DurationSec, stats.DurationSec) {
 			return false // different length → different source
+		}
+		if tagless && cs.SourceTag == "" && strings.EqualFold(cs.VideoCodec, stats.VideoCodec) {
+			return true
 		}
 		// Since 2.0.0 a file can also end up remuxed AFTER the analysis, when
 		// re-encoding would not save minSavePercent — which resultCodec cannot
@@ -740,8 +773,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 
 	collision := false
-	for _, suf := range skipSuffixes {
-		candidate := filepath.Join(outputDir, basenameFull+suf+".mkv")
+	for _, candidate := range finishedOutputCandidates(outputDir, basenameFull, cfg.mp4Mode) {
 		if _, err := os.Stat(candidate); err != nil {
 			continue
 		}
@@ -773,7 +805,7 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			result.ErrMsg = "Corrupt output file blocked"
 			return result
 		}
-		if isOurFinishedOutput(candStats) {
+		if isOurFinishedOutput(candStats, isMP4Path(candidate)) {
 			fmt.Println(pterm.Gray("  Skipped: output file already exists."))
 			fmt.Println()
 			result.Skipped = true
@@ -798,14 +830,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		for n := 2; n <= 99 && !resolved; n++ {
 			cand := fmt.Sprintf("%s.%d", basenameFull, n)
 			occupied := false
-			for _, suf := range skipSuffixes {
-				p := filepath.Join(outputDir, cand+suf+".mkv")
+			for _, p := range finishedOutputCandidates(outputDir, cand, cfg.mp4Mode) {
 				if _, err := os.Stat(p); err != nil {
 					continue
 				}
 				occupied = true
 				// A numbered output may already belong to THIS source (resume).
-				if cs, e := getVideoStats(ctx, p); e == nil && isOurFinishedOutput(cs) {
+				if cs, e := getVideoStats(ctx, p); e == nil && isOurFinishedOutput(cs, isMP4Path(p)) {
 					fmt.Println(pterm.Gray("  Skipped: output file already exists (" +
 						filepath.Base(p) + ")."))
 					fmt.Println()
@@ -842,14 +873,13 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	}
 	defer unlock()
 
-	for _, suf := range skipSuffixes {
-		candidate := filepath.Join(outputDir, basenameFull+suf+".mkv")
+	for _, candidate := range finishedOutputCandidates(outputDir, basenameFull, cfg.mp4Mode) {
 		if _, err := os.Stat(candidate); err != nil {
 			continue
 		}
 		// Only OUR finished output aborts here; another codec mode's file or a
 		// different source must not make us skip (mirrors the pre-lock check).
-		if cs, e := getVideoStats(ctx, candidate); e == nil && !isOurFinishedOutput(cs) {
+		if cs, e := getVideoStats(ctx, candidate); e == nil && !isOurFinishedOutput(cs, isMP4Path(candidate)) {
 			continue
 		}
 		fmt.Println(pterm.Gray("  Skipped: output file found after acquiring lock (another instance was faster)."))
@@ -1090,7 +1120,11 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 	// Not re-encoded: an MKV whose picture already has the target codec IS the
 	// result — it only gets its suffix instead of a byte-for-byte copy. Every
 	// other file is remuxed, as far as that is possible losslessly.
-	if doRemux && canRenameInPlace(stats, targetCodec, ext, cfg.mp4Mode, doScale) {
+	//
+	// -keep rules the shortcut out: renaming IS touching the source. It then
+	// takes the remux route like every other file — a copy in "output", the
+	// original exactly where and as it was.
+	if doRemux && !cfg.keepSource && canRenameInPlace(stats, targetCodec, ext, cfg.mp4Mode, doScale) {
 		newPath := filepath.Join(dir, base+outSuffix+ext)
 		if _, statErr := os.Stat(newPath); statErr == nil {
 			fmt.Println(pterm.Gray(fmt.Sprintf(
@@ -1306,7 +1340,14 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 			stats.FileSizeMB, outSizeMB, pterm.LightRed(verdict), codecLabel)
 		_ = os.Remove(outputFile)
 
-		if ext == ".mkv" {
+		// An MKV source is its own result here and only gets the suffix that
+		// protects it from another attempt. Two cases must not take this
+		// shortcut and get a real remux into "output" below instead:
+		//   -keep  the source stays untouched, and a new name is not untouched
+		//          (until 2.2.2 it was renamed all the same);
+		//   -mp4   a renamed MKV is not the MP4 that was asked for — the remux
+		//          gives the MP4 step a file of our own to repackage.
+		if ext == ".mkv" && !cfg.keepSource && !cfg.mp4Mode {
 			markPath := filepath.Join(dir, base+remuxSuffix(stats.VideoCodec)+".mkv")
 			if _, statErr := os.Stat(markPath); statErr == nil {
 				fmt.Println(pterm.Gray(fmt.Sprintf(

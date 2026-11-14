@@ -319,10 +319,12 @@ func remuxResultToMP4(ctx context.Context, cfg *AppConfig, res *ProcessResult) {
 	}
 	src := res.OutputFile
 	// Only OUR freshly written output is remuxed: an .mkv living in the "output"
-	// folder. Some result paths report back an untouched original (e.g. an
-	// oversized encode was discarded) — that file must stay exactly as it is.
-	if !strings.EqualFold(filepath.Ext(src), ".mkv") ||
-		!strings.EqualFold(filepath.Base(filepath.Dir(src)), "output") {
+	// folder OF ITS SOURCE. Some result paths report back an untouched original
+	// (e.g. an oversized encode was discarded) — that file must stay exactly as
+	// it is. Until 2.2.2 the folder's NAME alone decided, so an original that
+	// itself lay in a folder called "output" passed for our output and was
+	// deleted further down.
+	if !strings.EqualFold(filepath.Ext(src), ".mkv") || !isOwnOutputFile(res.InputFile, src) {
 		return
 	}
 	stats, err := getVideoStats(ctx, src)
@@ -335,13 +337,27 @@ func remuxResultToMP4(ctx context.Context, cfg *AppConfig, res *ProcessResult) {
 		pWarn.Printf("MP4: no free output name (%v) — MKV kept.\n", err)
 		return
 	}
-	if err := writeCompatMP4(ctx, src, stats, selectionForFile(ctx, cfg, src, stats), mp4Out); err != nil {
+	sel := selectionForFile(ctx, cfg, src, stats)
+	if err := writeCompatMP4(ctx, src, stats, sel, mp4Out); err != nil {
 		_ = os.Remove(mp4Out)
 		if errors.Is(err, context.Canceled) {
 			return
 		}
 		pWarn.Printf("MP4 creation failed (%v) — the MKV is kept: %s\n",
 			err, filepath.Base(src))
+		return
+	}
+	// The MKV is about to be deleted and the original is already put away, so
+	// the MP4 must hold up first — the same check convertedMKVToMP4 runs.
+	// Tracks the user deselected in the track prompt are a choice, not a loss.
+	tracksDropped := len(sel.audio) < len(stats.AudioStreams)
+	if valErr := validateOutput(ctx, mp4Out, stats, false, false, tracksDropped, stats.VideoCodec); valErr != nil {
+		removeOrRename(mp4Out)
+		if ctx.Err() != nil {
+			return
+		}
+		pWarn.Printf("MP4 failed the result check (%v) — the MKV is kept: %s\n",
+			valErr, filepath.Base(src))
 		return
 	}
 	if tsErr := copyTimestamps(src, mp4Out); tsErr != nil {
@@ -351,6 +367,16 @@ func remuxResultToMP4(ctx context.Context, cfg *AppConfig, res *ProcessResult) {
 	_ = os.Remove(src)
 	res.OutputFile = mp4Out
 	pOK.Printf("    ✓ %s\n", filepath.Base(mp4Out))
+}
+
+// isOwnOutputFile reports whether outputFile lies in the "output" folder that
+// belongs to inputFile — the only place this program writes results to.
+func isOwnOutputFile(inputFile, outputFile string) bool {
+	if inputFile == "" {
+		return false
+	}
+	ownDir := filepath.Join(filepath.Dir(inputFile), "output")
+	return strings.EqualFold(filepath.Clean(filepath.Dir(outputFile)), filepath.Clean(ownDir))
 }
 
 // selectionForFile ermittelt die Spuren für eine MP4: fragen, sobald es etwas

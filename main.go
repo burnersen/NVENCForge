@@ -292,6 +292,7 @@ type VideoStats struct {
 	FPSNum         int
 	FPSDen         int
 	FPSNote        string // Hinweis zur Bildrate (leer = unauffällig), siehe pickFrameRate
+	FPSCounted     bool   // Bildrate stammt aus gezählten Bildern, nicht aus dem Container (countedFrameRate)
 	DurationSec    float64
 	BitrateBps     int64
 	FileSizeMB     float64
@@ -674,16 +675,27 @@ func ffmpegStartFailure(probeErr error) string {
 //
 // Bewusst OHNE den Rat, ffmpeg.exe zu löschen: der Downloader holt denselben
 // Build wieder. Genau dieser Rat war es, der den Melder im Kreis schickte.
+//
+// Die Meldung nennt, was der geladene Build voraussetzt und wo ein anderer zu
+// haben ist. "Nimm ein älteres FFmpeg" allein half dem zweiten Melder
+// (2026-11, Windows 10 LTSC mit Quadro P2000) nicht weiter: Er wusste weder,
+// wie alt, noch woher. Die Grenze 22H2 ist die Angabe der BtbN-Builds selbst
+// (README, Stand 2026-11); darunter gibt es keine Zusage — bewusst so
+// formuliert, denn welcher Build auf welchem alten Windows wirklich startet,
+// lässt sich von hier aus nicht vorhersagen.
 func reportFFmpegStartFailure(reason string) {
 	fmt.Println()
 	pFatal.Println("FFmpeg cannot run on this system.")
 	pterm.Println(pterm.Gray("  " + reason))
 	fmt.Println()
 	pInfo.Println("This is not a missing codec: the FFmpeg build itself does not start here.")
-	pInfo.Println("Such builds are usually made for a newer Windows than the one installed.")
+	pInfo.Println("The downloaded build is made for Windows 10 22H2 and newer; on an older Windows")
+	pInfo.Println("(LTSC/LTSB editions included) it is not guaranteed to start.")
 	pInfo.Println("Downloading it again will NOT help — it is the same build every time.")
-	pInfo.Println("Put an older FFmpeg (ffmpeg.exe + ffprobe.exe) next to NVENCForge.exe instead;")
-	pInfo.Println("a local copy is always used before the downloaded one.")
+	pInfo.Println("Put a different FFmpeg (ffmpeg.exe + ffprobe.exe) next to NVENCForge.exe instead;")
+	pInfo.Println("a local copy is always used before the downloaded one. Where to get one:")
+	pInfo.Println("  https://www.gyan.dev/ffmpeg/builds/ — try the \"release essentials\" build first,")
+	pInfo.Println("  then an older version from the archive linked there, until one starts.")
 	waitForEnter()
 	os.Exit(1)
 }

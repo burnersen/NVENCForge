@@ -73,3 +73,64 @@ func TestCalcGOPFollowsFrameRate(t *testing.T) {
 		t.Errorf("calcGOP(300/1) = %d, want 600 (the old, clamped value)", got)
 	}
 }
+
+// TestFrameRateFromPacketCount sichert den Ausweg für Dateien ab, bei denen
+// ffprobe gar keine glaubwürdige Bildrate meldet (alte WMV: r_frame_rate
+// 1000/1, avg_frame_rate 0/0). Der entscheidende Fall ist der nachgestellte:
+// 200 Bilder in 8,003 Sekunden sind 25 fps, nicht 1000.
+func TestFrameRateFromPacketCount(t *testing.T) {
+	cases := []struct {
+		name     string
+		packets  int
+		duration float64
+		wantNum  int
+		wantDen  int
+		wantOK   bool
+	}{
+		{"the measured WMV: 200 frames in 8.003 s", 200, 8.003, 25, 1, true},
+		{"NTSC film snaps to 24000/1001", 143856, 6000, 24000, 1001, true},
+		{"24 fps is not pulled over to 23.976", 144000, 6000, 24, 1, true},
+		{"29.97 snaps to 30000/1001", 179820, 6000, 30000, 1001, true},
+		{"an odd rate stays what it is", 1250, 100, 12500, 1000, true},
+		// Echtes Hochgeschwindigkeitsmaterial: das Zählen bestätigt die hohe
+		// Rate, sie darf dann nicht durch etwas anderes ersetzt werden.
+		{"real 240 fps is no replacement", 24000, 100, 0, 0, false},
+		{"slide show below 1 fps is no replacement", 5, 100, 0, 0, false},
+		{"no frames counted", 0, 100, 0, 0, false},
+		{"duration unknown", 200, 0, 0, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			num, den, ok := frameRateFromPacketCount(c.packets, c.duration)
+			if num != c.wantNum || den != c.wantDen || ok != c.wantOK {
+				t.Errorf("frameRateFromPacketCount(%d, %v) = %d/%d ok=%v, want %d/%d ok=%v",
+					c.packets, c.duration, num, den, ok, c.wantNum, c.wantDen, c.wantOK)
+			}
+		})
+	}
+}
+
+// TestCountedRateReachesTheEncoder: Die nachgezählte Bildrate nützt nichts,
+// wenn sie nur im Protokoll steht. FFmpeg nähme ohne "-r" weiter die Angabe
+// des Containers und füllte auf 1000 Bilder pro Sekunde auf.
+func TestCountedRateReachesTheEncoder(t *testing.T) {
+	hasRate := func(args []string, rate string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-r" && args[i+1] == rate {
+				return true
+			}
+		}
+		return false
+	}
+	job := convJob{inputPath: "in.wmv", outputPath: "out.mkv", outputRate: "25/1"}
+	if !hasRate(job.buildConvertArgs(), "25/1") {
+		t.Error("die nachgezählte Bildrate fehlt in der Befehlszeile des Encoders")
+	}
+	// Der Normalfall darf sich nicht ändern: ohne Nachzählen kein "-r".
+	plain := convJob{inputPath: "in.mkv", outputPath: "out.mkv"}
+	for _, arg := range plain.buildConvertArgs() {
+		if arg == "-r" {
+			t.Error("ohne nachgezählte Bildrate darf kein -r in der Befehlszeile stehen")
+		}
+	}
+}

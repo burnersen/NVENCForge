@@ -9,7 +9,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -612,6 +611,9 @@ func promptTrackSelection(streams *ffprobeOutput, allowStereo bool, srcPath stri
 	if hasStereoOption {
 		hint = "Enter = all tracks WITHOUT stereo mix"
 	}
+	// Vor der Ankündigung: was jetzt noch in der Eingabe liegt, gehört zu
+	// einer früheren Frage (siehe promptInput).
+	promptInput().discardPending()
 	fmt.Printf("  Tracks to extract (%s, e.g. 1,3): ", hint)
 	emitQuestion(questionKindTracks, srcPath, hint, labels)
 
@@ -619,7 +621,7 @@ func promptTrackSelection(streams *ffprobeOutput, allowStereo bool, srcPath stri
 	// -json mode (see eventQuestion): a front-end shows its selection dialog
 	// without a running clock. If the input ends instead (console closed,
 	// front-end gone), ReadString returns at once and all tracks are kept.
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := promptInput().readLine(0, true)
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, nil, nil

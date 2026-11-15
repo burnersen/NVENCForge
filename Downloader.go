@@ -191,6 +191,16 @@ func downloadFFmpeg(targetDir string) error {
 		"bin/ffprobe.exe": filepath.Join(targetDir, "ffprobe.exe"),
 	}
 	extracted := 0
+	// Entpackt wird erst NEBEN das Ziel (".part") und am Ende eingesetzt. Ein
+	// Abbruch mittendrin — Fenster zu, Platte voll — ließ bis 2.2.3 eine halbe
+	// ffmpeg.exe zurück. Die galt beim nächsten Start als vorhanden und wurde
+	// benutzt; die Meldung dazu riet dann auch noch vom erneuten Laden ab.
+	var parts []string
+	defer func() {
+		for _, part := range parts {
+			_ = os.Remove(part)
+		}
+	}()
 
 	for _, f := range zr.File {
 		// The archive contains a top-level directory, e.g.:
@@ -218,7 +228,9 @@ func downloadFFmpeg(targetDir string) error {
 			return fmt.Errorf("Downloader.go: downloadFFmpeg (mkdir): %w", err)
 		}
 
-		out, err := os.Create(destPath)
+		partPath := destPath + ".part"
+		parts = append(parts, partPath)
+		out, err := os.Create(partPath)
 		if err != nil {
 			_ = rc.Close()
 			_ = spinner.Stop()
@@ -231,8 +243,12 @@ func downloadFFmpeg(targetDir string) error {
 			_ = spinner.Stop()
 			return fmt.Errorf("Downloader.go: downloadFFmpeg (extract %q): %w", filepath.Base(destPath), err)
 		}
-		_ = out.Close()
+		closeErr := out.Close()
 		_ = rc.Close()
+		if closeErr != nil {
+			_ = spinner.Stop()
+			return fmt.Errorf("Downloader.go: downloadFFmpeg (finish %q): %w", filepath.Base(destPath), closeErr)
+		}
 		extracted++
 		spinner.UpdateText(dlSpinnerText("Extracted: %s", filepath.Base(destPath)))
 	}
@@ -244,6 +260,13 @@ func downloadFFmpeg(targetDir string) error {
 	}
 	if extracted < 2 {
 		return fmt.Errorf("Downloader.go: downloadFFmpeg: only %d of 2 executables found in archive", extracted)
+	}
+
+	// Beide Dateien sind vollständig: erst jetzt bekommen sie ihren Namen.
+	for _, destPath := range targets {
+		if err := replaceFile(destPath+".part", destPath); err != nil {
+			return fmt.Errorf("Downloader.go: downloadFFmpeg (install %q): %w", filepath.Base(destPath), err)
+		}
 	}
 
 	pOK.Println("FFmpeg auto-download complete: ffmpeg.exe + ffprobe.exe installed.")

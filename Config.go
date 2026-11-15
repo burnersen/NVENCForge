@@ -440,7 +440,7 @@ func resetInvalidConfigLines(path string, invalids []invalidSetting) error {
 	if crlf {
 		out = strings.ReplaceAll(out, "\n", "\r\n")
 	}
-	return os.WriteFile(path, []byte(out), 0644)
+	return writeFileAtomic(path, []byte(out), 0644)
 }
 
 // parseAppConfig liest mit Bounds-Checking. Jeder ungültige Wert wird als
@@ -1179,7 +1179,7 @@ Example:  extraFilenameChars=-_'`)
 
 // writeDefaultAppConfig legt die INI neu an — nur beim allerersten Start.
 func writeDefaultAppConfig(path string) error {
-	if err := os.WriteFile(path, []byte(buildDefaultConfigText()), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(buildDefaultConfigText()), 0644); err != nil {
 		return fmt.Errorf("Config.go: writeDefaultAppConfig: %w", err)
 	}
 	return nil
@@ -1499,7 +1499,7 @@ func updateConfigEntries(path string) (configUpdate, error) {
 	if err := os.WriteFile(path+configBackupSuffix, content, 0644); err != nil {
 		return configUpdate{}, fmt.Errorf("Config.go: updateConfigEntries (backup): %w", err)
 	}
-	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(updated), 0644); err != nil {
 		return configUpdate{}, fmt.Errorf("Config.go: updateConfigEntries (write): %w", err)
 	}
 	return update, nil

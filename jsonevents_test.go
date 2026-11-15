@@ -460,6 +460,9 @@ func TestReadLineTimeoutWaitsWhenUnlimited(t *testing.T) {
 		os.Stdin = prev
 		_ = r.Close()
 	})
+	// Der eine Leser der Eingabe entsteht nur einmal; für diese Prüfung muss
+	// er auf der umgeleiteten Eingabe neu entstehen.
+	resetPromptInput(t)
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)

@@ -594,3 +594,64 @@ func isLockOwnerAlive(info lockInfo) bool {
 	}
 	return true
 }
+
+// ----------------------------------------------------------------------------
+// writeFileAtomic: eine Datei in einem Stück ersetzen
+// ----------------------------------------------------------------------------
+
+// Wie oft und in welchem Abstand das Einsetzen wiederholt wird. Windows lässt
+// eine Datei nicht ersetzen, solange ein anderer Prozess sie zum Lesen offen
+// hat — und genau das ist hier der Normalfall: Die Oberfläche startet bis zu
+// drei Konverter gleichzeitig, und jeder liest beim Start die INI. So ein
+// Lesen dauert Millisekunden, ein paar Versuche reichen.
+const (
+	atomicReplaceTries = 10
+	atomicReplacePause = 50 * time.Millisecond
+)
+
+// writeFileAtomic schreibt data erst in eine Datei NEBEN dem Ziel und setzt
+// sie dann mit einem einzigen Umbenennen ein. Wer das Ziel währenddessen
+// liest, sieht entweder die alte oder die neue Fassung, nie eine halbe.
+//
+// Bis 2.2.3 wurde direkt ins Ziel geschrieben. Zwei Fälle gingen damit schief:
+// ein abgebrochener FFmpeg-Download ließ eine halbe ffmpeg.exe zurück, die
+// beim nächsten Start benutzt wurde, und ein Konverter, der die INI gerade
+// ergänzte, konnte einem gleichzeitig startenden eine halbe Datei hinlegen —
+// der rechnete dann für diese eine Datei mit Standardwerten.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("SysUtils.go: writeFileAtomic (temp file): %w", err)
+	}
+	tmpPath := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	if writeErr == nil {
+		writeErr = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("SysUtils.go: writeFileAtomic (write): %w", writeErr)
+	}
+	_ = os.Chmod(tmpPath, perm)
+	if err := replaceFile(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// replaceFile setzt newPath an die Stelle von path. Scheitert das Umbenennen,
+// weil das Ziel gerade gelesen wird, wird kurz gewartet und wiederholt.
+func replaceFile(newPath, path string) error {
+	var err error
+	for attempt := 0; attempt < atomicReplaceTries; attempt++ {
+		if err = os.Rename(newPath, path); err == nil {
+			return nil
+		}
+		time.Sleep(atomicReplacePause)
+	}
+	return fmt.Errorf("SysUtils.go: replaceFile: %w", err)
+}

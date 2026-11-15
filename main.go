@@ -41,6 +41,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -51,7 +52,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "2.2.3"
+const appVersion = "2.2.4"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -700,6 +701,15 @@ func reportFFmpegStartFailure(reason string) {
 	os.Exit(1)
 }
 
+// nvencProbePixFmt ist das Bildformat des Probelaufs: p010le trägt 10 Bit,
+// nv12 ist das 8-Bit-Gegenstück, das jede NVENC-Karte annimmt.
+func nvencProbePixFmt() string {
+	if eightBitActive {
+		return "nv12"
+	}
+	return "p010le"
+}
+
 // checkHardwareCapabilities probes with the SAME flags the real encode uses, so a
 // card that passes here cannot fail later on every file.
 //
@@ -711,13 +721,21 @@ func reportFFmpegStartFailure(reason string) {
 // guesswork for every card that cannot be tested here, and it would age with
 // each new generation. The card itself always knows the truth.
 func checkHardwareCapabilities() error {
-	pInfo.Println("Checking GPU capabilities (NVENC HEVC 10-bit)...")
+	// Geprüft wird in der Bittiefe, in der auch kodiert wird. Bis 2.2.3 stand
+	// hier fest "main10": eine Karte, die H.265 nur in 8 Bit kann (GTX 950/960),
+	// fiel damit durch und wurde auf den Prozessor geschickt — auch wenn 8 Bit
+	// eingestellt war und sie die Arbeit hätte machen können.
+	depthLabel := "10-bit"
+	if eightBitActive {
+		depthLabel = "8-bit"
+	}
+	pInfo.Printf("Checking GPU capabilities (NVENC HEVC %s)...\n", depthLabel)
 
 	tryEncode := func(p nvencProbe) (string, error) {
 		args := []string{
 			"-v", "error", "-f", "lavfi",
 			"-i", "color=c=black:s=1920x1080:d=1",
-			"-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le",
+			"-c:v", "hevc_nvenc", "-profile:v", hevcProfileName(), "-pix_fmt", nvencProbePixFmt(),
 			"-preset", appSettings.nvencPreset, "-tune", "hq",
 			"-rc-lookahead", strconv.Itoa(p.lookahead),
 			"-spatial-aq", "1",
@@ -781,7 +799,7 @@ func checkHardwareCapabilities() error {
 	if name := nvidiaCardName(); name != "" {
 		pOK.Printf("GPU ready: %s\n", pterm.LightCyan(name))
 	} else {
-		pOK.Println("GPU ready (NVENC HEVC 10-bit).")
+		pOK.Printf("GPU ready (NVENC HEVC %s).\n", depthLabel)
 	}
 	return nil
 }
@@ -961,33 +979,132 @@ func askYesNoTimeout(question string, timeout time.Duration, defaultYes bool) bo
 	if defaultYes {
 		suffix = "(Y/n)"
 	}
+	promptInput().discardPending()
 	fmt.Printf("  %s %s, continuing in %.0f s: ", question, suffix, timeout.Seconds())
 
-	answer := make(chan string, 1)
-	go func() {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			// Kein lesbares stdin (umgeleitet/geschlossen): wie Zeitablauf
-			// behandeln, damit der Lauf nicht stumm hängen bleibt.
-			return
-		}
-		answer <- strings.TrimSpace(strings.ToLower(line))
-	}()
-
-	select {
-	case a := <-answer:
-		switch a {
-		case "y", "yes", "j", "ja":
-			return true
-		case "n", "no", "nein":
-			return false
-		default:
-			return defaultYes // Enter oder Unsinn: Vorgabe gilt
-		}
-	case <-time.After(timeout):
+	// Kein lesbares stdin (umgeleitet/geschlossen) zählt hier wie ein
+	// Zeitablauf: die volle Bedenkzeit läuft, dann gilt die Vorgabe.
+	line, answered := promptInput().readLine(timeout, false)
+	if !answered {
 		fmt.Println()
 		return defaultYes
 	}
+	switch strings.TrimSpace(strings.ToLower(line)) {
+	case "y", "yes", "j", "ja":
+		return true
+	case "n", "no", "nein":
+		return false
+	default:
+		return defaultYes // Enter oder Unsinn: Vorgabe gilt
+	}
+}
+
+// ----------------------------------------------------------------------------
+// promptInput: EINE Stelle liest die Eingabe
+//
+// Bis 2.2.3 las jede Rückfrage mit einem eigenen Leser, und der blieb nach
+// einem Zeitablauf einfach stehen: Er wartete weiter auf eine Zeile und
+// schluckte dann die Antwort, die für die NÄCHSTE Frage gedacht war.
+//
+//   - Auf der Konsole: Spurauswahl von -mp4 bei der ersten Datei verpasst,
+//     und die Eingabe bei der zweiten ging ins Leere.
+//   - Vor einer Oberfläche schlimmer: Dort endet die Eingabe nie von selbst.
+//     Lief die Frage "auf dem Prozessor weitermachen?" ab, nahm ihr Leser der
+//     Spurauswahl die Antwort weg — und die wartet im -json-Modus unbegrenzt.
+//
+// Jetzt gibt es genau einen Leser für die ganze Laufzeit. Er reicht jede
+// Zeile weiter, und wer fragt, holt sie sich dort ab.
+// ----------------------------------------------------------------------------
+
+// promptLineBacklog: so viele Zeilen dürfen liegen bleiben, bevor der Leser
+// wartet. Mehr als eine ist schon die Ausnahme (siehe discardPending).
+const promptLineBacklog = 8
+
+// lineSource reicht die Zeilen einer Eingabe einzeln weiter.
+type lineSource struct {
+	lines  chan string
+	closed chan struct{} // zu, sobald die Eingabe endet oder nicht lesbar ist
+}
+
+// newLineSource startet den einen Leser auf input.
+func newLineSource(input io.Reader) *lineSource {
+	source := &lineSource{
+		lines:  make(chan string, promptLineBacklog),
+		closed: make(chan struct{}),
+	}
+	go func() {
+		reader := bufio.NewReader(input)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				close(source.closed)
+				return
+			}
+			source.lines <- line
+		}
+	}()
+	return source
+}
+
+// discardPending wirft weg, was vor einer Frage schon eingegeben wurde: die
+// zu spät gekommene Antwort auf eine abgelaufene Frage ist keine Antwort auf
+// die nächste. Gehört VOR die Ankündigung der Frage — danach könnte es
+// bereits die echte Antwort treffen.
+func (s *lineSource) discardPending() {
+	for {
+		select {
+		case <-s.lines:
+		default:
+			return
+		}
+	}
+}
+
+// readLine wartet auf die nächste Zeile. timeout <= 0 heißt unbegrenzt.
+// ok=false heißt "keine Antwort". Mit giveUpWhenClosed endet das Warten
+// sofort, wenn die Eingabe gar nicht lesbar ist — sonst läuft die Bedenkzeit
+// trotzdem ab. Ohne Zeitlimit wird bei geschlossener Eingabe immer
+// aufgegeben: sonst gäbe es kein Ende mehr.
+func (s *lineSource) readLine(timeout time.Duration, giveUpWhenClosed bool) (line string, ok bool) {
+	// Ein nil-Kanal liefert nie etwas: so bleibt ein Zweig einfach stumm.
+	var expired <-chan time.Time
+	if timeout > 0 {
+		expired = time.After(timeout)
+	}
+	closed := s.closed
+	if !giveUpWhenClosed && timeout > 0 {
+		closed = nil // die Bedenkzeit läuft trotzdem ab
+	}
+	// Eine schon eingegangene Zeile gewinnt gegen "Eingabe zu".
+	select {
+	case line = <-s.lines:
+		return line, true
+	default:
+	}
+	select {
+	case line = <-s.lines:
+		return line, true
+	case <-closed:
+		return "", false
+	case <-expired:
+		return "", false
+	}
+}
+
+var (
+	promptInputMu     sync.Mutex
+	promptInputSource *lineSource
+)
+
+// promptInput liefert den einen Leser der Tastatur. Er entsteht erst mit der
+// ersten Frage: ein Lauf ohne Rückfrage liest nie von der Eingabe.
+func promptInput() *lineSource {
+	promptInputMu.Lock()
+	defer promptInputMu.Unlock()
+	if promptInputSource == nil {
+		promptInputSource = newLineSource(os.Stdin)
+	}
+	return promptInputSource
 }
 
 // ----------------------------------------------------------------------------
@@ -1485,8 +1602,9 @@ func waitForEnter() {
 	if jsonMode {
 		return
 	}
+	promptInput().discardPending()
 	fmt.Print("\nPress Enter to exit...")
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	_, _ = promptInput().readLine(0, true)
 }
 
 func formatDuration(seconds float64) string {

@@ -49,6 +49,7 @@ type convJob struct {
 	audioStreams  []AudioStreamInfo
 	subCodecs     []string
 	sourceTag     string // value for the sourceTagKey metadata (origin file name)
+	outputRate    string // "num/den" für -r; nur gesetzt, wenn die Bildrate nachgezählt wurde (countedFrameRate)
 }
 
 // staleStatsTagArgs deletes the per-track statistics tags (BPS,
@@ -182,6 +183,12 @@ func (j convJob) buildConvertArgs() []string {
 	}
 	a = append(a, j.vfOpts...)
 	a = append(a, j.nvencOpts...)
+	// Nur wenn die Bildrate der Quelle nachgezählt werden musste: FFmpeg nähme
+	// sonst die Angabe des Containers, und "-fps_mode cfr" füllte dann wirklich
+	// auf 1000 Bilder pro Sekunde auf (siehe countedFrameRate).
+	if j.outputRate != "" {
+		a = append(a, "-r", j.outputRate)
+	}
 	if j.noAudio {
 		a = append(a, "-an")
 	} else if j.pureAudioCopy {
@@ -1162,6 +1169,9 @@ func processFile(ctx context.Context, cfg *AppConfig, filePath string, idx, tota
 		subCodecs:    stats.SubCodecs,
 		sourceTag:    srcID,
 	}
+	if stats.FPSCounted {
+		baseJob.outputRate = fmt.Sprintf("%d/%d", stats.FPSNum, stats.FPSDen)
+	}
 	// Nur ein echtes Umwandeln entpackt überhaupt Bilder; beim Remux werden die
 	// Spuren nur umkopiert, da gibt es nichts zu beschleunigen.
 	if doConvert {
@@ -1589,8 +1599,107 @@ func pickFrameRate(avgRate, realRate string) (num, den int, note string) {
 	return num, den, ""
 }
 
-func getVideoStats(ctx context.Context, filePath string) (*VideoStats, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+// frameRateCountTimeout begrenzt das Nachzählen der Bilder. Gelesen wird die
+// ganze Datei, entpackt aber nichts — auch ein langer Film ist in Sekunden
+// durch, zwei Minuten sind die Reserve für ein träges Netzlaufwerk.
+const frameRateCountTimeout = 2 * time.Minute
+
+// commonFrameRates sind die Bildraten, auf die ein nachgezählter Wert
+// einrastet. Gezählt kommt nie genau 25 heraus, sondern 24,99 — und eine
+// krumme Rate wäre für jeden Player die schlechtere Angabe.
+var commonFrameRates = [][2]int{
+	{24000, 1001}, {24, 1}, {25, 1}, {30000, 1001}, {30, 1},
+	{50, 1}, {60000, 1001}, {60, 1},
+}
+
+// frameRateSnapTolerance: so nah muss der gezählte Wert an einer üblichen
+// Bildrate liegen, um auf sie einzurasten (1 %). 23,976 und 24 liegen nur
+// 0,1 % auseinander — dort gewinnt die nähere, siehe frameRateFromPacketCount.
+const frameRateSnapTolerance = 0.01
+
+// frameRateFromPacketCount rechnet aus Bildanzahl und Laufzeit die echte
+// durchschnittliche Bildrate aus. ok ist false, wenn dabei nichts Brauchbares
+// herauskommt — dann bleibt der Aufrufer bei dem, was er hatte.
+func frameRateFromPacketCount(packets int, durationSec float64) (num, den int, ok bool) {
+	if packets <= 0 || durationSec <= 0 {
+		return 0, 0, false
+	}
+	fps := float64(packets) / durationSec
+	if fps < 1 || fps > frameRateImplausibleFPS {
+		return 0, 0, false
+	}
+	best, bestDiff := -1, frameRateSnapTolerance
+	for i, rate := range commonFrameRates {
+		common := float64(rate[0]) / float64(rate[1])
+		if diff := math.Abs(fps-common) / common; diff < bestDiff {
+			best, bestDiff = i, diff
+		}
+	}
+	if best >= 0 {
+		return commonFrameRates[best][0], commonFrameRates[best][1], true
+	}
+	return int(math.Round(fps * 1000)), 1000, true
+}
+
+// countVideoPackets zählt die Bilder der ersten echten Videospur, ohne sie zu
+// entpacken.
+func countVideoPackets(ctx context.Context, filePath string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, frameRateCountTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "error", "-select_streams", "V:0", "-count_packets",
+		"-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", filePath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("Converter.go: countVideoPackets: %w", err)
+	}
+	// csv hängt bei manchen Containern ein Komma an ("200,").
+	field := strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), ",", 2)[0])
+	packets, err := strconv.Atoi(field)
+	if err != nil {
+		return 0, fmt.Errorf("Converter.go: countVideoPackets: unexpected answer %q", field)
+	}
+	return packets, nil
+}
+
+// countedFrameRate ist der letzte Ausweg, wenn ffprobe keine glaubwürdige
+// Bildrate liefert: Bilder zählen und durch die Laufzeit teilen.
+//
+// Anlass ist eine Zuschrift (2026-11): ältere WMV-Dateien wurden als 1000 fps
+// erkannt. ASF rechnet in Millisekunden, und bei unregelmäßigen Zeitstempeln
+// meldet ffprobe als r_frame_rate genau diese Zeitbasis (1000/1) und als
+// avg_frame_rate gar nichts (0/0). pickFrameRate hat dann keinen Durchschnitt,
+// auf den es umstellen könnte. Nachgestellt und gemessen: aus 200 Bildern in
+// 8 Sekunden schrieb der Encode 7991 — "-fps_mode cfr" füllt auf die
+// gemeldete Rate auf — und die Datei wurde 13-mal so groß.
+//
+// Gezählt wird NUR, wenn die Bildrate nach pickFrameRate noch unglaubwürdig
+// hoch ist; jede andere Datei kostet das keine Millisekunde. Echtes
+// Hochgeschwindigkeitsmaterial bleibt unberührt: dort bestätigt das Zählen
+// die hohe Rate, und frameRateFromPacketCount lehnt sie als Ersatz ab.
+func countedFrameRate(ctx context.Context, filePath string, s *VideoStats) {
+	if s.FPSNum <= 0 || s.FPSDen <= 0 ||
+		float64(s.FPSNum)/float64(s.FPSDen) <= frameRateImplausibleFPS {
+		return
+	}
+	packets, err := countVideoPackets(ctx, filePath)
+	if err != nil {
+		return // der Hinweis aus pickFrameRate steht bereits in FPSNote
+	}
+	num, den, ok := frameRateFromPacketCount(packets, s.DurationSec)
+	if !ok {
+		return
+	}
+	s.FPSNote = fmt.Sprintf(
+		"the container claims %.2f fps, counting the frames gives %.2f fps — measurement and encode use the counted rate",
+		float64(s.FPSNum)/float64(s.FPSDen), float64(num)/float64(den))
+	s.FPSNum, s.FPSDen, s.FPSCounted = num, den, true
+}
+
+func getVideoStats(parent context.Context, filePath string) (*VideoStats, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffprobePath,
@@ -1672,6 +1781,9 @@ func getVideoStats(ctx context.Context, filePath string) (*VideoStats, error) {
 		s.BitrateBps, _ = strconv.ParseInt(p.Format.BitRate, 10, 64)
 	}
 	s.DurationSec, _ = strconv.ParseFloat(p.Format.Duration, 64)
+	// Mit dem Rahmen des Aufrufers, nicht mit den 30 Sekunden der Probe: das
+	// Nachzählen liest die ganze Datei und hat sein eigenes Zeitlimit.
+	countedFrameRate(parent, filePath, s)
 	// Origin tag NVENCForge stamps into its own outputs (case-insensitive: the
 	// Matroska muxer may upper-case the key). Used by the skip check to separate
 	// a real resume from a name collision.

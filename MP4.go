@@ -16,7 +16,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -159,6 +158,9 @@ func chooseMP4Tracks(streams *ffprobeOutput, srcPath string) mp4TrackSelection {
 		labels = append(labels, e.label)
 	}
 	timeout := trackPromptTimeout()
+	// Vor der Ankündigung: was jetzt noch in der Eingabe liegt, gehört zu
+	// einer früheren Frage (siehe promptInput).
+	promptInput().discardPending()
 	if timeout > 0 {
 		fmt.Printf("  Tracks for the MP4 (Enter = all, e.g. 1,3; all after %.0f s): ",
 			timeout.Seconds())
@@ -209,30 +211,7 @@ func chooseMP4Tracks(streams *ffprobeOutput, srcPath string) mp4TrackSelection {
 // bei einem Stapel über einen ganzen Ordner wären das sonst 30 Sekunden
 // Leerlauf pro Datei, ohne dass jemand antworten könnte.
 func readLineTimeout(timeout time.Duration) (string, bool) {
-	answer := make(chan string, 1)
-	unreadable := make(chan struct{})
-	go func() {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			close(unreadable)
-			return
-		}
-		answer <- line
-	}()
-	// timeout <= 0 heißt „unbegrenzt warten". Ein nil-Kanal liefert nie etwas,
-	// deshalb bleibt der Zeitzweig dann einfach für immer stumm.
-	var expired <-chan time.Time
-	if timeout > 0 {
-		expired = time.After(timeout)
-	}
-	select {
-	case a := <-answer:
-		return a, true
-	case <-unreadable:
-		return "", false
-	case <-expired:
-		return "", false
-	}
+	return promptInput().readLine(timeout, true)
 }
 
 // trackPromptTimeout liefert die Bedenkzeit für die Spurauswahl.

@@ -446,9 +446,9 @@ const questionKindTracks = "tracks"
 // Schließt sie die Eingabe stattdessen, gilt wie bisher „alle Spuren".
 //
 // Zweite Bedingung an die Gegenseite: immer nur EINE Antwort schicken, und erst
-// nach dieser Ankündigung. Jede Frage-Stelle liest mit einem eigenen Puffer —
-// eine Antwort auf Vorrat bliebe dort liegen und wäre für die nächste Frage
-// verloren.
+// nach dieser Ankündigung. Was vorher schon in der Eingabe liegt, wird vor
+// jeder Frage verworfen (promptInput in main.go) — eine Antwort auf Vorrat
+// käme also nie an.
 type eventQuestion struct {
 	Ev      string           `json:"ev"`   // "question"
 	Kind    string           `json:"kind"` // derzeit immer "tracks"

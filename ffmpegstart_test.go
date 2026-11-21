@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -107,6 +108,78 @@ func TestFFmpegStartFailureRecognisesSystemAbort(t *testing.T) {
 	}
 	if !strings.Contains(reason, "0xC0000139") {
 		t.Errorf("Die Meldung nennt den Abbruchcode nicht: %q", reason)
+	}
+}
+
+// avErrorExternal ist der Exit-Code aus #8 (GTX 1650): AVERROR_EXTERNAL
+// (-542398533), wie Windows ihn als vorzeichenlose Zahl ausliest. FFmpeg
+// endet damit, wenn hevc_nvenc die Einstellung ablehnt ("No capable devices
+// found"), und der Wert liegt oberhalb von winNTStatusFailureBase.
+const avErrorExternal = 0xDFABA7BB
+
+// TestFFmpegStartVerdictEncoderErrorIsNotSystemAbort ist der gemeldete Fall
+// selbst: der Probelauf endet mit einem hohen Code, FFmpeg startet aber. Das
+// ist ein Encoder-Fehler, und der Aufrufer muss bei seiner eigenen Meldung
+// bleiben — sonst kommt die Abstufung für ältere Karten nie zum Zug.
+func TestFFmpegStartVerdictEncoderErrorIsNotSystemAbort(t *testing.T) {
+	err := runExitHelper(t, avErrorExternal)
+	if err == nil {
+		t.Fatal("Hilfsprozess lief unerwartet durch")
+	}
+	if _, looksLikeNT := ntStatusExitCode(err); !looksLikeNT {
+		t.Fatal("Voraussetzung verfehlt: der Code sollte oberhalb der NTSTATUS-Grenze liegen")
+	}
+	asked := false
+	reason := ffmpegStartVerdict(err, func() error {
+		asked = true
+		return nil
+	})
+	if !asked {
+		t.Error("Bei einem unbekannten hohen Code wurde FFmpeg nicht gegengeprüft")
+	}
+	if reason != "" {
+		t.Errorf("Ein Encoder-Fehler wurde als Systemabbruch gemeldet: %q", reason)
+	}
+}
+
+// TestFFmpegStartVerdictKnownLoaderFailureSkipsVersionCheck hält fest, dass
+// der eindeutige Fall weiterhin nichts kostet: ein bekannter Ladefehler
+// braucht keine Gegenprobe.
+func TestFFmpegStartVerdictKnownLoaderFailureSkipsVersionCheck(t *testing.T) {
+	err := runExitHelper(t, 0xC0000139)
+	if err == nil {
+		t.Fatal("Hilfsprozess lief unerwartet durch")
+	}
+	reason := ffmpegStartVerdict(err, func() error {
+		t.Error("Für einen bekannten Ladefehler wurde FFmpeg unnötig gestartet")
+		return nil
+	})
+	if !strings.Contains(reason, "STATUS_ENTRYPOINT_NOT_FOUND") {
+		t.Errorf("Der bekannte Ladefehler wurde nicht gemeldet: %q", reason)
+	}
+}
+
+// TestFFmpegStartVerdictVersionCheckDecides deckt die andere Seite ab: ein
+// hoher Code, bei dem auch 'ffmpeg -version' scheitert, ist ein echtes
+// Startproblem, ob mit Abbruchcode oder ganz ohne Antwort.
+func TestFFmpegStartVerdictVersionCheckDecides(t *testing.T) {
+	probeErr := runExitHelper(t, avErrorExternal)
+	if probeErr == nil {
+		t.Fatal("Hilfsprozess lief unerwartet durch")
+	}
+
+	aborted := ffmpegStartVerdict(probeErr, func() error {
+		return runExitHelper(t, 0xC0000005)
+	})
+	if !strings.Contains(aborted, "0xC0000005") {
+		t.Errorf("Der Abbruchcode der Gegenprobe fehlt in der Meldung: %q", aborted)
+	}
+
+	silent := ffmpegStartVerdict(probeErr, func() error {
+		return errors.New("file does not exist")
+	})
+	if !strings.Contains(silent, "does not even answer") {
+		t.Errorf("Ein FFmpeg ohne Antwort wurde nicht gemeldet: %q", silent)
 	}
 }
 

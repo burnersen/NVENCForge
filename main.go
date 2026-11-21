@@ -52,7 +52,7 @@ import (
 
 // appVersion is shown in the startup header so the running build is obvious.
 // Keep it in sync with the git tag / GitHub release on every release.
-const appVersion = "2.2.4"
+const appVersion = "2.2.5"
 
 // ----------------------------------------------------------------------------
 // Package-level sentinels and tool paths (set once in initTools, read-only after)
@@ -592,15 +592,28 @@ type nvencProbe struct {
 // ----------------------------------------------------------------------------
 
 // Windows bricht einen Prozess, den es selbst nicht ausführen kann, mit einem
-// NTSTATUS-Code ab; diese Codes liegen alle oberhalb dieser Grenze. FFmpeg
-// dagegen beendet sich bei eigenen Fehlern mit kleinen Werten (üblicherweise
-// 1). Ein Exit-Code oberhalb der Grenze heißt deshalb: nicht das Programm hat
-// abgelehnt, sondern Windows hat es gar nicht erst laufen lassen.
+// NTSTATUS-Code ab; diese Codes liegen alle oberhalb dieser Grenze.
+//
+// Die Grenze allein beweist aber nichts. Bis 2.2.4 galt jeder Code darüber als
+// Systemabbruch, und das war falsch: FFmpeg beendet sich bei eigenen Fehlern
+// mit seinem AVERROR-Wert, und der ist negativ. Windows liest ihn als
+// vorzeichenlose Zahl, und die landet ebenfalls oberhalb der Grenze.
+// AVERROR_EXTERNAL (-542398533) wird so zu 0xDFABA7BB. Gemeldet auf GitHub
+// (#8, 2026-11-15, GTX 1650): Die Karte lehnte die volle Einstellung ab, wie
+// jede ältere Karte es tut, und das Programm erklärte daraufhin, FFmpeg starte
+// auf diesem Windows nicht. Die Abstufung in probeNVENCFeatures, die genau
+// für diese Karte da ist, kam nie zum Zug.
+//
+// Ein Code oberhalb der Grenze ist deshalb nur ein Verdacht. Sicher ist er
+// allein bei den Ladefehlern in winNTStatusNames; alles andere entscheidet die
+// Gegenprobe in ffmpegStartVerdict.
 const winNTStatusFailureBase uint32 = 0xC0000000
 
 // Die NTSTATUS-Codes, die bei einem für das System zu neuen FFmpeg-Build
-// wirklich vorkommen. Für alles andere wird nur die Zahl gezeigt, statt einen
-// Namen zu raten.
+// wirklich vorkommen. Sie entstehen beim Laden, bevor FFmpeg eine einzige
+// eigene Zeile ausführt, und können deshalb nie ein AVERROR-Wert sein: nur
+// sie gelten ohne Gegenprobe als Systemabbruch. Für alle anderen Codes wird
+// nur die Zahl gezeigt, statt einen Namen zu raten.
 var winNTStatusNames = map[uint32]string{
 	0xC000007B: "STATUS_INVALID_IMAGE_FORMAT (32-bit / 64-bit mismatch)",
 	0xC0000135: "STATUS_DLL_NOT_FOUND (a required system library is missing)",
@@ -608,8 +621,9 @@ var winNTStatusNames = map[uint32]string{
 }
 
 // ntStatusFromExitCode entscheidet allein anhand des Exit-Codes, ob Windows
-// den Prozess abgebrochen hat. Getrennt von ntStatusExitCode gehalten, weil so
-// die eigentliche Regel ohne echten Prozess prüfbar bleibt.
+// den Prozess abgebrochen haben KÖNNTE (siehe winNTStatusFailureBase: ein
+// AVERROR von FFmpeg sieht genauso aus). Getrennt von ntStatusExitCode
+// gehalten, weil so die eigentliche Regel ohne echten Prozess prüfbar bleibt.
 //
 // Negative Codes bedeuten "durch ein Signal beendet" (etwa der eigene Abbruch
 // über Strg+C) und sind kein Systemproblem. Die Umdeutung nach uint32 ist
@@ -656,12 +670,29 @@ func describeNTStatus(status uint32) string {
 // unklar, folgt eine Gegenprobe mit dem billigsten Aufruf, den FFmpeg kennt.
 // Beides läuft NUR im Fehlerfall, im Normalbetrieb wird hier nichts gestartet.
 func ffmpegStartFailure(probeErr error) string {
+	return ffmpegStartVerdict(probeErr, func() error {
+		version := exec.Command(ffmpegPath, "-hide_banner", "-version")
+		version.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
+		return version.Run()
+	})
+}
+
+// ffmpegStartVerdict ist die Regel hinter ffmpegStartFailure, mit der
+// Gegenprobe als Parameter. Getrennt gehalten, damit sich gerade der Fall aus
+// #8 (hoher Code, FFmpeg läuft aber) ohne echtes FFmpeg prüfen lässt.
+//
+// Nur ein bekannter Ladefehler macht die Gegenprobe überflüssig. Jeder andere
+// hohe Code kann ebenso gut ein AVERROR von FFmpeg selbst sein; ob FFmpeg
+// wirklich nicht startet, zeigt dann erst 'ffmpeg -version'. Scheitert auch
+// das, zählt dort jeder hohe Code: ein bloßes -version endet nicht mit einem
+// Encoder-Fehler.
+func ffmpegStartVerdict(probeErr error, versionCheck func() error) string {
 	if status, ok := ntStatusExitCode(probeErr); ok {
-		return describeNTStatus(status)
+		if _, loader := winNTStatusNames[status]; loader {
+			return describeNTStatus(status)
+		}
 	}
-	version := exec.Command(ffmpegPath, "-hide_banner", "-version")
-	version.SysProcAttr = &syscall.SysProcAttr{CreationFlags: winCREATE_NO_WINDOW}
-	if err := version.Run(); err != nil {
+	if err := versionCheck(); err != nil {
 		if status, ok := ntStatusExitCode(err); ok {
 			return describeNTStatus(status)
 		}
@@ -767,7 +798,12 @@ func checkHardwareCapabilities() error {
 		// Abklappern der Kartenmerkmale wären dann nur ein Dutzend weiterer
 		// Fehlstarts — mit Meldungen ("GPU does not support Temporal AQ"),
 		// die über die Karte gar nichts aussagen.
-		if _, systemLevel := ntStatusExitCode(err); systemLevel {
+		//
+		// Entschieden wird mit derselben Gegenprobe wie beim Aufrufer, nicht
+		// am Exit-Code allein: Bis 2.2.4 stand hier nur der Grenzwert, und
+		// eine GTX 1650, die bloß die B-Frames ablehnte, wurde als "FFmpeg
+		// startet nicht" abgewiesen (#8).
+		if ffmpegStartFailure(err) != "" {
 			return err
 		}
 		if err := probeNVENCFeatures(tryEncode); err != nil {

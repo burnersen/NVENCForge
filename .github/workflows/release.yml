@@ -61,7 +61,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          # Deliberately NOT go-version-file: the "go 1.22" line in go.mod is
+          # Deliberately NOT go-version-file: the "go" line in go.mod is
           # the oldest toolchain the sources compile with, not the one a
           # release should ship. Following it would hand users binaries built
           # by a Go that no longer gets security fixes - and this program

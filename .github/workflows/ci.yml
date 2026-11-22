@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          # Not go-version-file: "go 1.22" in go.mod is the oldest toolchain the
+          # Not go-version-file: the "go" line in go.mod is the oldest toolchain the
           # sources compile with, not the one releases ship. Checking only
           # against it would let problems with current Go versions through.
           go-version: 'stable'

@@ -77,7 +77,6 @@ sg="$GUARD_STABLE_GOROOT"; command -v cygpath >/dev/null && sg=$(cygpath -u "$sg
 export PATH="$sg/bin:$PATH"
 newgo=$(go env GOVERSION); newgo="${newgo#go}"
 log "updating with Go $newgo"
-oldgo_line=""
 if [ -n "$std_ids" ]; then
   if [ "$GUARD_GO" = gomod ]; then
     for d in $GUARD_MODULES; do sed -i -E "s/^go [0-9][0-9.]*\$/go $newgo/" "$d/go.mod"; done
@@ -95,7 +94,7 @@ for d in $GUARD_MODULES; do
   (cd "$d" && go mod tidy)
 done
 for m in $mods; do
-  v=$(cd "$(echo $GUARD_MODULES | awk '{print $1}')" && go list -m -f '{{.Version}}' "$m" 2>/dev/null || true)
+  v=$(cd "$(echo "$GUARD_MODULES" | awk '{print $1}')" && go list -m -f '{{.Version}}' "$m" 2>/dev/null || true)
   [ -z "$v" ] && for d in $GUARD_MODULES; do v=$(cd "$d" && go list -m -f '{{.Version}}' "$m" 2>/dev/null || true); [ -n "$v" ] && break; done
   updated="$updated$m ${v#v}"$'\n'
 done

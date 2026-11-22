@@ -1,0 +1,67 @@
+# Security guard: once a day, looks for published security flaws in Go and
+# in the Go modules this program uses. If there is one, it updates, tests and
+# publishes a new patch version by itself (release notes included). If that
+# does not work, it publishes nothing and opens an issue instead.
+# Logic: .github/guard/guard.sh. Settings for this repo: the env block below.
+# Started by hand with "dry run", it shows what it would do and changes nothing.
+name: Security guard
+
+on:
+  schedule:
+    - cron: '13 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: show what would happen, change nothing'
+        type: boolean
+        default: true
+      simulate:
+        description: 'With dry run only: act as if Go had a flaw, to test the whole way'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: security-guard
+
+jobs:
+  guard:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GOTOOLCHAIN: local
+      GUARD_DRY: ${{ inputs.dry_run == true }}
+      GUARD_SIMULATE: ${{ inputs.simulate == true }}
+      GUARD_NAME: 'NVENCForge'
+      GUARD_MODULES: '.'
+      GUARD_GO: file
+      GUARD_TEST: 'go vet ./... && go test ./...'
+      GUARD_NOTES: '.github/release-notes/v{V}.md'
+      GUARD_RELEASE: 'tag=v{V},dry_run=false'
+      GUARD_LANG: en
+      GUARD_VERSION_SPOTS: |
+        main.go|const appVersion
+      GUARD_FOOTER: |
+        Update: replace `NVENCForge.exe` with the new one. Your settings stay. With NVENCForgeGUI: use the converter's update button.
+    steps:
+      - uses: actions/checkout@v5
+      # The newest Go, used for the update.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - run: echo "GUARD_STABLE_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+      # The Go the program ships with now, used for the scan.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/guard/go-version
+          cache: false
+      - run: bash .github/guard/guard.sh

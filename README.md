@@ -66,6 +66,8 @@ HDR-aware. Resilient. DaVinci-Resolve-ready. One EXE.
 
 ---
 
+> ⚠️ **Before you start:** NVENCForge is free hobby software without any warranty, and you use it at your own risk. Re-encoding is lossy: keep independent backups of anything irreplaceable. Details in the disclaimer at the end.
+
 ## ⚡ 30 seconds, no manual
 
 1. Download `NVENCForge.exe`, a single file with nothing to install.
@@ -149,7 +151,7 @@ The finished files land in an `output` subfolder, and each source that was conve
 - 🎚️ **Auto-CQ — the right quality level, measured per file.** Instead of one fixed CQ for everything, each file gets a quick VMAF-measured analysis that finds the quality level it actually needs — and it's honest about sources that are already compressed to death. Enabled by default; see [Auto-CQ](#auto-cq).
 - ⚡ **The picture stays on the graphics card.** 4K sources are decoded **and** downscaled on the GPU (NVDEC + `scale_cuda`, Lanczos) instead of being shuttled through system memory. Decoding is **bit-identical** — verified by comparing frame hashes, not by eyeballing it. Sources above a configurable bitrate ceiling stay on the CPU on purpose, and any decoder hiccup silently falls back.
 - 🌈 **HDR-aware.** HDR10 (PQ) and HLG are detected by their transfer function. Colour tags are copied straight from the source, **never fabricated** — a made-up value is exactly what has broken HDR conversions in the past.
-- 🛡️ **Safe with your files.** Originals move into an `originals` folder only *after* the output has been probed and validated — nothing is ever deleted. Existing files are never overwritten. Abort mid-encode? You keep a playable `.preview.mkv`.
+- 🛡️ **Careful with your files.** Originals move into an `originals` folder only *after* the output has been probed and validated. NVENCForge itself does not delete them and is built not to overwrite existing files. Abort mid-encode? You keep a playable `.preview.mkv`.
 - 🚦 **Resilient by design.** Per-file locks, a stall watchdog for frozen encodes, and a multi-stage fallback cascade (subs → no subs → AAC → video-only) so one broken stream doesn't take down a whole batch.
 - 👯 **Parallel out of the box.** Start the same command in two terminals; instances lock files individually and split the work automatically.
 - 🎛️ **DaVinci-Resolve-safe audio.** DTS, TrueHD, EAC3, FLAC, Opus & >5.1 layouts become AAC that Resolve actually imports — or stay 1:1 with `-copyaudio`.
@@ -383,7 +385,9 @@ NVENCForge is free and made in my spare time, on my own hardware and electricity
 
 ## ⚠️ Disclaimer
 
-NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care (your originals are never deleted, only moved into an `originals` folder after the output has been validated), but you use it **at your own risk**. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See sections 15 and 16 of the [license](LICENSE).
+NVENCForge is free hobby software, provided **"as is", without any warranty or condition of any kind**. It was built and tested with care, but you use it **at your own risk**. Keep independent backups of anything irreplaceable before you convert it: the `originals` folder is a safety net, not a backup.
+
+Where this README describes what NVENCForge does, checks or never does, that is how it is designed to work, not a promise or guarantee: software can have bugs, and systems, services and other programs do not always behave as expected. As far as the applicable law allows, the author is not liable for any damages or data loss arising from the use of this software. See sections 15 and 16 of the [license](LICENSE).
 
 ---
 
